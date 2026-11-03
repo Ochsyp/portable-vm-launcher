@@ -1,4 +1,4 @@
-# Copy this file to settings.psd1 in the same folder and fill in your stick's values. The
+# Copy this file to Launcher\settings.psd1 on the stick and fill in your stick's values. The
 # placeholders match no disk, so until then the launcher stops at its identity check.
 @{
     # Which program runs the VM:

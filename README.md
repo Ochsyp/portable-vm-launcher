@@ -6,8 +6,9 @@ A Windows launcher for a VM that lives on a USB stick and boots that stick as it
 the stick into a Windows PC that has VMware Workstation or VirtualBox, double-click
 `Start VM.cmd`, and the launcher starts the VM in whichever of the two is installed.
 
-> **Status:** this is the launcher as it ran before its redesign, imported with neutral names.
-> A hardening redesign follows in small pull requests. Until it lands, follow the rules under
+> **Status:** phase 1 of a hardening redesign. The launcher's checks and start steps now live in
+> a tested module, and what the launcher checks and does is unchanged from before the redesign.
+> More small pull requests follow. Until they land, follow the rules under
 > [Known limits](#known-limits).
 
 ## What it does
@@ -44,9 +45,12 @@ and the VM files:
 | Path on the Data partition | What it is |
 |---|---|
 | `Start VM.cmd` | The launcher to double-click |
-| `Launcher\Start-PortableVM.ps1` | The launcher script |
-| `Launcher\settings.psd1` | Your settings, copied from `settings.example.psd1` |
+| `Launcher\Start-PortableVM.ps1` | The script `Start VM.cmd` starts |
+| `Launcher\PortableVM.psm1` | The launcher's checks and start steps |
+| `Launcher\VERSION`, `Launcher\SHA256SUMS` | The deployed version and the hashes of its code, written by the deploy tool |
+| `Launcher\settings.psd1` | Your settings, copied from `examples\settings.example.psd1` |
 | `Launcher\launcher.log` | The log of every run |
+| `Launcher.previous\` | The launcher that the last deploy replaced |
 | `VMware\` | The VMware VM (`.vmx`) and its raw-disk descriptor |
 | `VirtualBox\` | The VirtualBox home: `VirtualBox.xml`, the VM folder and its descriptor |
 
@@ -58,9 +62,28 @@ and the VM files:
 
 ## Settings
 
-Copy `Launcher\settings.example.psd1` to `Launcher\settings.psd1` and fill it in; its comments
-say how to read each value. The example's placeholders match no disk, so the launcher stops at
-its identity check until the real values are in.
+Copy `examples\settings.example.psd1` from this repository to `Launcher\settings.psd1` on the
+stick and fill it in; its comments say how to read each value. The example's placeholders match
+no disk, so the launcher stops at its identity check until the real values are in.
+
+## Install or update
+
+`tools\Deploy-PortableVM.ps1` copies the launcher from a clone of this repository to a stick,
+with `X:` as the stick's Data partition:
+
+```text
+powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Deploy-PortableVM.ps1 -Target X:\
+```
+
+It needs `Launcher\settings.psd1` on the stick and refuses while a VM runs on the PC. It builds
+the new launcher in `Launcher.new` and checks every copy against the clone before it changes
+anything. Then the old `Launcher` becomes `Launcher.previous`, an older launcher `.cmd` at the
+stick's root moves in there too, and `Start VM.cmd` takes its place. Your settings and log come
+along, and the VM folders stay as they are. The tool deletes nothing, so remove or move away
+`Launcher.previous` before the next deploy. `-WhatIf` runs the checks only.
+
+To go back, rename `Launcher` to any other name, rename `Launcher.previous` to `Launcher`, and
+move the old `.cmd` from it back to the stick's root.
 
 ## Known limits
 
@@ -82,8 +105,10 @@ The redesign removes these. Until then:
 
 ## Development
 
-CI runs PSScriptAnalyzer 1.25.0 and Pester 6.2.0 in Windows PowerShell 5.1, then the privacy
-scan over the tracked files in Git Bash. Locally:
+The launcher's code is in `src`, the tools in `tools`, the tests in `tests` and the example
+settings in `examples`. CI runs PSScriptAnalyzer 1.25.0 over these folders and Pester 6.2.0 in
+Windows PowerShell 5.1, then the privacy scan over the tracked files in Git Bash. The tests mock
+everything that reads the PC, so they never touch a disk or a VM. Locally:
 
 ```text
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run-checks.ps1

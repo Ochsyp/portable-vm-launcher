@@ -1,15 +1,19 @@
 # Repository rules that keep private data out and the files usable on Windows: what git tracks,
-# how it stores text, that the sources are ASCII, that the launcher and the example settings
-# parse in Windows PowerShell 5.1, and that the privacy guard rails refuse what they should. The
-# file checks read git's index, so a new file counts once it is staged. The guard-rail checks
-# build small sample repositories in TestDrive; their private-looking values are put together at
-# run time, so this file itself passes privacy-scan and gitleaks.
+# how it stores text, that the sources are ASCII and parse in Windows PowerShell 5.1, static
+# guards on what the launcher and the tools may do, and that the privacy guard rails refuse what
+# they should. The file checks read git's index, so a new file counts once it is staged. The
+# guard-rail checks build small sample repositories in TestDrive; their private-looking values
+# are put together at run time, so this file itself passes privacy-scan and gitleaks.
 
 BeforeAll {
     $script:repoRoot = Split-Path $PSScriptRoot -Parent
     $script:tracked = @(& git -C $script:repoRoot -c core.quotePath=false ls-files)
-    $script:launcher = Join-Path $script:repoRoot 'Launcher\Start-PortableVM.ps1'
-    $script:example = Join-Path $script:repoRoot 'Launcher\settings.example.psd1'
+    $script:launcher = Join-Path $script:repoRoot 'src\Start-PortableVM.ps1'
+    $script:module = Join-Path $script:repoRoot 'src\PortableVM.psm1'
+    $script:example = Join-Path $script:repoRoot 'examples\settings.example.psd1'
+    # The PowerShell sources of the launcher and the tools, as full paths.
+    $script:sources = @($script:tracked | Where-Object { $_ -match '^(src|tools)/[^/]+\.(ps1|psm1)$' } |
+            ForEach-Object { Join-Path $script:repoRoot $_ })
     $script:utf8 = New-Object System.Text.UTF8Encoding $false
     # A name with a letter outside ASCII, as a denylisted name can have.
     $script:umlautName = 'J' + [char]0x00FC + 'rgen'
@@ -23,6 +27,32 @@ BeforeAll {
             $script:sh = @('bin\sh.exe', 'usr\bin\sh.exe') | ForEach-Object { Join-Path $folder $_ } |
                 Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
             $folder = Split-Path $folder -Parent
+        }
+    }
+
+    # Return the syntax tree of the PowerShell file $Path.
+    function Get-SourceAst {
+        param([string]$Path)
+        $tokens = $null
+        $parseErrors = $null
+        [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$parseErrors)
+    }
+
+    # Return the commands that the syntax tree $Ast calls, each with its Name, Line and Function,
+    # the innermost function around the call ('' at the top level).
+    function Get-SourceCommand {
+        param($Ast)
+        foreach ($command in $Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+            $function = ''
+            for ($parent = $command.Parent; $null -ne $parent; $parent = $parent.Parent) {
+                if ($parent -is [System.Management.Automation.Language.FunctionDefinitionAst]) { $function = $parent.Name; break }
+            }
+            [pscustomobject]@{
+                Name     = $command.GetCommandName()
+                Operator = $command.InvocationOperator
+                Line     = $command.Extent.StartLineNumber
+                Function = $function
+            }
         }
     }
 
@@ -74,8 +104,11 @@ BeforeAll {
 }
 
 Describe 'Tracked files' {
-    It 'include the launcher, so the other checks have something to check' {
-        $script:tracked | Should -Contain 'Launcher/Start-PortableVM.ps1'
+    It 'include the launcher and its tools, so the other checks have something to check' {
+        foreach ($path in 'src/Start-PortableVM.ps1', 'src/PortableVM.psm1', 'tools/Deploy-PortableVM.ps1',
+            'tools/Get-StickInventory.ps1', 'examples/settings.example.psd1') {
+            $script:tracked | Should -Contain $path
+        }
     }
 
     It 'include no real settings, logs, backups or VM files' {
@@ -100,17 +133,107 @@ Describe 'Tracked files' {
     }
 }
 
-Describe 'Legacy launcher' {
-    It 'parses in Windows PowerShell 5.1' {
-        $tokens = $null
-        $parseErrors = $null
-        $null = [System.Management.Automation.Language.Parser]::ParseFile($script:launcher, [ref]$tokens, [ref]$parseErrors)
-        $parseErrors | Should -BeNullOrEmpty
+Describe 'Launcher sources' {
+    It 'parse in Windows PowerShell 5.1, every tracked PowerShell file' {
+        $files = @($script:tracked | Where-Object { $_ -match '\.(ps1|psm1|psd1)$' })
+        $files | Should -Contain 'src/PortableVM.psm1'
+        $broken = foreach ($path in $files) {
+            $tokens = $null
+            $parseErrors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $script:repoRoot $path), [ref]$tokens, [ref]$parseErrors)
+            if ($parseErrors) { "${path}: $($parseErrors[0].Message)" }
+        }
+        $broken | Should -BeNullOrEmpty
     }
 
-    It 'is the script Start VM.cmd starts' {
+    It 'include the script Start VM.cmd starts, which the deploy tool puts in Launcher' {
         $cmd = Get-Content -LiteralPath (Join-Path $script:repoRoot 'Start VM.cmd') -Raw
         $cmd | Should -Match ([regex]::Escape('-File "%~dp0Launcher\Start-PortableVM.ps1"'))
+    }
+
+    It 'give every function a comment on the line above it' {
+        $missing = foreach ($path in $script:sources) {
+            $lines = [IO.File]::ReadAllLines($path)
+            foreach ($function in (Get-SourceAst -Path $path).FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+                $line = $function.Extent.StartLineNumber
+                if ($line -lt 2 -or $lines[$line - 2] -notmatch '^\s*#') { "$(Split-Path $path -Leaf): $($function.Name)" }
+            }
+        }
+        $missing | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Static guards' {
+    It 'let the module define functions only, so importing it runs nothing' {
+        $statements = (Get-SourceAst -Path $script:module).EndBlock.Statements
+        $other = $statements | Where-Object {
+            $_ -isnot [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $_.Extent.Text -notin @('Set-StrictMode -Version 3.0', "`$ErrorActionPreference = 'Stop'")
+        }
+        $other | ForEach-Object { $_.Extent.Text } | Should -BeNullOrEmpty
+    }
+
+    It 'leave exits, dialogs and prompts in src, and the administrator prompt anywhere, to Start-PortableVM.ps1' {
+        $others = @($script:sources | Where-Object { $_ -like (Join-Path $script:repoRoot 'src\*') -and $_ -ne $script:launcher })
+        $others | Should -Contain $script:module
+        foreach ($path in $others) {
+            (Get-SourceAst -Path $path).FindAll({ $args[0] -is [System.Management.Automation.Language.ExitStatementAst] }, $true) | Should -BeNullOrEmpty
+        }
+        $dialogs = 'System\.Windows\.Forms|System\.Windows\.MessageBox|PresentationFramework|Microsoft\.VisualBasic|WScript\.Shell|Read-Host|\.UI\.Prompt|Out-GridView|RunAs'
+        $script:sources | Where-Object { $_ -ne $script:launcher -and [IO.File]::ReadAllText($_) -match $dialogs } | Should -BeNullOrEmpty
+    }
+
+    It 'let only the adapters in the module read the PC or run programs' {
+        $adapters = 'Invoke-PvmGetPartition', 'Invoke-PvmGetDisk', 'Invoke-PvmGetProcess', 'Invoke-PvmTestProcess', 'Invoke-PvmGetDeviceGuard',
+        'Invoke-PvmGetRegistryValue', 'Invoke-PvmNative', 'Invoke-PvmStartProcess', 'Invoke-PvmSetEnvironment', 'Invoke-PvmSleep'
+        $reads = 'Get-Partition', 'Get-Disk', 'Get-Volume', 'Get-PhysicalDisk', 'Get-CimInstance', 'Get-WmiObject', 'Get-Process',
+        'Get-ItemProperty', 'Get-ItemPropertyValue', 'Start-Process', 'Start-Sleep', 'Invoke-CimMethod', 'Invoke-WmiMethod'
+        $ast = Get-SourceAst -Path $script:module
+        $outside = Get-SourceCommand -Ast $ast | Where-Object {
+            (($reads -contains $_.Name) -and $adapters -notcontains $_.Function) -or
+            ($_.Operator -eq 'Ampersand' -and $_.Function -ne 'Invoke-PvmNative')
+        }
+        $outside | ForEach-Object { "$($_.Name) at line $($_.Line) in $($_.Function)" } | Should -BeNullOrEmpty
+        # .NET types that reach processes, the registry or WMI directly.
+        $types = $ast.FindAll({
+                $args[0] -is [System.Management.Automation.Language.TypeExpressionAst] -or
+                $args[0] -is [System.Management.Automation.Language.TypeConstraintAst]
+            }, $true) | ForEach-Object { $_.TypeName.FullName }
+        $types | Where-Object { $_ -match '(?i)Diagnostics\.Process|Win32\.Registry|^System\.Management(?!\.Automation)' } | Should -BeNullOrEmpty
+    }
+
+    It 'never change disks, partitions or volumes, nor delete VirtualBox media' {
+        # Every Storage command that is not a Get, and the generic CIM and WMI writers.
+        $storage = @(Get-Command -Module Storage -ErrorAction SilentlyContinue | Where-Object { $_.Verb -ne 'Get' } | ForEach-Object { $_.Name })
+        $storage.Count | Should -BeGreaterThan 20
+        $changes = $storage + @('Invoke-CimMethod', 'Invoke-WmiMethod', 'Set-CimInstance', 'Set-WmiInstance', 'Remove-CimInstance', 'Remove-WmiObject')
+        $found = foreach ($path in $script:sources) {
+            Get-SourceCommand -Ast (Get-SourceAst -Path $path) | Where-Object { $changes -contains $_.Name } |
+                ForEach-Object { "$(Split-Path $path -Leaf): $($_.Name)" }
+            if ([IO.File]::ReadAllText($path) -match '(?i)\b(diskpart|mountvol|bcdedit)(\.exe)?\b|--delete') { "$(Split-Path $path -Leaf): a disk tool or --delete" }
+        }
+        $found | Should -BeNullOrEmpty
+    }
+
+    It 'keep the inventory tool read-only' {
+        $ast = Get-SourceAst -Path (Join-Path $script:repoRoot 'tools\Get-StickInventory.ps1')
+        $writers = 'Set-Content', 'Add-Content', 'Out-File', 'New-Item', 'Remove-Item', 'Move-Item', 'Copy-Item', 'Rename-Item', 'Set-Item',
+        'Set-ItemProperty', 'New-ItemProperty', 'Remove-ItemProperty', 'Clear-Content', 'Clear-Item', 'Start-Process', 'Invoke-Expression',
+        'Export-Csv', 'Export-Clixml', 'Tee-Object', 'Start-Transcript', 'Set-Acl'
+        Get-SourceCommand -Ast $ast | Where-Object { $writers -contains $_.Name } | ForEach-Object { $_.Name } | Should -BeNullOrEmpty
+        $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FileRedirectionAst] }, $true) | Should -BeNullOrEmpty
+        # The .NET members the tool calls, all of which only read; a new one is added here on purpose.
+        $allowed = 'Close', 'Create', 'Equals', 'GetAttribute', 'GetFullPath', 'GetInvalidPathChars', 'GetType', 'IndexOfAny', 'IsPathRooted',
+        'Load', 'new', 'ReadAllText', 'SelectNodes', 'ToLowerInvariant', 'Trim', 'TrimEnd'
+        $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true) |
+            ForEach-Object { $_.Member.Extent.Text } | Where-Object { $allowed -cnotcontains $_ } | Should -BeNullOrEmpty
+    }
+
+    It 'keep the deploy tool from deleting anything' {
+        $ast = Get-SourceAst -Path (Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1')
+        Get-SourceCommand -Ast $ast | Where-Object { $_.Name -in 'Remove-Item', 'Clear-Content', 'Clear-Item' } | Should -BeNullOrEmpty
+        $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true) |
+            Where-Object { $_.Member.Extent.Text -eq 'Delete' } | Should -BeNullOrEmpty
     }
 }
 
@@ -120,8 +243,9 @@ Describe 'Example settings' {
     }
 
     It 'has exactly the keys the launcher reads' {
-        $source = Get-Content -LiteralPath $script:launcher -Raw
-        $read = @([regex]::Matches($source, '\$S\.(\w+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+        # The module reads every setting as $settings['Key'].
+        $source = Get-Content -LiteralPath $script:module -Raw
+        $read = @([regex]::Matches($source, "(?i)\`$settings\['(\w+)'\]") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
         (@($script:settings.Keys | Sort-Object) -join ', ') | Should -BeExactly ($read -join ', ')
     }
 

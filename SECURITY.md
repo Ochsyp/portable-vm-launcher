@@ -26,7 +26,7 @@ they identify one stick and the PCs it was used on.
 
 - `Launcher\settings.psd1` holds the stick's disk signature, size and partition layout and the
   VM's UUID. `launcher.log` also holds disk numbers, install paths and times of use. Both are
-  gitignored; only `settings.example.psd1`, with placeholders, is committed.
+  gitignored; only `examples\settings.example.psd1`, with placeholders, is committed.
 - The VM folders hold UUIDs, MAC addresses and host details, and stay on the stick.
 
 ## Automated checks
@@ -42,5 +42,7 @@ they identify one stick and the PCs it was used on.
   workflow is started by hand (`.github/workflows/secret-scan.yml`), with the rules of
   privacy-scan repeated in `.gitleaks.toml`. It cannot know the denylist or the settings file.
 - `.github/workflows/ci.yml` runs PSScriptAnalyzer, the Pester tests and the privacy scan on
-  `windows-latest`.
+  `windows-latest`. The tests mock every read of the PC, and `tests\Repo.Tests.ps1` checks that
+  no source calls a Storage command other than a read, or a CIM or WMI method, that the
+  inventory tool calls nothing that writes, and that the deploy tool deletes nothing.
 - Dependabot keeps the pinned GitHub Actions up to date.

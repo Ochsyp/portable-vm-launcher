@@ -18,7 +18,8 @@ merged. This holds for the maintainer too.
 6. Start the next phase only after the pull request is reviewed and merged. Its branch starts
    from the updated `main`.
 
-One pull request holds one phase or one change. Only released versions reach a stick: a
+One pull request holds one phase or one change. Apart from the stick checks that a pull request
+asks for ([docs/stick-tests.md](docs/stick-tests.md)), only released versions reach a stick: a
 release pull request moves the Unreleased entries under a new version, and the maintainer tags
 it (`vX.Y.Z`) and publishes the release.
 
@@ -50,6 +51,10 @@ which `privacy-scan` and the secret scan let through. Code,
 docs and messages use neutral names ("the VM", "the guest"), never the name of a real VM. A
 value with no recognisable shape, such as a disk signature or a VM name, can be listed in the
 untracked `.git/info/privacy-denylist`, so that `privacy-scan` refuses it too.
+
+The Pester tests build the stick's files in TestDrive and mock the module's `Invoke-Pvm*`
+adapters. `tests\run-checks.ps1` sets `PVM_TEST=1`, so an adapter that a test did not mock
+throws instead of reading the PC.
 
 ## Tests on the stick
 
