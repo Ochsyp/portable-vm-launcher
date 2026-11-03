@@ -1,0 +1,47 @@
+# The real settings, copies of them and the logs hold the stick's identity, its partition
+# layout and when it was used. Only settings.example.psd1 is committed.
+settings*.psd1
+settings*.psd1.*
+!settings.example.psd1
+*.log
+*.log.[0-9]*
+*.bak
+
+# Copies the launcher makes before it rewrites a file.
+*.orig
+*.launcher-backup
+
+# VM folders and files, in case a stick's tree is ever copied here. They hold UUIDs, MAC
+# addresses and host details. Test-bed disk images stay out too.
+/VirtualBox/
+/VMware/
+VirtualBox.xml*
+VBox*.log*
+*.vmx
+*.vmxf
+*.vmsd
+*.vmss
+*.vmem
+*.vmdk
+*.nvram
+*.vbox
+*.vbox-prev
+*.vbox-tmp
+*.vdi
+*.vhd
+*.vhdx
+*.sav
+*.lck/
+
+# The tool reads no secrets; this guards against committing one by accident.
+.env*
+
+# Editor and OS files.
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
