@@ -3,13 +3,13 @@
 # -------------------------------------------------------
 #
 # Rules for PSScriptAnalyzer 1.25.0, whose -Path takes one folder per call:
-#   'Launcher', 'tests', 'tools' | ForEach-Object {
+#   'src', 'tools', 'tests', 'examples' | ForEach-Object {
 #       Invoke-ScriptAnalyzer -Path $_ -Recurse -Settings .\PSScriptAnalyzerSettings.psd1 }
-# The launcher targets Windows PowerShell 5.1. tests\run-checks.ps1 reports the findings in
-# Launcher without failing until the code there is restructured.
+# The launcher targets Windows PowerShell 5.1. tests\run-checks.ps1 fails on any finding.
 
 @{
-    Severity     = @('Error', 'Warning', 'Information')
+    # ParseError reports syntax that Windows PowerShell 5.1 cannot parse, such as pwsh-only operators.
+    Severity     = @('Error', 'Warning', 'Information', 'ParseError')
 
     ExcludeRules = @(
         # Console tools: Write-Host is their output, not a diagnostic stream.

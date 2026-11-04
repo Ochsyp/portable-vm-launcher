@@ -2,11 +2,12 @@
 #                  PORTABLE VM CHECKS
 # -------------------------------------------------------
 #
-# Runs PSScriptAnalyzer 1.25.0 with PSScriptAnalyzerSettings.psd1, then Pester 6.2.0 over the
-# *.Tests.ps1 files in tests, as CI does. Run it in Windows PowerShell 5.1:
+# Runs PSScriptAnalyzer 1.25.0 with PSScriptAnalyzerSettings.psd1 over src, tools, tests and
+# examples, then Pester 6.2.0 over the *.Tests.ps1 files in tests, as CI does. Run it in Windows
+# PowerShell 5.1:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run-checks.ps1
-# Analyzer findings in tests and tools fail the run. Findings in Launcher, the code as it was
-# before the redesign, are counted by rule but do not fail it until that code is restructured.
+# Any analyzer finding fails the run. Pester runs with $env:PVM_TEST set to '1', so a test that
+# reaches one of the launcher's adapters without mocking it fails instead of touching the PC.
 # -SkipAnalyzer or -SkipPester leaves that step out, and -Filter runs only the tests whose full
 # name matches it, such as -Filter '*example*'. Exits 0 when nothing fails, else 1.
 
@@ -45,20 +46,12 @@ try {
         Import-PinnedModule -Name 'PSScriptAnalyzer' -Version '1.25.0'
         $settings = Join-Path $repoRoot 'PSScriptAnalyzerSettings.psd1'
         # PSScriptAnalyzer 1.25.0 takes one folder per -Path.
-        $found = @('tests', 'tools' | ForEach-Object { Invoke-ScriptAnalyzer -Path (Join-Path $repoRoot $_) -Recurse -Settings $settings })
-        Write-Output "Analyzer findings in tests and tools: $($found.Count)"
+        $folders = @('src', 'tools', 'tests', 'examples')
+        $found = @($folders | ForEach-Object { Invoke-ScriptAnalyzer -Path (Join-Path $repoRoot $_) -Recurse -Settings $settings })
+        Write-Output "Analyzer findings in $($folders -join ', '): $($found.Count)"
         if ($found.Count -gt 0) {
             $failed = $true
             $found | Format-Table -AutoSize -Wrap RuleName, Severity, ScriptName, Line, Message | Out-String -Width 220
-        }
-        # The untracked settings.psd1 beside the launcher holds real values, so only the tracked
-        # kinds of file are analyzed there.
-        $legacyFiles = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'Launcher') -File |
-            Where-Object { $_.Extension -in '.ps1', '.psm1', '.psd1' -and $_.Name -ne 'settings.psd1' })
-        $legacy = @($legacyFiles | ForEach-Object { Invoke-ScriptAnalyzer -Path $_.FullName -Settings $settings })
-        Write-Output "Analyzer findings in Launcher, reported only: $($legacy.Count)"
-        if ($legacy.Count -gt 0) {
-            $legacy | Group-Object RuleName | Sort-Object Count -Descending | Format-Table -AutoSize Count, Name | Out-String -Width 220
         }
     }
 
@@ -72,7 +65,10 @@ try {
         if ($Filter) { $config.Filter.FullName = $Filter }
         # Splatted, since the analyzer's 5.1 profile knows only the in-box Pester 3.4, whose Invoke-Pester has no -Configuration.
         $pesterArguments = @{ Configuration = $config }
-        $result = Invoke-Pester @pesterArguments
+        $previousTestFlag = $env:PVM_TEST
+        $env:PVM_TEST = '1'
+        try { $result = Invoke-Pester @pesterArguments }
+        finally { $env:PVM_TEST = $previousTestFlag }
         Write-Output "Pester: Passed=$($result.PassedCount) Failed=$($result.FailedCount) Skipped=$($result.SkippedCount) NotRun=$($result.NotRunCount)"
         # A test file that does not load, or a BeforeAll that throws, fails no single test.
         $broken = $result.FailedBlocksCount + $result.FailedContainersCount
@@ -80,6 +76,11 @@ try {
             Write-Output "Pester: FailedBlocks=$($result.FailedBlocksCount) FailedContainers=$($result.FailedContainersCount)"
         }
         if ($result.FailedCount -gt 0 -or $broken -gt 0) { $failed = $true }
+        # A run in which no test passed proves nothing, for example after a -Filter that matched none.
+        if ($result.PassedCount -eq 0) {
+            Write-Output 'Pester: no test passed.'
+            $failed = $true
+        }
     }
 
     if (-not $failed) { $exitCode = 0 }

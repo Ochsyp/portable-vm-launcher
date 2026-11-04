@@ -18,6 +18,28 @@ Such tests run in this order, and a step starts only after the one before it pas
    `.vmx`, `.vbox`, `VirtualBox.xml` and the descriptors) is in a folder on the PC outside the
    repository.
 
+## Phase 1 checks
+
+Phase 1 moves the launcher's logic into a module without changing a decision. Before its pull
+request is merged, on each PC the stick is used on, with `X:` as the stick's Data partition:
+
+1. Run the read-only inventory from the clone and keep its output for the pull request; it
+   holds only check names and yes, no or unknown:
+
+   ```text
+   powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Get-StickInventory.ps1 -Root X:\
+   ```
+
+2. With the launcher still on the stick as before, run a dry run (the README gives the command)
+   and keep the lines it adds to `Launcher\launcher.log`, on the PC outside the repository.
+3. Deploy the phase 1 launcher (README, *Install or update*) and run the same dry run. Its lines
+   must match those of step 2, apart from the timestamps, the new version line, and the VM's
+   old name in the start line and the messages, which phase 0 replaced with neutral names.
+4. Start the VM once through `Start VM.cmd` in each hypervisor, then shut the guest down.
+
+If a step fails, put the previous launcher back as the README says, and describe what happened
+in the pull request.
+
 ## Rules for the real stick
 
 - Never switch VirtualBox's host I/O cache off for the stick's controller.
