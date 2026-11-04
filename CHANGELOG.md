@@ -63,5 +63,15 @@ Compared with the launcher on a stick before the redesign:
 - A settings value of the wrong type, such as an array where one value belongs or an empty
   `VirtualBoxVmUuid`, now stops the launcher with an unexpected error that names the parameter,
   where the launcher before carried on or failed later. Phase 3 checks the settings properly.
+- A start in VMware needs `suspend.disabled = "TRUE"` and `uuid.action = "keep"` in the `.vmx`;
+  without them the launcher stops and names the line to add. With the key set, VMware refuses to
+  suspend the VM, and a VM suspended before the key was added still resumes.
+- A saved state, which the launcher does not record yet, is resumed only after a Yes in a dialog
+  whose default is No: any VirtualBox save, and a VMware suspend from before `suspend.disabled`
+  was set. The new setting `SavedStatePolicy = 'Refuse'` makes the launcher stop instead; without
+  the setting it asks.
+- A `.vmx` or `.vbox` that is missing, cannot be read, lacks `config.version` or is no valid XML
+  stops the launcher, naming the setting and the path. Before, a missing file counted as "no saved
+  state".
 
 [Unreleased]: https://github.com/Ochsyp/portable-vm-launcher/commits/main

@@ -15,9 +15,10 @@
   Settings: settings.psd1 next to this script. Log: launcher.log next to this script.
   -DryRun runs every check and logs what would change, without changing or starting anything.
 #>
-# Show-Message loads System.Windows.Forms with Add-Type before it uses the types, which the
-# analyzer's compatibility profile cannot see: it lists only the assemblies that load by default.
-[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseCompatibleTypes', '', Justification = 'Show-Message loads System.Windows.Forms with Add-Type first.')]
+# Show-Message and Show-Question load System.Windows.Forms with Add-Type before they use the
+# types, which the analyzer's compatibility profile cannot see: it lists only the assemblies that
+# load by default.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseCompatibleTypes', '', Justification = 'Show-Message and Show-Question load System.Windows.Forms with Add-Type first.')]
 param([switch]$DryRun)
 
 $ErrorActionPreference = 'Stop'
@@ -52,6 +53,16 @@ if (-not $isAdmin -and -not $DryRun) {
 # loaded, or a dialog that fails, is logged as an unexpected error, as any error was before. As
 # before, a message shows only once its STOPPED line is in the log.
 
+# Ask $Message as a question in a dialog on the default desktop, with Yes and No and No as the
+# default button, and return whether the answer is Yes.
+function Show-Question([string]$Message) {
+    Add-Type -AssemblyName System.Windows.Forms
+    $answer = [System.Windows.Forms.MessageBox]::Show($Message, 'Portable VM',
+        [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning,
+        [System.Windows.Forms.MessageBoxDefaultButton]::Button2, [System.Windows.Forms.MessageBoxOptions]::DefaultDesktopOnly)
+    $answer -eq [System.Windows.Forms.DialogResult]::Yes
+}
+
 # Append "STOPPED: $Message" in the log's format to launcher.log here, and return whether that
 # worked.
 function Add-StopLine([string]$Message) {
@@ -69,7 +80,7 @@ function Add-StopLine([string]$Message) {
 Remove-Item -LiteralPath 'Env:\PVM_TEST' -ErrorAction SilentlyContinue
 try {
     Import-Module -Name (Join-Path $Here 'PortableVM.psm1') -Force
-    $result = Invoke-PortableVM -LauncherPath $Here -DryRun:$DryRun
+    $result = Invoke-PortableVM -LauncherPath $Here -DryRun:$DryRun -AskResume { param([string]$Question) Show-Question -Message $Question }
 } catch {
     $result = [pscustomobject]@{ ExitCode = 1; Message = "Unexpected error: $($_.Exception.Message)"; Icon = 'Error' }
     if (-not (Add-StopLine -Message $result.Message)) { $result.Message = '' }

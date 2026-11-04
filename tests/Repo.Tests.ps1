@@ -151,6 +151,12 @@ Describe 'Launcher sources' {
         $cmd | Should -Match ([regex]::Escape('-File "%~dp0Launcher\Start-PortableVM.ps1"'))
     }
 
+    It 'ask before a resume with No as the default answer' {
+        $text = [IO.File]::ReadAllText($script:launcher)
+        $text | Should -Match 'function Show-Question[\s\S]*MessageBoxButtons\]::YesNo[\s\S]*MessageBoxDefaultButton\]::Button2'
+        $text | Should -Match ([regex]::Escape('Invoke-PortableVM -LauncherPath $Here -DryRun:$DryRun -AskResume { param([string]$Question) Show-Question -Message $Question }'))
+    }
+
     It 'give every function a comment on the line above it' {
         $missing = foreach ($path in $script:sources) {
             $lines = [IO.File]::ReadAllLines($path)

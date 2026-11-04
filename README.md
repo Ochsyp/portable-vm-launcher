@@ -6,9 +6,9 @@ A Windows launcher for a VM that lives on a USB stick and boots that stick as it
 the stick into a Windows PC that has VMware Workstation or VirtualBox, double-click
 `Start VM.cmd`, and the launcher starts the VM in whichever of the two is installed.
 
-> **Status:** phase 1 of a hardening redesign. The launcher's checks and start steps now live in
-> a tested module, and what the launcher checks and does is unchanged from before the redesign.
-> More small pull requests follow. Until they land, follow the rules under
+> **Status:** phase 2 of a hardening redesign. The launcher's checks and start steps live in a
+> tested module, and the launcher now guards against suspends and saved states, as *What it does*
+> says; [CHANGELOG.md](CHANGELOG.md) lists every change. More small pull requests follow. Until they land, follow the rules under
 > [Known limits](#known-limits).
 
 ## What it does
@@ -23,7 +23,15 @@ Before every start the launcher:
 - points the VM's raw-disk descriptor (`.vmdk`) at that disk number;
 - fixes the stick's drive letter in the VirtualBox files;
 - refuses to start the VM in one hypervisor while it runs in the other, or while the other
-  holds a saved or suspended state.
+  holds a saved or suspended state;
+- refuses to start the VM in VMware unless its `.vmx` has `suspend.disabled = "TRUE"` and
+  `uuid.action = "keep"`, and says which line to add;
+- asks before it resumes a saved state: any VirtualBox save, or a VMware suspend from before
+  `suspend.disabled` was set, which VMware still resumes. No is the default answer, and
+  `SavedStatePolicy = 'Refuse'` in the settings makes the launcher stop instead;
+- stops when it cannot tell whether the VM is saved, because its `.vmx` or `.vbox` is missing or
+  cannot be read, the `.vmx` lacks `config.version` or sets a safety key twice, or the `.vbox` is
+  no valid XML.
 
 VMware always gets the stick with the Data partition blanked, because Windows keeps using that
 partition while the VM runs. For VirtualBox, the `HideDataPartition` setting decides.
@@ -92,8 +100,6 @@ The redesign removes these. Until then:
 - **Never boot the stick another way while the VM is suspended or saved.** The resume would
   write the VM's old view of the disk over what changed in between, which can corrupt the
   guest's file system. Resume the VM through the launcher and shut the guest down first.
-- **Turn off suspend in VMware.** With VMware closed and no suspended state, add
-  `suspend.disabled = "TRUE"` to the `.vmx`. A later version of the launcher requires it.
 - **Start and resume the VM only through the launcher**, never from the VMware or VirtualBox
   window or library. Between runs the descriptor still names the disk number of the last run,
   which another disk may have by then.
@@ -101,7 +107,6 @@ The redesign removes these. Until then:
   it off, VirtualBox takes every volume of the stick offline, the Data partition included.
 - `HideDataPartition = $false` shows the Data partition to a VirtualBox guest. Never mount it
   inside the guest: Windows writes to it at the same time, and it holds the VM's own files.
-- A missing or renamed `.vmx` or `.vbox` counts as "no saved state".
 
 ## Development
 

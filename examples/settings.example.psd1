@@ -12,6 +12,11 @@
     # VMware only: 'Window' = normal window, 'FullScreen' = start in full screen
     VMwareView = 'Window'
 
+    # A saved state that the launcher did not record (any VirtualBox save, or a VMware suspend from
+    # before suspend.disabled was set) holds changes to the stick: 'Ask' asks before it is resumed,
+    # with No as the default answer; 'Refuse' stops the launcher instead. Without this line: 'Ask'.
+    SavedStatePolicy = 'Ask'
+
     # VirtualBox only: $true = inside the VM, the stick's Data partition (the NTFS one Windows uses)
     # shows up empty. VMware always works this way, because it has to take the VM's partitions away
     # from Windows and can't take the Data partition, which holds the VM's own files.

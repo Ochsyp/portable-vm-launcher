@@ -5,7 +5,8 @@
 # The launcher's checks and start steps, used by Start-PortableVM.ps1 in the same folder: find
 # the stick the launcher runs from and check that it is the configured one, choose VMware
 # Workstation or VirtualBox, point the VM's raw-disk descriptor at the stick and start the VM.
-# The decisions, messages and log lines are those of the launcher before the redesign.
+# The decisions, messages and log lines are those of the launcher before the redesign, apart from
+# the changes that CHANGELOG.md lists, such as the suspend guard of phase 2.
 #
 # Importing the module runs nothing. Functions take what they need as parameters and throw, and
 # Invoke-PortableVM turns a stop into the exit code and the message for the script to show.
@@ -437,36 +438,154 @@ function Test-PvmRunningInVMware {
 # saved memory. Booting the stick any other way before resuming it can corrupt the guest's file
 # system.
 
-# Return whether the .vbox text $Text gives its Machine element a stateFile: the VM is saved.
-function Test-PvmVirtualBoxSavedText {
+# Return the settings in the .vmx text $Text as a hashtable with lowercase keys and the values
+# without their quotes. A key that appears twice keeps its last value, as VMware reads it; comment
+# lines and lines without an = are skipped.
+function ConvertFrom-PvmVmxText {
     [CmdletBinding()]
-    [OutputType([bool])]
+    [OutputType([hashtable])]
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
-    $Text -match '<Machine\s[^>]*\bstateFile="[^"]+"'
+    $values = @{}
+    foreach ($line in ($Text -split "`r?`n")) {
+        # VMware allows a # comment after the value, as in: key = "value" # note.
+        if ($line -match '^\s*([^#=\s][^=]*?)\s*=\s*(?:"([^"]*)"|([^"#\s]*))\s*(?:#.*)?$') {
+            $value = if ($Matches.ContainsKey(2)) { $Matches[2] } else { $Matches[3] }
+            $values[$Matches[1].ToLowerInvariant()] = $value
+        }
+    }
+    $values
 }
 
-# Return whether the .vmx text $Text has a checkpoint.vmState line: the VM is suspended.
-function Test-PvmVMwareSuspendedText {
+# Return what the .vmx $Path says about a VMware suspend: State 'Saved' when checkpoint.vmState
+# has a value, 'NotSaved' when it has none, or 'Unknown' with the Reason when the file is missing,
+# cannot be read or is no complete .vmx, which always holds config.version. Values holds the
+# file's settings (ConvertFrom-PvmVmxText) when it could be read, else an empty hashtable.
+function Get-PvmVMwareState {
     [CmdletBinding()]
-    [OutputType([bool])]
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
-    $Text -match '(?m)^\s*checkpoint\.vmState\s*=\s*"[^"]+"'
-}
-
-# Return whether the .vbox $Path says the VM is saved. A missing file counts as not saved.
-function Test-PvmVirtualBoxSaved {
-    [CmdletBinding()]
-    [OutputType([bool])]
+    [OutputType([pscustomobject])]
     param([Parameter(Mandatory)][string]$Path)
-    (Test-Path -LiteralPath $Path) -and (Test-PvmVirtualBoxSavedText -Text ([IO.File]::ReadAllText($Path)))
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        return [pscustomobject]@{ State = 'Unknown'; Reason = 'the path is a folder, not a file'; Values = @{} }
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [pscustomobject]@{ State = 'Unknown'; Reason = 'the file does not exist'; Values = @{} }
+    }
+    try { $text = [IO.File]::ReadAllText($Path) }
+    catch { return [pscustomobject]@{ State = 'Unknown'; Reason = "the file cannot be read ($($_.Exception.Message))"; Values = @{} } }
+    $values = ConvertFrom-PvmVmxText -Text $text
+    if (-not $values.ContainsKey('config.version')) {
+        return [pscustomobject]@{ State = 'Unknown'; Reason = 'the file is no complete .vmx: it has no config.version line'; Values = $values }
+    }
+    # Which of two values VMware uses is not documented, so a safety key set twice is unknown.
+    foreach ($key in 'checkpoint.vmState', 'suspend.disabled', 'uuid.action') {
+        if (@($text -split "`r?`n" | Where-Object { $_ -match ('^\s*' + [regex]::Escape($key) + '\s*=') }).Count -gt 1) {
+            return [pscustomobject]@{ State = 'Unknown'; Reason = "the file sets $key more than once"; Values = $values }
+        }
+    }
+    $state = if ($values['checkpoint.vmstate']) { 'Saved' } else { 'NotSaved' }
+    [pscustomobject]@{ State = $state; Reason = ''; Values = $values }
 }
 
-# Return whether the .vmx $Path says the VM is suspended. A missing file counts as not suspended.
-function Test-PvmVMwareSuspended {
+# Return what the .vbox $Path says about a VirtualBox save: State 'Saved' when its Machine element
+# has a stateFile, 'NotSaved' when it has none, or 'Unknown' with the Reason when the file is
+# missing, cannot be read, is no XML or has no Machine element. DTDs are refused.
+function Get-PvmVirtualBoxState {
     [CmdletBinding()]
-    [OutputType([bool])]
+    [OutputType([pscustomobject])]
     param([Parameter(Mandatory)][string]$Path)
-    (Test-Path -LiteralPath $Path) -and (Test-PvmVMwareSuspendedText -Text ([IO.File]::ReadAllText($Path)))
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        return [pscustomobject]@{ State = 'Unknown'; Reason = 'the path is a folder, not a file' }
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [pscustomobject]@{ State = 'Unknown'; Reason = 'the file does not exist' }
+    }
+    try { $text = [IO.File]::ReadAllText($Path) }
+    catch { return [pscustomobject]@{ State = 'Unknown'; Reason = "the file cannot be read ($($_.Exception.Message))" } }
+    $readerSettings = New-Object System.Xml.XmlReaderSettings
+    $readerSettings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
+    try {
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($text), $readerSettings)
+        try {
+            $document = New-Object System.Xml.XmlDocument
+            $document.Load($reader)
+        } finally {
+            $reader.Close()
+        }
+    } catch {
+        return [pscustomobject]@{ State = 'Unknown'; Reason = "the file is no valid XML ($($_.Exception.Message))" }
+    }
+    $machine = $document.SelectSingleNode("/*[local-name()='VirtualBox']/*[local-name()='Machine']")
+    if ($null -eq $machine) { return [pscustomobject]@{ State = 'Unknown'; Reason = 'the file has no Machine element' } }
+    $state = if ($machine.GetAttribute('stateFile')) { 'Saved' } else { 'NotSaved' }
+    [pscustomobject]@{ State = $state; Reason = '' }
+}
+
+# Stop the launcher when $State, from Get-PvmVMwareState or Get-PvmVirtualBoxState, is Unknown:
+# the message says what cannot be told ($What), why, and which setting ($Setting) names the file
+# $Path. A dry run logs the stop and carries on.
+function Assert-PvmKnownState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][pscustomobject]$State,
+        [Parameter(Mandatory)][string]$What,
+        [Parameter(Mandatory)][string]$Setting,
+        [Parameter(Mandatory)][string]$Path
+    )
+    if ($State.State -ne 'Unknown') { return }
+    Invoke-PvmStopUnlessDryRun -Context $Context -Message "The launcher cannot tell $What, because $($State.Reason): $Setting in settings.psd1 names $Path. Nothing was started."
+}
+
+# Ask, through the script block $Context.AskResume, whether to resume the saved state in $Program
+# with the question $Question, and log a Yes. A dry run logs that a real start would ask and
+# carries on. Throws the stop when the answer is No, when there is no way to ask, or when
+# SavedStatePolicy in the settings is anything but Ask; a missing SavedStatePolicy means Ask.
+function Confirm-PvmResume {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][string]$Program,
+        [Parameter(Mandatory)][string]$Question
+    )
+    $settings = $Context.Settings
+    $policy = $settings['SavedStatePolicy']
+    if ($null -ne $policy -and $policy -ne 'Ask') {
+        Invoke-PvmStopUnlessDryRun -Context $Context -Message "The VM has a saved state in $Program, and SavedStatePolicy in settings.psd1 is '$policy', so the launcher does not resume it. To resume it through the launcher, set SavedStatePolicy to 'Ask' and start the VM again. Nothing was started."
+        return
+    }
+    if ($Context.DryRun) {
+        Write-PvmLog -Path $Context.LogPath -Message "DRY RUN - a real start would ask whether to resume the saved state in $Program."
+        return
+    }
+    # Only a single $true counts as Yes, so a stray output of the script block cannot resume.
+    $answer = if ($null -ne $Context.AskResume) { $Context.AskResume.InvokeReturnAsIs($Question) } else { $null }
+    if (-not ($answer -is [bool] -and $answer)) {
+        throw (Get-PvmStopException -Message "The saved state in $Program was not resumed. Nothing was started. Start the VM again to be asked again, or discard the saved state in $Program first, which loses what the guest had not saved.")
+    }
+    Write-PvmLog -Path $Context.LogPath -Message "Resume of the saved state in $Program confirmed."
+}
+
+# Stop a VMware start unless the .vmx settings in $Context.VMwareState hold uuid.action = "keep"
+# and suspend.disabled = "TRUE", naming the line to set. A suspend, which can only be from before
+# suspend.disabled was set and which VMware still resumes with it, is resumed only after
+# Confirm-PvmResume. A dry run logs each stop and carries on.
+function Assert-PvmVMwareReady {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][string]$Vmx
+    )
+    $values = $Context.VMwareState.Values
+    foreach ($key in @(@{ Name = 'uuid.action'; Value = 'keep'; Why = 'so VMware can stop the start to ask whether the VM was moved or copied' },
+            @{ Name = 'suspend.disabled'; Value = 'TRUE'; Why = 'and a suspended VM holds changes to the stick that booting the stick another way can overwrite; a VM that is suspended now still resumes with the line' })) {
+        $current = $values[$key.Name]
+        if ($current -eq $key.Value) { continue }
+        $has = if ($null -eq $current) { "lacks $($key.Name) = ""$($key.Value)""" } else { "has $($key.Name) = ""$current"" instead of ""$($key.Value)""" }
+        Invoke-PvmStopUnlessDryRun -Context $Context -Message "The VM's .vmx $has, $($key.Why). With VMware closed, set the line $($key.Name) = ""$($key.Value)"" in $Vmx, then start the VM again."
+    }
+    if ($Context.VMwareState.State -eq 'Saved') {
+        Confirm-PvmResume -Context $Context -Program 'VMware' -Question "The VM is suspended in VMware. Resume it only if the stick has not been booted any other way since the suspend; otherwise the resume can corrupt the guest's disk.`n`nResume the VM now?"
+    }
 }
 
 # --- Hypervisor choice -----------------------------------------------------------------------
@@ -565,9 +684,10 @@ function Invoke-PvmVMware {
     if (Test-PvmRunningInVirtualBox -VmUuid $settings['VirtualBoxVmUuid']) {
         Invoke-PvmStopUnlessDryRun -Context $Context -Message 'A VirtualBox VM is running, possibly this one. Close it before starting the VM in VMware - the stick must never be used by two VMs at once.'
     }
-    if (Test-PvmVirtualBoxSaved -Path (Join-Path $Context.Root $settings['VirtualBoxVbox'])) {
+    if ($Context.VirtualBoxState.State -eq 'Saved') {
         Invoke-PvmStopUnlessDryRun -Context $Context -Message 'The VM has a saved state in VirtualBox. Resume it in VirtualBox (on a PC with VirtualBox) and shut the guest down normally before starting it in VMware - otherwise the guest''s disk can get corrupted.'
     }
+    Assert-PvmVMwareReady -Context $Context -Vmx $vmx
 
     $disk = Join-Path $Context.Root $settings['VMwareDisk']
     if (Test-Path -LiteralPath $disk) { Set-PvmDiskDescriptor -Path $disk -Layout $layout -LogPath $log -WhatIf:$Context.DryRun }
@@ -642,11 +762,11 @@ function Invoke-PvmVirtualBox {
     if (Test-PvmRunningInVMware -Vmx $vmx) {
         Invoke-PvmStopUnlessDryRun -Context $Context -Message 'The VM is running in VMware. Close it before starting it in VirtualBox.'
     }
-    if (Test-PvmVMwareSuspended -Path $vmx) {
+    if ($Context.VMwareState.State -eq 'Saved') {
         Invoke-PvmStopUnlessDryRun -Context $Context -Message 'The VM is suspended in VMware. Resume it in VMware (on a PC with VMware Workstation) and shut the guest down normally before starting it in VirtualBox - otherwise the guest''s disk can get corrupted.'
     }
 
-    $open = @(Invoke-PvmGetProcess -Filter "Name='VirtualBox.exe' OR Name='VirtualBoxVM.exe' OR Name='VBoxHeadless.exe'")
+    $open =@(Invoke-PvmGetProcess -Filter "Name='VirtualBox.exe' OR Name='VirtualBoxVM.exe' OR Name='VBoxHeadless.exe'")
     if ($open.Count) {
         # VirtualBox hides its VM processes' command lines, so VirtualBox is asked whether this VM is the one running.
         $info = Invoke-PvmNative -FilePath $vboxManage -ArgumentList @('showvminfo', $uuid, '--machinereadable')
@@ -659,6 +779,12 @@ function Invoke-PvmVirtualBox {
     if (-not $Context.DryRun) { Wait-PvmProcessExit -Name 'VBoxSVC' -TimeoutSeconds 30 }
     if (Invoke-PvmTestProcess -Name 'VBoxSVC') {
         Invoke-PvmStopUnlessDryRun -Context $Context -Message 'VirtualBox is still running in the background. Wait half a minute, then start the VM again.'
+    }
+
+    # The launcher records no VirtualBox save yet, so every saved state asks before it is resumed,
+    # after the checks that can still stop the start and before the first write.
+    if ($Context.VirtualBoxState.State -eq 'Saved') {
+        Confirm-PvmResume -Context $Context -Program 'VirtualBox' -Question "The VM has a saved state in VirtualBox that this launcher did not record. Resume it only if the stick has not been booted any other way since the save; otherwise the resume can corrupt the guest's disk.`n`nResume the VM now?"
     }
 
     $letterChange = @{ Root = $Context.Root; Letter = $Context.Letter; LogPath = $log; WhatIf = $Context.DryRun }
@@ -711,17 +837,20 @@ function Invoke-PvmLaunch {
     $virtualBoxDir = Get-PvmVirtualBoxDir
     $vmx = Join-Path $Context.Root $settings['VMwareVmx']
     # Each state is logged as soon as it is known, so a .vbox that cannot be read does not hide a
-    # VMware suspend from the log.
-    $vmwareSuspended = Test-PvmVMwareSuspended -Path $vmx
-    if ($vmwareSuspended) { Write-PvmLog -Path $log -Message 'Saved state found: suspended in VMware' }
-    $virtualBoxSaved = Test-PvmVirtualBoxSaved -Path (Join-Path $Context.Root $settings['VirtualBoxVbox'])
-    if ($virtualBoxSaved) { Write-PvmLog -Path $log -Message 'Saved state found: saved in VirtualBox' }
+    # VMware suspend from the log. A state the launcher cannot tell stops it.
+    $vbox = Join-Path $Context.Root $settings['VirtualBoxVbox']
+    $Context.VMwareState = Get-PvmVMwareState -Path $vmx
+    if ($Context.VMwareState.State -eq 'Saved') { Write-PvmLog -Path $log -Message 'Saved state found: suspended in VMware' }
+    Assert-PvmKnownState -Context $Context -State $Context.VMwareState -What 'whether the VM is suspended in VMware' -Setting 'VMwareVmx' -Path $vmx
+    $Context.VirtualBoxState = Get-PvmVirtualBoxState -Path $vbox
+    if ($Context.VirtualBoxState.State -eq 'Saved') { Write-PvmLog -Path $log -Message 'Saved state found: saved in VirtualBox' }
+    Assert-PvmKnownState -Context $Context -State $Context.VirtualBoxState -What 'whether the VM has a saved state in VirtualBox' -Setting 'VirtualBoxVbox' -Path $vbox
     $choice = @{
         Setting             = $settings['Hypervisor']
         VMwareInstalled     = [bool]$vmwareDir
         VirtualBoxInstalled = [bool]$virtualBoxDir
-        VMwareSuspended     = $vmwareSuspended
-        VirtualBoxSaved     = $virtualBoxSaved
+        VMwareSuspended     = ($Context.VMwareState.State -eq 'Saved')
+        VirtualBoxSaved     = ($Context.VirtualBoxState.State -eq 'Saved')
         VMwareVmxExists     = (Test-Path -LiteralPath $vmx)
     }
     $use = Select-PvmHypervisor @choice
@@ -737,15 +866,18 @@ function Invoke-PvmLaunch {
 # Run the launcher from the folder $LauncherPath, which holds settings.psd1, launcher.log and the
 # VERSION that the deploy tool writes, and whose parent folder is the stick's root: check the
 # stick, choose the hypervisor and start the VM. With -DryRun every check runs and the log says
-# what would change, but nothing is changed or started. Returns ExitCode, 0 or 1, and the Message
-# to show with its Icon, both empty when there is nothing to show. Stops and other errors are
-# logged as "STOPPED: ..." and returned; only a log that cannot be written throws.
+# what would change, but nothing is changed or started. Before a saved state is resumed, the
+# script block $AskResume gets the question and must return $true for Yes; without it the answer
+# is No. Returns ExitCode, 0 or 1, and the Message to show with its Icon, both empty when there is
+# nothing to show. Stops and other errors are logged as "STOPPED: ..." and returned; only a log
+# that cannot be written throws.
 function Invoke-PortableVM {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory)][string]$LauncherPath,
-        [switch]$DryRun
+        [switch]$DryRun,
+        [scriptblock]$AskResume
     )
     $logPath = Join-Path $LauncherPath 'launcher.log'
     try {
@@ -756,11 +888,15 @@ function Invoke-PortableVM {
         try { if (Test-Path -LiteralPath $versionPath -PathType Leaf) { $version = [IO.File]::ReadAllText($versionPath).Trim() } }
         catch { $version = 'unreadable' }
         Write-PvmLog -Path $logPath -Message "Launcher version $version"
+        # Invoke-PvmLaunch fills in VMwareState and VirtualBoxState.
         $context = [pscustomobject]@{
-            Root     = Split-Path $LauncherPath
-            LogPath  = $logPath
-            Letter   = $LauncherPath.Substring(0, 1).ToUpper()
-            DryRun   = [bool]$DryRun
+            Root            = Split-Path $LauncherPath
+            LogPath         = $logPath
+            Letter          = $LauncherPath.Substring(0, 1).ToUpper()
+            DryRun          = [bool]$DryRun
+            AskResume       = $AskResume
+            VMwareState     = $null
+            VirtualBoxState = $null
             # Import-PowerShellDataFile belongs to another module, so a missing file must stop here.
             Settings = Import-PowerShellDataFile -LiteralPath (Join-Path $LauncherPath 'settings.psd1') -ErrorAction Stop
         }
