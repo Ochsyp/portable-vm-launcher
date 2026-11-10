@@ -304,7 +304,8 @@ function Get-PvmPathProblem {
 # some scripts and emoji need inside a name; no blank or joiner at either end; and at least one
 # letter, number, punctuation mark or symbol that shows, not a filler such as U+3164. Categories
 # come from CharUnicodeInfo, whose tables are complete, unlike those of .NET's regular expressions
-# (which take U+00AD for a dash); a character those tables do not know yet counts as one that shows.
+# (which take U+00AD for a dash); a character those tables do not know yet counts as one that shows,
+# but a noncharacter such as U+FFFF, which will never be assigned, does not.
 function Test-PvmNameText {
     [CmdletBinding()]
     [OutputType([bool])]
@@ -320,7 +321,8 @@ function Test-PvmNameText {
         $pair = [char]::IsSurrogatePair($Value, $i)
         $code = if ($pair) { [char]::ConvertToUtf32($Value, $i) } else { [int]$Value[$i] }
         if ($refused -contains $category -and -not ($category -eq 'Format' -and $joiners -contains $code)) { return $false }
-        if ($category -match 'Letter|Number|Punctuation|Symbol|OtherNotAssigned' -and $fillers -notcontains $code) { $shows = $true }
+        $noncharacter = ($code -band 0xFFFE) -eq 0xFFFE -or ($code -ge 0xFDD0 -and $code -le 0xFDEF)
+        if ($category -match 'Letter|Number|Punctuation|Symbol|OtherNotAssigned' -and $fillers -notcontains $code -and -not $noncharacter) { $shows = $true }
         $count++
         if ($pair) { $i++ }
     }

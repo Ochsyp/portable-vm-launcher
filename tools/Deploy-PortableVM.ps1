@@ -669,6 +669,22 @@ function Invoke-PvmDeploy {
     $result
 }
 
+# Return the error message $Message with every quoted path below the full path $Target, or $Target
+# itself, replaced by a placeholder, since the stick's folder and file names can be private. The
+# path ends at the quote that closes it: one followed by a blank, a punctuation mark or the end, so
+# an apostrophe in a name does not end it early. Text outside quotes stays as it is.
+function Hide-DeployTargetPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Message,
+        [Parameter(Mandatory)][string]$Target
+    )
+    $base = [regex]::Escape($Target.TrimEnd('\', '/'))
+    $pattern = "(?<=['""])$base(?:[\\/][^\r\n]*?)?(?=['""](?:[\s.,;:!?)]|$))"
+    [regex]::Replace($Message, $pattern, '<a path below -Target, which -Verbose shows>', 'IgnoreCase')
+}
+
 # Return the report lines for the deploy result $Result (Invoke-PvmDeploy): what was deployed, or
 # would be under -WhatIf, and what a migration moved. They name no file from the stick.
 function Format-DeployReport {
@@ -697,6 +713,8 @@ function Format-DeployReport {
 if ($MyInvocation.InvocationName -ne '.') {
     try {
         if (-not $Target) { throw 'Give -Target, the folder on the stick that holds the Launcher and LauncherData folders.' }
+        # A full path, so that every path an error quotes starts with it (Hide-DeployTargetPath).
+        $Target = Convert-Path -LiteralPath $Target
         # -WhatIf and -Confirm go to Invoke-PvmDeploy alone: left in effect for the whole script,
         # they also reach the modules PowerShell loads on the way, which then skip or ask about
         # parts of their setup. For the same reason CimCmdlets, which the VM check needs, is loaded
@@ -715,14 +733,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         Write-Verbose $message
         # The stick's folder and file names can be private, so a path below -Target that an error
         # quotes is left out; -Verbose above shows it.
-        $prefixes = @()
-        if ($Target) {
-            $prefixes += $Target.TrimEnd('\')
-            try { $prefixes += [IO.Path]::GetFullPath($Target).TrimEnd('\') } catch { Write-Verbose "-Target is no full path: $($_.Exception.Message)" }
-        }
-        foreach ($prefix in @($prefixes | Where-Object { $_ } | Sort-Object Length -Descending)) {
-            $message = [regex]::Replace($message, [regex]::Escape($prefix) + '[^''"\r\n]*', '<a path below -Target, which -Verbose shows>', 'IgnoreCase')
-        }
+        if ($Target) { $message = Hide-DeployTargetPath -Message $message -Target $Target }
         Write-Output "Deploy-PortableVM: $message"
         exit 1
     }

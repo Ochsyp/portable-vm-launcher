@@ -523,6 +523,23 @@ Describe 'Get-DeployVmProcess' {
     }
 }
 
+Describe 'Hide-DeployTargetPath' {
+    It 'leaves out a quoted path below -Target <Target> and keeps every other word: <Case>' -ForEach @(
+        @{ Case = 'a settings problem'; Target = 'X:\'; Message = "LauncherData\settings.psd1 has 1 problem:`n- VMwareVmx: must name a .vmx file below the folder that holds Launcher and LauncherData, without a drive, '.' or '..'"; Expected = $null }
+        @{ Case = 'a name problem'; Target = 'E:\'; Message = "- GuestName: must be 1 to 40 characters of text that shows"; Expected = $null }
+        @{ Case = 'a path in a .NET error'; Target = 'X:\'; Message = "Access to the path 'X:\VMware\a.vmdk.orig' is denied."; Expected = "Access to the path '<a path below -Target, which -Verbose shows>' is denied." }
+        @{ Case = 'a path in another case'; Target = 'X:\Stick'; Message = "Cannot rename because item at 'x:\stick\Launcher' does not exist."; Expected = "Cannot rename because item at '<a path below -Target, which -Verbose shows>' does not exist." }
+        @{ Case = 'an apostrophe in a name'; Target = 'X:\Stick'; Message = "The process cannot access the file 'X:\Stick\VMware\Ann's VM\a.vmdk' because it is being used by another process."; Expected = "The process cannot access the file '<a path below -Target, which -Verbose shows>' because it is being used by another process." }
+        @{ Case = 'a path in nested quotes'; Target = 'X:\Stick'; Message = 'Exception calling "ReadAllText" with "1" argument(s): "Could not find file ''X:\Stick\Start Old.cmd''."'; Expected = 'Exception calling "ReadAllText" with "1" argument(s): "Could not find file ''<a path below -Target, which -Verbose shows>''."' }
+        @{ Case = 'the folder itself'; Target = 'X:\Stick'; Message = "Cannot find path 'X:\Stick' because it does not exist."; Expected = "Cannot find path '<a path below -Target, which -Verbose shows>' because it does not exist." }
+        @{ Case = 'a folder beside it'; Target = 'X:\Stick'; Message = "Access to the path 'X:\Sticky\a' is denied."; Expected = $null }
+        @{ Case = 'a -Target with regex characters'; Target = 'Q:\st.ck [1] (a+b) $x'; Message = "Access to the path 'Q:\st.ck [1] (a+b) `$x\Launcher' is denied. Not 'Q:\stack [1] (a+b) `$x\Launcher'."; Expected = "Access to the path '<a path below -Target, which -Verbose shows>' is denied. Not 'Q:\stack [1] (a+b) `$x\Launcher'." }
+    ) {
+        $want = if ($null -eq $Expected) { $Message } else { $Expected }
+        Hide-DeployTargetPath -Message $Message -Target $Target | Should -BeExactly $want
+    }
+}
+
 Describe 'Get-DeployVersion' {
     It 'calls a folder that is no git clone version unknown' {
         $folder = Join-Path $TestDrive 'not-a-clone'

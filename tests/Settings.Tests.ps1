@@ -207,6 +207,7 @@ Describe 'Checking settings against schema 2' {
             ('Test' + [char]::ConvertFromUtf32(0x1D173)), ('Te' + [char]::ConvertFromUtf32(0xF0000) + 'st'), ('Te' + [char]0xE000 + 'st')
             ('Debian ' + [char]0x200D), ([string][char]0x200D + ' ' + [char]0x200D), ([string][char]0x200C + 'Test')
             [string][char]0x3164, ([string][char]0x2800 + [char]0x2800), [string][char]0x034F, ([string][char]0x0301 + [char]0x0301), ('x' * 40 + [char]::ConvertFromUtf32(0x1F427))
+            [string][char]0xFFFF, [string][char]0xFDD0, [char]::ConvertFromUtf32(0x1FFFF)
         )
         foreach ($name in $names) {
             Test-PvmSetting -Settings (Get-GoodSetting -Change @{ GuestName = $name }) |
