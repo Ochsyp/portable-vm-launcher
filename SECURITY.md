@@ -24,9 +24,14 @@ they identify one stick and the PCs it was used on.
 
 ## Data that stays private
 
-- `Launcher\settings.psd1` holds the stick's disk signature, size and partition layout and the
-  VM's UUID. `launcher.log` also holds disk numbers, install paths and times of use. Both are
-  gitignored; only `examples\settings.example.psd1`, with placeholders, is committed.
+- `LauncherData\settings.psd1` holds the stick's disk signature, size and partition layout, the
+  VM's UUID and the names of the VM and the guest. `LauncherData\logs\launcher.log` also holds
+  disk numbers, install paths and times of use, and `LauncherData\backups` holds copies of VM
+  files. All of `LauncherData` is gitignored; only `examples\settings.example.psd1`, with
+  placeholders, is committed.
+- The launcher reads the settings as data: it parses the file and accepts only plain values,
+  so nothing in it runs. Whoever can write to the stick still decides what runs, as the trust
+  model says.
 - The VM folders hold UUIDs, MAC addresses and host details, and stay on the stick.
 
 ## Automated checks
@@ -35,8 +40,9 @@ they identify one stick and the PCs it was used on.
   commit for UUIDs that do not start with the synthetic `5ca1ab1e`, VMware UUIDs, MAC addresses,
   private IPv4 and IPv6 addresses, `.lan` host names, user home paths, e-mail addresses other
   than GitHub no-reply ones, and the strings in the untracked `.git/info/privacy-denylist`.
-- When the real settings file or the denylist exists, `.githooks/pre-push` runs
-  `tools\Find-PrivateData.ps1 -History`. It looks for their values in the contents and names of
+- When a real settings file (`LauncherData\settings.psd1` or the older `Launcher\settings.psd1`)
+  or the denylist exists, `.githooks/pre-push` runs `tools\Find-PrivateData.ps1 -History`. It
+  looks for their values, the VM's and the guest's names included, in the contents and names of
   the files in git's index and in the whole history, in commit messages and in ref names.
 - gitleaks scans the commits of every push and pull request, and the whole history when the
   workflow is started by hand (`.github/workflows/secret-scan.yml`), with the rules of

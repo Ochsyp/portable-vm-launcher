@@ -4,8 +4,9 @@
 #
 # Reads a stick and the VM files on it and reports what the next phases of the redesign rely on,
 # without changing anything. -Root is the folder on the stick's Data partition that holds the
-# Launcher folder, for example X:\; -SettingsPath defaults to Launcher\settings.psd1 there. Run it
-# in Windows PowerShell 5.1, elevated if Get-Disk needs it on this PC:
+# Launcher folder, for example X:\; -SettingsPath defaults to LauncherData\settings.psd1 there, or
+# to Launcher\settings.psd1 on a stick whose settings were not migrated yet. Run it in Windows
+# PowerShell 5.1, elevated if Get-Disk needs it on this PC:
 #   powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Get-StickInventory.ps1 -Root X:\
 # Each line holds a check and yes, no or unknown, and never a value read from the stick or the
 # PC, so the output can go into a pull request as it is. -Verbose adds why a check is unknown,
@@ -23,6 +24,20 @@ $ErrorActionPreference = 'Stop'
 $WindowsFileSystems = @('NTFS', 'FAT', 'FAT32', 'exFAT', 'ReFS')
 # Larger .vmdk files hold disk data, not a descriptor, and are not read.
 $MaxDescriptorBytes = 1MB
+# The device that the launcher's disarmed descriptor copies name instead of a raw disk, as
+# Get-PvmDisarmedDevice in src\PortableVM.psm1 returns it; this tool stays standalone.
+$DisarmedDevice = '\\.\PortableVM-disarmed'
+
+# Return the settings file of the stick folder $Root: LauncherData\settings.psd1, or
+# Launcher\settings.psd1 when only that one exists, as on a stick that was not migrated yet.
+function Get-InventorySettingsPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Root)
+    $data = Join-Path $Root 'LauncherData\settings.psd1'
+    $old = Join-Path $Root 'Launcher\settings.psd1'
+    if ((Test-Path -LiteralPath $data -PathType Leaf) -or -not (Test-Path -LiteralPath $old -PathType Leaf)) { $data } else { $old }
+}
 
 # Return the partition with the drive letter $DriveLetter.
 function Get-InventoryPartition {
@@ -382,6 +397,46 @@ function Get-InventoryVirtualBoxCheck {
     }
 }
 
+# Return the checks of the launcher's own folders below $Root, read with the settings $Settings:
+# whether LauncherData and its log are there, whether the settings are schema 2, whether Launcher
+# still holds a settings file, and whether the copies that a settings migration moved to
+# LauncherData\backups\legacy are there and every descriptor copy among them names the disarmed
+# device rather than a raw one.
+function Get-InventoryDataCheck {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [hashtable]$Settings
+    )
+    $data = Join-Path $Root 'LauncherData'
+    $legacy = Join-Path $data 'backups\legacy'
+    $schema2 = if ($Settings) { $Settings['SchemaVersion'] -is [int] -and $Settings['SchemaVersion'] -eq 2 } else { $null }
+    $copies = $null
+    try {
+        if (Test-Path -LiteralPath $legacy -PathType Container) {
+            $copies = @(Get-ChildItem -LiteralPath $legacy -Recurse -File | Where-Object { $_.Name -like '*.orig' -or $_.Name -like '*.launcher-backup' })
+        } else {
+            $copies = @()
+        }
+    } catch {
+        Write-Verbose "legacy copies: $($_.Exception.Message)"
+    }
+    Get-InventoryCheck -Name 'LauncherData folder found' -Test { Test-Path -LiteralPath $data -PathType Container }
+    Get-InventoryCheck -Name 'settings file has SchemaVersion 2' -Test { $schema2 }
+    Get-InventoryCheck -Name 'Launcher folder holds a settings file' -Test { Test-Path -LiteralPath (Join-Path $Root 'Launcher\settings.psd1') -PathType Leaf }
+    Get-InventoryCheck -Name 'LauncherData log found' -Test { Test-Path -LiteralPath (Join-Path $data 'logs\launcher.log') -PathType Leaf }
+    Get-InventoryCheck -Name 'LauncherData backups hold legacy copies' -Test { if ($null -ne $copies) { $copies.Count -gt 0 } }
+    Get-InventoryCheck -Name 'a legacy descriptor copy names a raw device' -Test {
+        if ($null -ne $copies) {
+            @($copies | Where-Object { $_.Name -like '*.vmdk.orig' -and $_.Length -lt $MaxDescriptorBytes } | Where-Object {
+                    $extents = [regex]::Matches([IO.File]::ReadAllText($_.FullName), '(?im)^\s*(?:RW|RDONLY|NOACCESS)\s+\d+\s+FLAT\s+"(\\\\[.?]\\[^"\r\n]*)"')
+                    @($extents | Where-Object { $_.Groups[1].Value -ne $DisarmedDevice }).Count -gt 0
+                }).Count -gt 0
+        }
+    }
+}
+
 # Return the checks of this PC: which of the two hypervisors the launcher finds installed, read
 # from the same registry keys and files as the launcher reads them.
 function Get-InventoryHostCheck {
@@ -413,6 +468,7 @@ function Get-StickInventory {
     $settings = $null
     try { $settings = Import-PowerShellDataFile -LiteralPath $SettingsPath -ErrorAction Stop } catch { Write-Verbose "settings: $($_.Exception.Message)" }
     Get-InventoryCheck -Name 'settings file read' -Test { $null -ne $settings }
+    Get-InventoryDataCheck -Root $Root -Settings $settings
     Get-InventoryStickCheck -Root $Root -Settings $settings
     Get-InventoryVMwareCheck -Root $Root -Settings $settings
     Get-InventoryVirtualBoxCheck -Root $Root -Settings $settings
@@ -423,7 +479,7 @@ function Get-StickInventory {
 if ($MyInvocation.InvocationName -ne '.') {
     try {
         if (-not $Root) { throw 'Give -Root, the folder on the stick that holds the Launcher folder.' }
-        if (-not $SettingsPath) { $SettingsPath = Join-Path $Root 'Launcher\settings.psd1' }
+        if (-not $SettingsPath) { $SettingsPath = Get-InventorySettingsPath -Root $Root }
         Get-StickInventory -Root $Root -SettingsPath $SettingsPath | ForEach-Object { Format-InventoryLine -Check $_ }
         exit 0
     } catch {

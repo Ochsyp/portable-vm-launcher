@@ -7,9 +7,10 @@ settings*.psd1.*
 *.log.[0-9]*
 *.bak
 
-# The code lives in src. A Launcher folder in a clone holds only a copy of a stick's real
-# settings and log, which tools\Find-PrivateData.ps1 reads.
+# The code lives in src. A Launcher or LauncherData folder in a clone holds only a copy of a
+# stick's real settings, log and backups, whose values tools\Find-PrivateData.ps1 looks for.
 /Launcher/
+/LauncherData/
 
 # Copies the launcher makes before it rewrites a file.
 *.orig

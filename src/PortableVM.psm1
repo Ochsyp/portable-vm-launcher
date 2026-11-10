@@ -2,18 +2,24 @@
 #                      PORTABLE VM
 # -------------------------------------------------------
 #
-# The launcher's checks and start steps, used by Start-PortableVM.ps1 in the same folder: find
-# the stick the launcher runs from and check that it is the configured one, choose VMware
-# Workstation or VirtualBox, point the VM's raw-disk descriptor at the stick and start the VM.
-# The decisions, messages and log lines are those of the launcher before the redesign, apart from
-# the changes that CHANGELOG.md lists, such as the suspend guard of phase 2.
+# The launcher's checks and start steps, used by Start-PortableVM.ps1 in the same folder: read
+# and check the settings, find the stick the launcher runs from and check that it is the
+# configured one, choose VMware Workstation or VirtualBox, point the VM's raw-disk descriptor at
+# the stick and start the VM. The decisions, messages and log lines are those of the launcher
+# before the redesign, apart from the changes that CHANGELOG.md lists, such as the suspend guard
+# of phase 2 and the settings checks of phase 3.
+#
+# The launcher's code lives in the Launcher folder, which each deploy replaces as a whole. What it
+# keeps between runs lives beside it in LauncherData: settings.psd1, logs\launcher.log and, below
+# backups\, the first version of each file it rewrites (Get-PvmDataPath).
 #
 # Importing the module runs nothing. Functions take what they need as parameters and throw, and
 # Invoke-PortableVM turns a stop into the exit code and the message for the script to show.
 # Everything the launcher reads from or starts on the PC goes through an Invoke-Pvm* adapter.
 # With $env:PVM_TEST set to '1', as tests\run-checks.ps1 sets it, an adapter that a test did not
 # mock throws, so no test reaches a disk, a process or a VM. Files are read and written directly;
-# the tests keep theirs in TestDrive.
+# the tests keep theirs in TestDrive. tools\Deploy-PortableVM.ps1 imports the module too, for the
+# settings checks and to turn schema 1 settings into schema 2.
 
 Set-StrictMode -Version 3.0
 # Module functions do not see the caller's preference variables, so the module sets its own.
@@ -189,6 +195,391 @@ function Invoke-PvmSleep {
     Start-Sleep -Seconds $Seconds
 }
 
+# --- Data folder -----------------------------------------------------------------------------
+
+# Return the paths that the launcher in the folder $LauncherPath uses. Root is the stick folder
+# that holds Launcher and LauncherData, and the folder the path settings start from. Data is
+# LauncherData, with Settings (settings.psd1), Logs and Log (logs\launcher.log), Backups (the
+# first versions of the files the launcher rewrites), Legacy (backups\legacy, the copies that
+# deploy -MigrateSettings moved there from the VM folders) and State (kept free for later
+# phases). OldSettings is Launcher\settings.psd1, where the launcher read its settings before.
+function Get-PvmDataPath {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param([Parameter(Mandatory)][string]$LauncherPath)
+    $root = Split-Path $LauncherPath
+    $data = Join-Path $root 'LauncherData'
+    [pscustomobject]@{
+        Root        = $root
+        Data        = $data
+        Settings    = Join-Path $data 'settings.psd1'
+        Logs        = Join-Path $data 'logs'
+        Log         = Join-Path $data 'logs\launcher.log'
+        Backups     = Join-Path $data 'backups'
+        Legacy      = Join-Path $data 'backups\legacy'
+        State       = Join-Path $data 'state'
+        OldSettings = Join-Path $LauncherPath 'settings.psd1'
+    }
+}
+
+# Return where the launcher keeps the first version of the file $Path, which lies below the stick
+# folder $Root: at the same path relative to $Backups, with $Suffix added. Throws when $Path is not
+# below $Root, which the path settings rule out.
+function Get-PvmBackupPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Backups,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Suffix
+    )
+    $below = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+    $full = [IO.Path]::GetFullPath($Path)
+    if (-not $full.StartsWith($below, [StringComparison]::OrdinalIgnoreCase)) { throw "$Path is not below $Root." }
+    Join-Path $Backups ($full.Substring($below.Length) + $Suffix)
+}
+
+# --- Settings --------------------------------------------------------------------------------
+# LauncherData\settings.psd1 holds one hashtable of plain values. The launcher parses it without
+# running anything in it, checks every value against schema 2 before it reads the PC, and fills
+# in the defaults. A file with problems stops the launcher with one message that names each bad
+# key and never a value from the file.
+
+# Return settings schema 2, one entry per key, in the order the checks report them: its Name,
+# whether it is Required, the Default a missing key gets, the Kind of value it holds and the
+# Values that kind allows: the words of a Choice, or the extension of a Path, none for a folder.
+function Get-PvmSettingSchema {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param()
+    [pscustomobject]@{ Name = 'SchemaVersion'; Required = $true; Default = $null; Kind = 'Schema'; Values = @() }
+    [pscustomobject]@{ Name = 'IsExample'; Required = $false; Default = $false; Kind = 'Bool'; Values = @() }
+    [pscustomobject]@{ Name = 'VmDisplayName'; Required = $false; Default = 'the VM'; Kind = 'Name'; Values = @() }
+    [pscustomobject]@{ Name = 'GuestName'; Required = $false; Default = 'the guest'; Kind = 'Name'; Values = @() }
+    [pscustomobject]@{ Name = 'Hypervisor'; Required = $false; Default = 'Auto'; Kind = 'Choice'; Values = @('Auto', 'VMware', 'VirtualBox') }
+    [pscustomobject]@{ Name = 'VMwareView'; Required = $false; Default = 'Window'; Kind = 'Choice'; Values = @('Window', 'FullScreen') }
+    [pscustomobject]@{ Name = 'SavedStatePolicy'; Required = $false; Default = 'Ask'; Kind = 'Choice'; Values = @('Ask', 'Refuse') }
+    [pscustomobject]@{ Name = 'HideDataPartition'; Required = $false; Default = $false; Kind = 'Bool'; Values = @() }
+    [pscustomobject]@{ Name = 'StickMbrSignature'; Required = $true; Default = $null; Kind = 'Signature'; Values = @() }
+    [pscustomobject]@{ Name = 'StickSectors'; Required = $true; Default = $null; Kind = 'Count'; Values = @() }
+    [pscustomobject]@{ Name = 'VmSectors'; Required = $true; Default = $null; Kind = 'Count'; Values = @() }
+    [pscustomobject]@{ Name = 'DataPartitionStart'; Required = $true; Default = $null; Kind = 'Count'; Values = @() }
+    [pscustomobject]@{ Name = 'VirtualBoxVmUuid'; Required = $true; Default = $null; Kind = 'Uuid'; Values = @() }
+    [pscustomobject]@{ Name = 'VirtualBoxHome'; Required = $true; Default = $null; Kind = 'Path'; Values = @() }
+    [pscustomobject]@{ Name = 'VirtualBoxVbox'; Required = $true; Default = $null; Kind = 'Path'; Values = @('.vbox') }
+    [pscustomobject]@{ Name = 'VirtualBoxDisk'; Required = $true; Default = $null; Kind = 'Path'; Values = @('.vmdk') }
+    [pscustomobject]@{ Name = 'VMwareVmx'; Required = $true; Default = $null; Kind = 'Path'; Values = @('.vmx') }
+    [pscustomobject]@{ Name = 'VMwareDisk'; Required = $true; Default = $null; Kind = 'Path'; Values = @('.vmdk') }
+}
+
+# Return what is wrong with the path setting $Value, or nothing when it names a file that ends in
+# $Extension, or a folder when $Extension is empty, below the stick folder. Such a path is
+# relative, uses \ or / as separator and has no blank at either end, and each of its parts is a
+# real name: not empty, '.' or '..', not ending in a dot or a blank, no device name such as CON
+# or NUL, and no character Windows forbids in a name, such as ':'. Joined to the stick folder, it
+# gives the path that [IO.Path]::GetFullPath gives, so the launcher compares and logs the path
+# Windows uses.
+function Get-PvmPathProblem {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Value,
+        [AllowEmptyString()][string]$Extension
+    )
+    $what = if ($Extension) { "a $Extension file" } else { 'a folder' }
+    $problem = "must name $what below the folder that holds Launcher and LauncherData, without a drive, '.' or '..'"
+    if (-not $Value -or $Value -ne $Value.Trim() -or $Value -match '\A[\\/]') { return $problem }
+    $forbidden = [IO.Path]::GetInvalidFileNameChars()
+    foreach ($part in ($Value -split '[\\/]')) {
+        if (-not $part -or $part -match '[. ]\z' -or $part.IndexOfAny($forbidden) -ge 0 -or
+            $part -match '\A(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9]|LPT[1-9])(\.|\z)') { return $problem }
+    }
+    if ($Extension -and -not $Value.EndsWith($Extension, [StringComparison]::OrdinalIgnoreCase)) { return $problem }
+}
+
+# Return what is wrong with $Value as the value of the schema entry $Entry (Get-PvmSettingSchema),
+# or nothing when it is good. Values are not converted: 'false' is no $false, and '42' and 42.0
+# are no whole numbers. The formats are anchored with \A and \z, since $ also matches before a
+# final line feed.
+function Get-PvmValueProblem {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Entry,
+        [AllowNull()]$Value
+    )
+    $text = $Value -is [string]
+    switch ($Entry.Kind) {
+        'Schema' { if (-not ($Value -is [int] -and $Value -eq 2)) { return 'must be 2, the only schema this launcher reads' } }
+        'Bool' { if ($Value -isnot [bool]) { return 'must be $true or $false' } }
+        'Name' {
+            if (-not ($text -and $Value -match '\A(?!\s)[^\p{C}\p{Zl}\p{Zp}]{1,40}(?<!\s)\z')) {
+                return 'must be text of 1 to 40 characters, without control characters and without blanks at either end'
+            }
+        }
+        'Choice' {
+            if (-not ($text -and $Entry.Values -contains $Value)) {
+                $words = @($Entry.Values | ForEach-Object { "'$_'" })
+                return "must be $($words[0..($words.Count - 2)] -join ', ') or $($words[-1])"
+            }
+        }
+        'Signature' {
+            if (-not ($text -and $Value -match '\A[0-9A-Fa-f]{8}\z' -and $Value -ne '00000000')) { return 'must be the disk signature as 8 hex digits, not 00000000' }
+        }
+        'Count' { if (-not (($Value -is [int] -or $Value -is [long]) -and $Value -gt 0)) { return 'must be a whole number above 0' } }
+        'Uuid' {
+            if (-not ($text -and $Value -match '\A[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\z')) {
+                return "must be the VM's UUID as VBoxManage list vms shows it, without braces"
+            }
+        }
+        'Path' {
+            $extension = if ($Entry.Values.Count) { $Entry.Values[0] } else { '' }
+            $value = if ($text) { $Value } else { '' }
+            return (Get-PvmPathProblem -Value $value -Extension $extension)
+        }
+        default { throw "The schema has no rule for the kind $($Entry.Kind)." }
+    }
+}
+
+# Return the problems of $Settings, the hashtable read from a settings file, against
+# Get-PvmSettingSchema: one '<Key>: <what it must be>' line per bad key, never its value. Unknown
+# keys come first, then the schema's keys in its order, then the rule that ties the three sector
+# values together, checked only when each of them is good. A file still marked IsExample = $true,
+# or one without SchemaVersion, gets that one problem only.
+function Test-PvmSetting {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][hashtable]$Settings)
+    # Keys match without case, as in any PowerShell hashtable.
+    $values = @{}
+    foreach ($key in $Settings.Keys) { $values["$key"] = $Settings[$key] }
+    if ($values['IsExample'] -is [bool] -and $values['IsExample']) {
+        return 'IsExample: the file is still the example; fill in your values, then delete the IsExample line'
+    }
+    if (-not $values.ContainsKey('SchemaVersion')) { return 'SchemaVersion: missing; add SchemaVersion = 2 (see examples\settings.example.psd1)' }
+    $schema = @(Get-PvmSettingSchema)
+    $names = @($schema | ForEach-Object { $_.Name })
+    foreach ($key in @($values.Keys | Sort-Object)) {
+        if ($names -notcontains $key) { "${key}: unknown setting; compare it with examples\settings.example.psd1" }
+    }
+    $good = @{}
+    foreach ($entry in $schema) {
+        if (-not $values.ContainsKey($entry.Name)) {
+            if ($entry.Required) { "$($entry.Name): missing" }
+            continue
+        }
+        $problem = Get-PvmValueProblem -Entry $entry -Value $values[$entry.Name]
+        if ($problem) { "$($entry.Name): $problem" } else { $good[$entry.Name] = $true }
+    }
+    if ($good['StickSectors'] -and $good['VmSectors'] -and $good['DataPartitionStart'] -and
+        -not ($values['DataPartitionStart'] -lt $values['VmSectors'] -and $values['VmSectors'] -le $values['StickSectors'])) {
+        'VmSectors: must be above DataPartitionStart and at most StickSectors'
+    }
+}
+
+# Return the checked settings $Settings with the Default of each missing key filled in and the
+# three sector values as [int64].
+function Merge-PvmSetting {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([Parameter(Mandatory)][hashtable]$Settings)
+    $merged = @{}
+    foreach ($key in $Settings.Keys) { $merged["$key"] = $Settings[$key] }
+    foreach ($entry in Get-PvmSettingSchema) {
+        if (-not $merged.ContainsKey($entry.Name) -and -not $entry.Required) { $merged[$entry.Name] = $entry.Default }
+    }
+    foreach ($name in 'StickSectors', 'VmSectors', 'DataPartitionStart') { $merged[$name] = [int64]$merged[$name] }
+    $merged
+}
+
+# Return the text of a settings file from its bytes $Bytes, decoded strictly. A byte order mark
+# chooses UTF-8 or UTF-16. Without one the file must be ASCII: Windows PowerShell 5.1, and so
+# Import-PowerShellDataFile in the tools, reads such a file as ANSI, and the launcher and the
+# tools must see the same text. -Legacy reads a file without a byte order mark as ANSI, as the
+# launcher before schema 2 did. Throws the reason, which quotes nothing from the file.
+function ConvertFrom-PvmDataFileByte {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes,
+        [switch]$Legacy
+    )
+    $name = ''
+    if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {
+        $name = 'UTF-8'
+        $encoding = New-Object System.Text.UTF8Encoding $false, $true
+        $skip = 3
+    } elseif ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) {
+        $name = 'UTF-16'
+        $encoding = New-Object System.Text.UnicodeEncoding $false, $false, $true
+        $skip = 2
+    } elseif ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF) {
+        $name = 'UTF-16'
+        $encoding = New-Object System.Text.UnicodeEncoding $true, $false, $true
+        $skip = 2
+    } elseif ($Legacy) {
+        return [Text.Encoding]::Default.GetString($Bytes)
+    } else {
+        if (@($Bytes | Where-Object { $_ -gt 0x7F }).Count -gt 0) {
+            throw 'it holds characters outside ASCII but no byte order mark; save it as UTF-8 with BOM'
+        }
+        return [Text.Encoding]::ASCII.GetString($Bytes)
+    }
+    try { $encoding.GetString($Bytes, $skip, $Bytes.Length - $skip) }
+    catch { throw "it is no valid $name" }
+}
+
+# Return the HashtableAst of the PowerShell data text $Text, which must hold that one hashtable
+# and nothing else: no param, begin or process block, no trap, no second statement and no
+# redirection. Its values must be literals: text without $ expressions, numbers, $true, $false and
+# $null, and arrays or hashtables of them, so not even a type conversion such as [int]'5' runs
+# when the values are read. Parsing runs nothing. Throws the reason, with the line and the
+# parser's error ID but nothing quoted from the text.
+function Get-PvmDataFileHashtable {
+    [CmdletBinding()]
+    [OutputType([System.Management.Automation.Language.HashtableAst])]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -gt 0) { throw "line $($errors[0].Extent.StartLineNumber) is no valid PowerShell data ($($errors[0].ErrorId))" }
+    $element = $null
+    if ($null -ne $ast.EndBlock -and $ast.EndBlock.Statements.Count -eq 1 -and $null -eq $ast.EndBlock.Traps -and
+        $ast.EndBlock.Statements[0] -is [System.Management.Automation.Language.PipelineAst] -and
+        $ast.EndBlock.Statements[0].PipelineElements.Count -eq 1) {
+        $element = $ast.EndBlock.Statements[0].PipelineElements[0]
+    }
+    if ($null -ne $ast.ParamBlock -or $null -ne $ast.DynamicParamBlock -or $null -ne $ast.BeginBlock -or $null -ne $ast.ProcessBlock -or
+        $element -isnot [System.Management.Automation.Language.CommandExpressionAst] -or $element.Redirections.Count -gt 0 -or
+        $element.Expression -isnot [System.Management.Automation.Language.HashtableAst]) {
+        throw 'it must hold one hashtable, @{ ... }, and nothing else'
+    }
+    $literals = 'HashtableAst', 'PipelineAst', 'CommandExpressionAst', 'ConstantExpressionAst', 'StringConstantExpressionAst',
+    'ArrayLiteralAst', 'ArrayExpressionAst', 'StatementBlockAst', 'VariableExpressionAst'
+    foreach ($node in $element.Expression.FindAll({ $true }, $true)) {
+        $name = $node.GetType().Name
+        if ($literals -notcontains $name -or
+            ($name -eq 'VariableExpressionAst' -and @('true', 'false', 'null') -notcontains $node.VariablePath.UserPath)) {
+            throw "line $($node.Extent.StartLineNumber) holds an expression; use plain text, numbers, `$true, `$false or `$null"
+        }
+    }
+    $element.Expression
+}
+
+# Return the hashtable in the PowerShell data file $Path, read without running anything in it:
+# decoded by ConvertFrom-PvmDataFileByte (-Legacy for a schema 1 file), parsed by
+# Get-PvmDataFileHashtable, and turned into values only when each value is a constant: text, a
+# number, $true, $false or $null, or an array or hashtable of them. Throws the reason, which
+# quotes nothing from the file.
+function Import-PvmDataFile {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$Legacy
+    )
+    try { $bytes = [IO.File]::ReadAllBytes($Path) }
+    catch {
+        $reason = if ($null -ne $_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
+        throw "it cannot be opened ($reason)"
+    }
+    $hashtable = Get-PvmDataFileHashtable -Text (ConvertFrom-PvmDataFileByte -Bytes $bytes -Legacy:$Legacy)
+    try { $hashtable.SafeGetValue() }
+    catch { throw 'a value is an expression; use plain text, numbers, $true, $false or $null' }
+}
+
+# Return the settings in the file $Path, LauncherData\settings.psd1, checked by Test-PvmSetting
+# and with the defaults filled in (Merge-PvmSetting). Throws a stop that names every problem, or
+# says why the file cannot be read.
+function Import-PvmSetting {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([Parameter(Mandatory)][string]$Path)
+    $name = 'LauncherData\settings.psd1'
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw (Get-PvmStopException -Message "$name is missing. Copy examples\settings.example.psd1 there and fill it in.")
+    }
+    try { $raw = Import-PvmDataFile -Path $Path }
+    catch { throw (Get-PvmStopException -Message "$name cannot be read: $($_.Exception.Message).") }
+    $problems = @(Test-PvmSetting -Settings $raw)
+    if ($problems.Count -gt 0) {
+        $noun = if ($problems.Count -eq 1) { 'problem' } else { 'problems' }
+        throw (Get-PvmStopException -Message ("$name has $($problems.Count) ${noun}:`n" + (($problems | ForEach-Object { "- $_" }) -join "`n")))
+    }
+    Merge-PvmSetting -Settings $raw
+}
+
+# Return the schema 1 settings text $Text as schema 2: 'SchemaVersion = 2', and the names when
+# $VmDisplayName or $GuestName is given, each on a line of its own right after the '@{' that
+# opens the hashtable, with the text's own line ending. Every other character stays, comments
+# too. Throws when $Text holds no single hashtable of plain values, or has SchemaVersion already.
+function ConvertTo-PvmSchema2Text {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+        [string]$VmDisplayName,
+        [string]$GuestName
+    )
+    $hashtable = Get-PvmDataFileHashtable -Text $Text
+    try { $values = $hashtable.SafeGetValue() }
+    catch { throw 'a value is an expression; use plain text, numbers, $true, $false or $null' }
+    if (@($values.Keys | Where-Object { "$_" -eq 'SchemaVersion' }).Count -gt 0) { throw 'it has SchemaVersion already' }
+    $newline = if ($Text.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $lines = @('SchemaVersion = 2')
+    if ($VmDisplayName) { $lines += "VmDisplayName = '$([System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($VmDisplayName))'" }
+    if ($GuestName) { $lines += "GuestName = '$([System.Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($GuestName))'" }
+    $block = ($lines | ForEach-Object { "    $_$newline" }) -join ''
+    # After '@{' and, when the rest of that line is blank or a comment, after that line too.
+    $at = $hashtable.Extent.StartOffset + 2
+    if ($Text.Substring($at) -match '\A[ \t]*(#[^\r\n]*)?\r?\n') { $at += $Matches[0].Length }
+    else { $block = $newline + $block }
+    $Text.Substring(0, $at) + $block + $Text.Substring($at)
+}
+
+# --- Messages --------------------------------------------------------------------------------
+
+# Return $Template with each {Token} filled in, in one pass, so that nothing filled in is read as
+# a token again: {VM} and {vm} get the VM's display name, $Names.VM, {Guest} and {guest} the
+# guest's name, $Names.Guest, and any other {Token} the value of that key in $Values. {VM} and
+# {Guest} start a sentence, so the name's first letter is capitalised there. A token with no
+# value stays as it is.
+function Format-PvmMessage {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$Template,
+        [Parameter(Mandatory)][hashtable]$Names,
+        [hashtable]$Values = @{}
+    )
+    $message = New-Object System.Text.StringBuilder
+    $done = 0
+    foreach ($match in [regex]::Matches($Template, '\{(\w+)\}')) {
+        $token = $match.Groups[1].Value
+        $text = $null
+        if ($token -ceq 'VM' -or $token -ceq 'vm') { $text = $Names['VM'] }
+        elseif ($token -ceq 'Guest' -or $token -ceq 'guest') { $text = $Names['Guest'] }
+        elseif ($Values.ContainsKey($token)) { $text = "$($Values[$token])" }
+        if ($null -eq $text) { continue }
+        if (($token -ceq 'VM' -or $token -ceq 'Guest') -and $text) { $text = $text.Substring(0, 1).ToUpperInvariant() + $text.Substring(1) }
+        [void]$message.Append($Template, $done, $match.Index - $done).Append($text)
+        $done = $match.Index + $match.Length
+    }
+    [void]$message.Append($Template, $done, $Template.Length - $done)
+    $message.ToString()
+}
+
+# Return the title of the launcher's dialogs for the settings $Settings: VmDisplayName when it is
+# anything but the neutral default 'the VM', in any case, else 'Portable VM'.
+function Get-PvmCaption {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][hashtable]$Settings)
+    $name = $Settings['VmDisplayName']
+    if ($name -and $name -ne 'the VM') { $name } else { 'Portable VM' }
+}
+
 # --- Stick identity --------------------------------------------------------------------------
 
 # Return the MBR signature of $Disk as 8 hex digits, or 'none' when the disk has none.
@@ -298,15 +689,66 @@ function Get-PvmVMwareDescriptorText {
     $lines -join "`r`n"
 }
 
+# Return the device that disarmed descriptor copies name instead of a raw disk. No disk has this
+# name, so a hypervisor that opens such a copy by mistake finds no disk, rather than whatever disk
+# has the copy's old number now.
+function Get-PvmDisarmedDevice {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    '\\.\PortableVM-disarmed'
+}
+
+# Return the descriptor text $Text with the target of every FLAT extent that names a raw device,
+# a path that starts with \\.\ or \\?\, set to the disarmed device (Get-PvmDisarmedDevice).
+# Every other character stays, so a second pass changes nothing, and ConvertTo-PvmDescriptorText
+# arms such a copy again.
+function ConvertTo-PvmDisarmedDescriptorText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $device = Get-PvmDisarmedDevice
+    [regex]::Replace($Text, '(?im)^([ \t]*(?:RW|RDONLY|NOACCESS)[ \t]+\d+[ \t]+FLAT[ \t]+")(\\\\[.?]\\[^"\r\n]*)(")', {
+            param($match)
+            if ($match.Groups[2].Value -eq $device) { $match.Value }
+            else { $match.Groups[1].Value + $device + $match.Groups[3].Value }
+        })
+}
+
+# Keep the first version of the file $Path at $BackupPath, creating its folder. A copy that is
+# there already is never replaced. With -Disarm the file is a descriptor, and the copy names the
+# disarmed device in its raw-device extents (ConvertTo-PvmDisarmedDescriptorText); every other
+# byte is kept.
+function Save-PvmFirstCopy {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$BackupPath,
+        [switch]$Disarm
+    )
+    if (Test-Path -LiteralPath $BackupPath) { return }
+    $null = New-Item -ItemType Directory -Path (Split-Path $BackupPath) -Force
+    if ($Disarm) {
+        # ISO-8859-1 maps each byte to one character and back, so only the device names change.
+        $latin1 = [Text.Encoding]::GetEncoding(28591)
+        $text = $latin1.GetString([IO.File]::ReadAllBytes($Path))
+        [IO.File]::WriteAllBytes($BackupPath, $latin1.GetBytes((ConvertTo-PvmDisarmedDescriptorText -Text $text)))
+    } else {
+        Copy-Item -LiteralPath $Path -Destination $BackupPath
+    }
+}
+
 # Point the existing descriptor $Path at the stick: its extent lines and createType become those
 # of $Layout (ConvertTo-PvmDescriptorText), and the change is logged to $LogPath. Before the first
-# rewrite the file is copied to <Path>.orig, which is never replaced; the descriptor is written as
-# UTF-8 without a BOM. Throws a stop when the file has no extent line.
+# rewrite the file is kept, disarmed, at $BackupPath (Save-PvmFirstCopy), which is never replaced;
+# the descriptor is written as UTF-8 without a BOM. Throws a stop when the file has no extent
+# line.
 function Set-PvmDiskDescriptor {
     [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$BackupPath,
         [Parameter(Mandatory)][string]$LogPath
     )
     $text = [IO.File]::ReadAllText($Path)
@@ -320,7 +762,7 @@ function Set-PvmDiskDescriptor {
     }
     Write-PvmLog -Path $LogPath -Message "$name -> $($Layout.Extents -join ' | ')"
     if (-not $PSCmdlet.ShouldProcess($Path, 'Point the raw-disk descriptor at the stick')) { return }
-    if (-not (Test-Path -LiteralPath "$Path.orig")) { Copy-Item -LiteralPath $Path -Destination "$Path.orig" }
+    Save-PvmFirstCopy -Path $Path -BackupPath $BackupPath -Disarm
     [IO.File]::WriteAllText($Path, $new, (New-Object System.Text.UTF8Encoding $false))
 }
 
@@ -364,14 +806,15 @@ function ConvertTo-PvmDriveLetterText {
 
 # Set the stick's drive letter $Letter in the paths below $Root in the file $Path
 # (ConvertTo-PvmDriveLetterText), and log to $LogPath whether anything changed. Before the first
-# rewrite the file is copied to <Path>.launcher-backup, which is never replaced; the file is
-# written as UTF-8 without a BOM.
+# rewrite the file is copied to $BackupPath (Save-PvmFirstCopy), which is never replaced; the file
+# is written as UTF-8 without a BOM.
 function Set-PvmDriveLetterInFile {
     [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$Letter,
+        [Parameter(Mandatory)][string]$BackupPath,
         [Parameter(Mandatory)][string]$LogPath
     )
     $text = [IO.File]::ReadAllText($Path)
@@ -384,22 +827,52 @@ function Set-PvmDriveLetterInFile {
     }
     Write-PvmLog -Path $LogPath -Message "${name}: paths moved to drive ${Letter}:"
     if (-not $PSCmdlet.ShouldProcess($Path, "Move the stick's paths to drive ${Letter}:")) { return }
-    if (-not (Test-Path -LiteralPath "$Path.launcher-backup")) { Copy-Item -LiteralPath $Path -Destination "$Path.launcher-backup" }
+    Save-PvmFirstCopy -Path $Path -BackupPath $BackupPath
     [IO.File]::WriteAllText($Path, $new, (New-Object System.Text.UTF8Encoding $false))
 }
 
 # --- Running VMs -----------------------------------------------------------------------------
 
-# Return whether the process $Process may be the VirtualBox VM $VmUuid: its command line matches
-# $VmUuid, which is read as a regular expression, or it cannot be read.
+# Return the GUIDs written in $Text as 8-4-4-4-12 hex digits, with or without braces, as [guid]
+# values.
+function Find-PvmGuid {
+    [CmdletBinding()]
+    [OutputType([guid])]
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+    foreach ($match in [regex]::Matches($Text, '(?<![0-9A-Fa-f-])[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}(?![0-9A-Fa-f-])')) {
+        [guid]$match.Value
+    }
+}
+
+# Return whether the process $Process may be the VirtualBox VM $VmUuid: a GUID in its command line
+# (Find-PvmGuid) equals $VmUuid, or the command line cannot be read.
 function Test-PvmVirtualBoxVmProcess {
     [CmdletBinding()]
     [OutputType([bool])]
     param(
         [Parameter(Mandatory)]$Process,
-        [string]$VmUuid
+        [Parameter(Mandatory)][string]$VmUuid
     )
-    (-not $Process.CommandLine) -or ($Process.CommandLine -match $VmUuid)
+    if (-not $Process.CommandLine) { return $true }
+    @(Find-PvmGuid -Text $Process.CommandLine) -contains [guid]$VmUuid
+}
+
+# Return whether the output $Output of `VBoxManage list vms` lists the VM $VmUuid: a line that
+# ends in that UUID in braces. The UUID anywhere else on a line, such as in another VM's name,
+# does not count.
+function Test-PvmVirtualBoxVmListed {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [AllowEmptyString()][string]$Output,
+        [Parameter(Mandatory)][string]$VmUuid
+    )
+    foreach ($line in ($Output -split "`n")) {
+        if ($line -match '\{([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\}\s*\z' -and [guid]$Matches[1] -eq [guid]$VmUuid) {
+            return $true
+        }
+    }
+    $false
 }
 
 # Return whether a VirtualBox VM process on this PC (VirtualBoxVM.exe or VBoxHeadless.exe) may be
@@ -521,8 +994,8 @@ function Get-PvmVirtualBoxState {
 }
 
 # Stop the launcher when $State, from Get-PvmVMwareState or Get-PvmVirtualBoxState, is Unknown:
-# the message says what cannot be told ($What), why, and which setting ($Setting) names the file
-# $Path. A dry run logs the stop and carries on.
+# the message says what cannot be told ($What, a Format-PvmMessage template), why, and which
+# setting ($Setting) names the file $Path. A dry run logs the stop and carries on.
 function Assert-PvmKnownState {
     [CmdletBinding()]
     param(
@@ -533,13 +1006,17 @@ function Assert-PvmKnownState {
         [Parameter(Mandatory)][string]$Path
     )
     if ($State.State -ne 'Unknown') { return }
-    Invoke-PvmStopUnlessDryRun -Context $Context -Message "The launcher cannot tell $What, because $($State.Reason): $Setting in settings.psd1 names $Path. Nothing was started."
+    $message = Format-PvmMessage -Names $Context.Names -Template "The launcher cannot tell $What, because {Reason}: {Setting} in settings.psd1 names {Path}. Nothing was started." -Values @{
+        Reason = $State.Reason; Setting = $Setting; Path = $Path
+    }
+    Invoke-PvmStopUnlessDryRun -Context $Context -Message $message
 }
 
 # Ask, through the script block $Context.AskResume, whether to resume the saved state in $Program
-# with the question $Question, and log a Yes. A dry run logs that a real start would ask and
-# carries on. Throws the stop when the answer is No, when there is no way to ask, or when
-# SavedStatePolicy in the settings is anything but Ask; a missing SavedStatePolicy means Ask.
+# with the question $Question, and log a Yes. The script block gets the question and the title
+# for its dialog, $Context.Caption. A dry run logs that a real start would ask and carries on.
+# Throws the stop when the answer is No, when there is no way to ask, or when SavedStatePolicy in
+# the settings is Refuse.
 function Confirm-PvmResume {
     [CmdletBinding()]
     param(
@@ -547,10 +1024,13 @@ function Confirm-PvmResume {
         [Parameter(Mandatory)][string]$Program,
         [Parameter(Mandatory)][string]$Question
     )
-    $settings = $Context.Settings
-    $policy = $settings['SavedStatePolicy']
-    if ($null -ne $policy -and $policy -ne 'Ask') {
-        Invoke-PvmStopUnlessDryRun -Context $Context -Message "The VM has a saved state in $Program, and SavedStatePolicy in settings.psd1 is '$policy', so the launcher does not resume it. To resume it through the launcher, set SavedStatePolicy to 'Ask' and start the VM again. Nothing was started."
+    $names = $Context.Names
+    $policy = $Context.Settings['SavedStatePolicy']
+    if ($policy -ne 'Ask') {
+        $message = Format-PvmMessage -Names $names -Template "{VM} has a saved state in {Program}, and SavedStatePolicy in settings.psd1 is '{Policy}', so the launcher does not resume it. To resume it through the launcher, set SavedStatePolicy to 'Ask' and start {vm} again. Nothing was started." -Values @{
+            Program = $Program; Policy = $policy
+        }
+        Invoke-PvmStopUnlessDryRun -Context $Context -Message $message
         return
     }
     if ($Context.DryRun) {
@@ -558,9 +1038,11 @@ function Confirm-PvmResume {
         return
     }
     # Only a single $true counts as Yes, so a stray output of the script block cannot resume.
-    $answer = if ($null -ne $Context.AskResume) { $Context.AskResume.InvokeReturnAsIs($Question) } else { $null }
+    $answer = if ($null -ne $Context.AskResume) { $Context.AskResume.InvokeReturnAsIs($Question, $Context.Caption) } else { $null }
     if (-not ($answer -is [bool] -and $answer)) {
-        throw (Get-PvmStopException -Message "The saved state in $Program was not resumed. Nothing was started. Start the VM again to be asked again, or discard the saved state in $Program first, which loses what the guest had not saved.")
+        throw (Get-PvmStopException -Message (Format-PvmMessage -Names $names -Template 'The saved state in {Program} was not resumed. Nothing was started. Start {vm} again to be asked again, or discard the saved state in {Program} first, which loses what {guest} had not saved.' -Values @{
+                    Program = $Program
+                }))
     }
     Write-PvmLog -Path $Context.LogPath -Message "Resume of the saved state in $Program confirmed."
 }
@@ -576,15 +1058,19 @@ function Assert-PvmVMwareReady {
         [Parameter(Mandatory)][string]$Vmx
     )
     $values = $Context.VMwareState.Values
-    foreach ($key in @(@{ Name = 'uuid.action'; Value = 'keep'; Why = 'so VMware can stop the start to ask whether the VM was moved or copied' },
+    foreach ($key in @(@{ Name = 'uuid.action'; Value = 'keep'; Why = 'so VMware can stop the start to ask whether {vm} was moved or copied' },
             @{ Name = 'suspend.disabled'; Value = 'TRUE'; Why = 'and a suspended VM holds changes to the stick that booting the stick another way can overwrite; a VM that is suspended now still resumes with the line' })) {
         $current = $values[$key.Name]
         if ($current -eq $key.Value) { continue }
         $has = if ($null -eq $current) { "lacks $($key.Name) = ""$($key.Value)""" } else { "has $($key.Name) = ""$current"" instead of ""$($key.Value)""" }
-        Invoke-PvmStopUnlessDryRun -Context $Context -Message "The VM's .vmx $has, $($key.Why). With VMware closed, set the line $($key.Name) = ""$($key.Value)"" in $Vmx, then start the VM again."
+        $message = Format-PvmMessage -Names $Context.Names -Template "{VM}'s .vmx {Has}, $($key.Why). With VMware closed, set the line {Line} in {Vmx}, then start {vm} again." -Values @{
+            Has = $has; Line = "$($key.Name) = ""$($key.Value)"""; Vmx = $Vmx
+        }
+        Invoke-PvmStopUnlessDryRun -Context $Context -Message $message
     }
     if ($Context.VMwareState.State -eq 'Saved') {
-        Confirm-PvmResume -Context $Context -Program 'VMware' -Question "The VM is suspended in VMware. Resume it only if the stick has not been booted any other way since the suspend; otherwise the resume can corrupt the guest's disk.`n`nResume the VM now?"
+        $question = Format-PvmMessage -Names $Context.Names -Template "{VM} is suspended in VMware. Resume it only if the stick has not been booted any other way since the suspend; otherwise the resume can corrupt {guest}'s disk.`n`nResume {vm} now?"
+        Confirm-PvmResume -Context $Context -Program 'VMware' -Question $question
     }
 }
 
@@ -682,16 +1168,20 @@ function Invoke-PvmVMware {
         return 'AlreadyRunning'
     }
     if (Test-PvmRunningInVirtualBox -VmUuid $settings['VirtualBoxVmUuid']) {
-        Invoke-PvmStopUnlessDryRun -Context $Context -Message 'A VirtualBox VM is running, possibly this one. Close it before starting the VM in VMware - the stick must never be used by two VMs at once.'
+        Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $Context.Names -Template 'A VirtualBox VM is running, possibly this one. Close it before starting {vm} in VMware - the stick must never be used by two VMs at once.')
     }
     if ($Context.VirtualBoxState.State -eq 'Saved') {
-        Invoke-PvmStopUnlessDryRun -Context $Context -Message 'The VM has a saved state in VirtualBox. Resume it in VirtualBox (on a PC with VirtualBox) and shut the guest down normally before starting it in VMware - otherwise the guest''s disk can get corrupted.'
+        Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $Context.Names -Template '{VM} has a saved state in VirtualBox. Resume it in VirtualBox (on a PC with VirtualBox) and shut {guest} down normally before starting it in VMware - otherwise {guest}''s disk can get corrupted.')
     }
     Assert-PvmVMwareReady -Context $Context -Vmx $vmx
 
     $disk = Join-Path $Context.Root $settings['VMwareDisk']
-    if (Test-Path -LiteralPath $disk) { Set-PvmDiskDescriptor -Path $disk -Layout $layout -LogPath $log -WhatIf:$Context.DryRun }
-    else { New-PvmVMwareDescriptor -Path $disk -Layout $layout -LogPath $log -WhatIf:$Context.DryRun }
+    if (Test-Path -LiteralPath $disk) {
+        $backup = Get-PvmBackupPath -Root $Context.Root -Backups $Context.Backups -Path $disk -Suffix '.orig'
+        Set-PvmDiskDescriptor -Path $disk -Layout $layout -BackupPath $backup -LogPath $log -WhatIf:$Context.DryRun
+    } else {
+        New-PvmVMwareDescriptor -Path $disk -Layout $layout -LogPath $log -WhatIf:$Context.DryRun
+    }
     if ($Context.DryRun) {
         Write-PvmLog -Path $log -Message "DRY RUN - would start $vmx with VMware Workstation ($VMwareDir)"
         return 'DryRun'
@@ -724,17 +1214,21 @@ function Get-PvmVirtualBoxVmState {
 }
 
 # Start the VirtualBox VM $VmUuid with VBoxManage at $VBoxManage and log to $LogPath which version
-# of VirtualBox started it. Throws a stop with VBoxManage's output when the start fails.
+# of VirtualBox started it. Throws a stop with VBoxManage's output when the start fails, naming
+# the VM as $Names says (Format-PvmMessage).
 function Start-PvmVirtualBoxVm {
     [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)][string]$VBoxManage,
         [Parameter(Mandatory)][string]$VmUuid,
+        [Parameter(Mandatory)][hashtable]$Names,
         [Parameter(Mandatory)][string]$LogPath
     )
     if (-not $PSCmdlet.ShouldProcess($VmUuid, 'Start the VM in VirtualBox')) { return }
     $start = Invoke-PvmNative -FilePath $VBoxManage -ArgumentList @('startvm', $VmUuid, '--type', 'gui')
-    if ($start.ExitCode -ne 0) { throw (Get-PvmStopException -Message "VirtualBox could not start the VM:`n`n$($start.Output)") }
+    if ($start.ExitCode -ne 0) {
+        throw (Get-PvmStopException -Message (Format-PvmMessage -Names $Names -Template "VirtualBox could not start {vm}:`n`n{Output}" -Values @{ Output = $start.Output }))
+    }
     Write-PvmLog -Path $LogPath -Message "Started with VirtualBox $((Invoke-PvmNative -FilePath $VBoxManage -ArgumentList @('--version')).Output)"
 }
 
@@ -758,15 +1252,16 @@ function Invoke-PvmVirtualBox {
     $vboxManage = Join-Path $VirtualBoxDir 'VBoxManage.exe'
     $uuid = $settings['VirtualBoxVmUuid']
     Invoke-PvmSetEnvironment -Name 'VBOX_USER_HOME' -Value (Join-Path $Context.Root $settings['VirtualBoxHome'])
+    $names = $Context.Names
     $vmx = Join-Path $Context.Root $settings['VMwareVmx']
     if (Test-PvmRunningInVMware -Vmx $vmx) {
-        Invoke-PvmStopUnlessDryRun -Context $Context -Message 'The VM is running in VMware. Close it before starting it in VirtualBox.'
+        Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $names -Template '{VM} is running in VMware. Close it before starting it in VirtualBox.')
     }
     if ($Context.VMwareState.State -eq 'Saved') {
-        Invoke-PvmStopUnlessDryRun -Context $Context -Message 'The VM is suspended in VMware. Resume it in VMware (on a PC with VMware Workstation) and shut the guest down normally before starting it in VirtualBox - otherwise the guest''s disk can get corrupted.'
+        Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $names -Template '{VM} is suspended in VMware. Resume it in VMware (on a PC with VMware Workstation) and shut {guest} down normally before starting it in VirtualBox - otherwise {guest}''s disk can get corrupted.')
     }
 
-    $open =@(Invoke-PvmGetProcess -Filter "Name='VirtualBox.exe' OR Name='VirtualBoxVM.exe' OR Name='VBoxHeadless.exe'")
+    $open = @(Invoke-PvmGetProcess -Filter "Name='VirtualBox.exe' OR Name='VirtualBoxVM.exe' OR Name='VBoxHeadless.exe'")
     if ($open.Count) {
         # VirtualBox hides its VM processes' command lines, so VirtualBox is asked whether this VM is the one running.
         $info = Invoke-PvmNative -FilePath $vboxManage -ArgumentList @('showvminfo', $uuid, '--machinereadable')
@@ -774,36 +1269,43 @@ function Invoke-PvmVirtualBox {
             Write-PvmLog -Path $log -Message 'Already running in VirtualBox.'
             return 'AlreadyRunning'
         }
-        Invoke-PvmStopUnlessDryRun -Context $Context -Message 'VirtualBox is already open on this PC. Close all VirtualBox windows, then start the VM again.'
+        Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $names -Template 'VirtualBox is already open on this PC. Close all VirtualBox windows, then start {vm} again.')
     }
     if (-not $Context.DryRun) { Wait-PvmProcessExit -Name 'VBoxSVC' -TimeoutSeconds 30 }
     if (Invoke-PvmTestProcess -Name 'VBoxSVC') {
-        Invoke-PvmStopUnlessDryRun -Context $Context -Message 'VirtualBox is still running in the background. Wait half a minute, then start the VM again.'
+        Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $names -Template 'VirtualBox is still running in the background. Wait half a minute, then start {vm} again.')
     }
 
     # The launcher records no VirtualBox save yet, so every saved state asks before it is resumed,
     # after the checks that can still stop the start and before the first write.
     if ($Context.VirtualBoxState.State -eq 'Saved') {
-        Confirm-PvmResume -Context $Context -Program 'VirtualBox' -Question "The VM has a saved state in VirtualBox that this launcher did not record. Resume it only if the stick has not been booted any other way since the save; otherwise the resume can corrupt the guest's disk.`n`nResume the VM now?"
+        $question = Format-PvmMessage -Names $names -Template "{VM} has a saved state in VirtualBox that this launcher did not record. Resume it only if the stick has not been booted any other way since the save; otherwise the resume can corrupt {guest}'s disk.`n`nResume {vm} now?"
+        Confirm-PvmResume -Context $Context -Program 'VirtualBox' -Question $question
     }
 
+    $vbox = Join-Path $Context.Root $settings['VirtualBoxVbox']
+    $registry = Join-Path (Join-Path $Context.Root $settings['VirtualBoxHome']) 'VirtualBox.xml'
+    $disk = Join-Path $Context.Root $settings['VirtualBoxDisk']
+    $backup = @{ Root = $Context.Root; Backups = $Context.Backups }
     $letterChange = @{ Root = $Context.Root; Letter = $Context.Letter; LogPath = $log; WhatIf = $Context.DryRun }
-    Set-PvmDriveLetterInFile -Path (Join-Path $Context.Root $settings['VirtualBoxVbox']) @letterChange
-    Set-PvmDriveLetterInFile -Path (Join-Path (Join-Path $Context.Root $settings['VirtualBoxHome']) 'VirtualBox.xml') @letterChange
-    Set-PvmDiskDescriptor -Path (Join-Path $Context.Root $settings['VirtualBoxDisk']) -Layout $layout -LogPath $log -WhatIf:$Context.DryRun
+    Set-PvmDriveLetterInFile -Path $vbox -BackupPath (Get-PvmBackupPath @backup -Path $vbox -Suffix '.launcher-backup') @letterChange
+    Set-PvmDriveLetterInFile -Path $registry -BackupPath (Get-PvmBackupPath @backup -Path $registry -Suffix '.launcher-backup') @letterChange
+    Set-PvmDiskDescriptor -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @backup -Path $disk -Suffix '.orig') -LogPath $log -WhatIf:$Context.DryRun
     if ($Context.DryRun) {
         Write-PvmLog -Path $log -Message "DRY RUN - would start VM {$uuid} with VirtualBox ($VirtualBoxDir)"
         return 'DryRun'
     }
 
     $list = Invoke-PvmNative -FilePath $vboxManage -ArgumentList @('list', 'vms')
-    if ($list.Output -notmatch $uuid) { throw (Get-PvmStopException -Message "VirtualBox did not find the VM in the stick's VM list:`n`n$($list.Output)") }
+    if (-not (Test-PvmVirtualBoxVmListed -Output $list.Output -VmUuid $uuid)) {
+        throw (Get-PvmStopException -Message (Format-PvmMessage -Names $names -Template "VirtualBox did not find {vm} in the stick's VM list:`n`n{Output}" -Values @{ Output = $list.Output }))
+    }
     $info = Invoke-PvmNative -FilePath $vboxManage -ArgumentList @('showvminfo', $uuid, '--machinereadable')
     $state = Get-PvmVirtualBoxVmState -Output $info.Output
     Write-PvmLog -Path $log -Message "VirtualBox VM state: $state"
     if ($state -match 'running|paused|starting|restoring') { return 'AlreadyRunning' }
 
-    Start-PvmVirtualBoxVm -VBoxManage $vboxManage -VmUuid $uuid -LogPath $log
+    Start-PvmVirtualBoxVm -VBoxManage $vboxManage -VmUuid $uuid -Names $names -LogPath $log
     'Started'
 }
 
@@ -841,10 +1343,10 @@ function Invoke-PvmLaunch {
     $vbox = Join-Path $Context.Root $settings['VirtualBoxVbox']
     $Context.VMwareState = Get-PvmVMwareState -Path $vmx
     if ($Context.VMwareState.State -eq 'Saved') { Write-PvmLog -Path $log -Message 'Saved state found: suspended in VMware' }
-    Assert-PvmKnownState -Context $Context -State $Context.VMwareState -What 'whether the VM is suspended in VMware' -Setting 'VMwareVmx' -Path $vmx
+    Assert-PvmKnownState -Context $Context -State $Context.VMwareState -What 'whether {vm} is suspended in VMware' -Setting 'VMwareVmx' -Path $vmx
     $Context.VirtualBoxState = Get-PvmVirtualBoxState -Path $vbox
     if ($Context.VirtualBoxState.State -eq 'Saved') { Write-PvmLog -Path $log -Message 'Saved state found: saved in VirtualBox' }
-    Assert-PvmKnownState -Context $Context -State $Context.VirtualBoxState -What 'whether the VM has a saved state in VirtualBox' -Setting 'VirtualBoxVbox' -Path $vbox
+    Assert-PvmKnownState -Context $Context -State $Context.VirtualBoxState -What 'whether {vm} has a saved state in VirtualBox' -Setting 'VirtualBoxVbox' -Path $vbox
     $choice = @{
         Setting             = $settings['Hypervisor']
         VMwareInstalled     = [bool]$vmwareDir
@@ -863,14 +1365,16 @@ function Invoke-PvmLaunch {
     else { Invoke-PvmVirtualBox -Context $Context -VirtualBoxDir $virtualBoxDir -Drive $drive }
 }
 
-# Run the launcher from the folder $LauncherPath, which holds settings.psd1, launcher.log and the
-# VERSION that the deploy tool writes, and whose parent folder is the stick's root: check the
-# stick, choose the hypervisor and start the VM. With -DryRun every check runs and the log says
-# what would change, but nothing is changed or started. Before a saved state is resumed, the
-# script block $AskResume gets the question and must return $true for Yes; without it the answer
-# is No. Returns ExitCode, 0 or 1, and the Message to show with its Icon, both empty when there is
-# nothing to show. Stops and other errors are logged as "STOPPED: ..." and returned; only a log
-# that cannot be written throws.
+# Run the launcher from the folder $LauncherPath, which holds the code and the VERSION that the
+# deploy tool writes, and whose parent folder, the stick folder, holds LauncherData as well
+# (Get-PvmDataPath): read and check the settings, check the stick, choose the hypervisor and start
+# the VM. With -DryRun every check runs and the log says what would change, but nothing is changed
+# or started. Before a saved state is resumed, the script block $AskResume gets the question and
+# the dialog's title and must return $true for Yes; without it the answer is No. Returns ExitCode,
+# 0 or 1, the Message to show with its Icon, both empty when there is nothing to show, and the
+# Caption for the dialog. Stops and other errors are logged to LauncherData\logs\launcher.log as
+# "STOPPED: ..." and returned. Without LauncherData there is no log, so the message is only
+# returned and printed; only a log that cannot be written throws.
 function Invoke-PortableVM {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -879,8 +1383,21 @@ function Invoke-PortableVM {
         [switch]$DryRun,
         [scriptblock]$AskResume
     )
-    $logPath = Join-Path $LauncherPath 'launcher.log'
+    $paths = Get-PvmDataPath -LauncherPath $LauncherPath
+    $caption = 'Portable VM'
+    if (-not (Test-Path -LiteralPath $paths.Data -PathType Container)) {
+        $message = if (Test-Path -LiteralPath $paths.OldSettings -PathType Leaf) {
+            'The settings are still in Launcher\settings.psd1, where the launcher read them before LauncherData. Move them to LauncherData with tools\Deploy-PortableVM.ps1 -MigrateSettings, run from a clone of the launcher. Nothing was started.'
+        } else {
+            'LauncherData, the folder beside Launcher that holds the settings and the log, is missing. Create it, copy examples\settings.example.psd1 into it as settings.psd1 and fill that in. Nothing was started.'
+        }
+        Write-Host $message
+        return [pscustomobject]@{ ExitCode = 1; Message = $message; Icon = 'Error'; Caption = $caption }
+    }
+    $logPath = $paths.Log
     try {
+        # Every run logs, a dry run too, so the log's folder is created when it is missing.
+        $null = New-Item -ItemType Directory -Path $paths.Logs -Force
         Write-PvmLog -Path $logPath -Message "----- Start VM$(if ($DryRun) { ' (dry run)' }) -----"
         # VERSION is only for the log, so a missing or unreadable one never stops a start.
         $versionPath = Join-Path $LauncherPath 'VERSION'
@@ -888,25 +1405,39 @@ function Invoke-PortableVM {
         try { if (Test-Path -LiteralPath $versionPath -PathType Leaf) { $version = [IO.File]::ReadAllText($versionPath).Trim() } }
         catch { $version = 'unreadable' }
         Write-PvmLog -Path $logPath -Message "Launcher version $version"
+        if (Test-Path -LiteralPath $paths.OldSettings) {
+            throw (Get-PvmStopException -Message 'Launcher\settings.psd1 is there, but the launcher reads its settings from LauncherData\settings.psd1. Move any change you made in it there, then remove it from Launcher. Nothing was started.')
+        }
+        try { $settings = Import-PvmSetting -Path $paths.Settings }
+        catch {
+            $stop = Get-PvmStopMessage -ErrorRecord $_
+            if ($null -eq $stop) { throw }
+            throw (Get-PvmStopException -Message "$stop`n`nNothing was started.")
+        }
+        $caption = Get-PvmCaption -Settings $settings
         # Invoke-PvmLaunch fills in VMwareState and VirtualBoxState.
         $context = [pscustomobject]@{
-            Root            = Split-Path $LauncherPath
+            Root            = $paths.Root
             LogPath         = $logPath
+            Backups         = $paths.Backups
             Letter          = $LauncherPath.Substring(0, 1).ToUpper()
             DryRun          = [bool]$DryRun
             AskResume       = $AskResume
+            Names           = @{ VM = $settings['VmDisplayName']; Guest = $settings['GuestName'] }
+            Caption         = $caption
             VMwareState     = $null
             VirtualBoxState = $null
-            # Import-PowerShellDataFile belongs to another module, so a missing file must stop here.
-            Settings = Import-PowerShellDataFile -LiteralPath (Join-Path $LauncherPath 'settings.psd1') -ErrorAction Stop
+            Settings        = $settings
         }
         $outcome = Invoke-PvmLaunch -Context $context
-        if ($outcome -eq 'AlreadyRunning') { return [pscustomobject]@{ ExitCode = 0; Message = 'The VM is already running.'; Icon = 'Information' } }
-        [pscustomobject]@{ ExitCode = 0; Message = ''; Icon = '' }
+        if ($outcome -eq 'AlreadyRunning') {
+            return [pscustomobject]@{ ExitCode = 0; Message = (Format-PvmMessage -Names $context.Names -Template '{VM} is already running.'); Icon = 'Information'; Caption = $caption }
+        }
+        [pscustomobject]@{ ExitCode = 0; Message = ''; Icon = ''; Caption = $caption }
     } catch {
         $stop = Get-PvmStopMessage -ErrorRecord $_
         $message = if ($null -ne $stop) { $stop } else { "Unexpected error: $($_.Exception.Message)" }
         Write-PvmLog -Path $logPath -Message "STOPPED: $message"
-        [pscustomobject]@{ ExitCode = 1; Message = $message; Icon = 'Error' }
+        [pscustomobject]@{ ExitCode = 1; Message = $message; Icon = 'Error'; Caption = $caption }
     }
 }

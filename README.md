@@ -6,16 +6,19 @@ A Windows launcher for a VM that lives on a USB stick and boots that stick as it
 the stick into a Windows PC that has VMware Workstation or VirtualBox, double-click
 `Start VM.cmd`, and the launcher starts the VM in whichever of the two is installed.
 
-> **Status:** phase 2 of a hardening redesign. The launcher's checks and start steps live in a
-> tested module, and the launcher now guards against suspends and saved states, as *What it does*
-> says; [CHANGELOG.md](CHANGELOG.md) lists every change. More small pull requests follow. Until they land, follow the rules under
-> [Known limits](#known-limits).
+> **Status:** phase 3 of a hardening redesign. The launcher's checks and start steps live in a
+> tested module; it guards against suspends and saved states, checks its settings before it
+> reads the PC, and keeps its settings, log and backups in `LauncherData`, apart from its code,
+> as *What it does* says. [CHANGELOG.md](CHANGELOG.md) lists every change. More small pull
+> requests follow. Until they land, follow the rules under [Known limits](#known-limits).
 
 ## What it does
 
 Before every start the launcher:
 
 - asks for administrator rights, which a VM needs to use a physical disk;
+- checks `LauncherData\settings.psd1` before it reads anything on the PC, without running
+  anything in it, and names every setting that is wrong in one message;
 - finds the stick's disk number on this PC and checks that it is the configured stick: MBR
   disk signature, size, 512-byte sectors and the position of the Data partition it runs from.
   Otherwise nothing starts;
@@ -36,8 +39,14 @@ Before every start the launcher:
 VMware always gets the stick with the Data partition blanked, because Windows keeps using that
 partition while the VM runs. For VirtualBox, the `HideDataPartition` setting decides.
 
+Messages and the dialog title name the VM and the guest system as `VmDisplayName` and
+`GuestName` in the settings say; without them they say "the VM" and "the guest". Before the
+launcher rewrites a VM file for the first time, it keeps that first version below
+`LauncherData\backups`; a copy of a raw-disk descriptor names a disarmed device there, so
+opening it by mistake reaches no disk.
+
 `-DryRun` runs every check and logs what would change, without changing a VM file or starting
-anything; it still adds its lines to `Launcher\launcher.log`. Run it from an elevated
+anything; it still adds its lines to `LauncherData\logs\launcher.log`. Run it from an elevated
 PowerShell, so the checks see what a real start sees, with `X:` as the stick's Data partition:
 
 ```text
@@ -53,14 +62,20 @@ and the VM files:
 | Path on the Data partition | What it is |
 |---|---|
 | `Start VM.cmd` | The launcher to double-click |
+| `Launcher\` | The launcher's code, which each deploy replaces as a whole; no run writes here |
 | `Launcher\Start-PortableVM.ps1` | The script `Start VM.cmd` starts |
 | `Launcher\PortableVM.psm1` | The launcher's checks and start steps |
 | `Launcher\VERSION`, `Launcher\SHA256SUMS` | The deployed version and the hashes of its code, written by the deploy tool |
-| `Launcher\settings.psd1` | Your settings, copied from `examples\settings.example.psd1` |
-| `Launcher\launcher.log` | The log of every run |
+| `LauncherData\settings.psd1` | Your settings, copied from `examples\settings.example.psd1` |
+| `LauncherData\logs\launcher.log` | The log of every run |
+| `LauncherData\backups\` | The first version of each file the launcher rewrites, at its path below the stick folder; descriptor copies are disarmed |
+| `LauncherData\backups\legacy\` | What `-MigrateSettings` moved there: the old settings file and the copies the launcher used to keep beside the VM files |
 | `Launcher.previous\` | The launcher that the last deploy replaced |
 | `VMware\` | The VMware VM (`.vmx`) and its raw-disk descriptor |
 | `VirtualBox\` | The VirtualBox home: `VirtualBox.xml`, the VM folder and its descriptor |
+
+The table's paths can also lie in a folder below the drive's root; `Launcher` and
+`LauncherData` sit side by side in it, and the path settings start from it.
 
 ## Requirements
 
@@ -70,9 +85,14 @@ and the VM files:
 
 ## Settings
 
-Copy `examples\settings.example.psd1` from this repository to `Launcher\settings.psd1` on the
-stick and fill it in; its comments say how to read each value. The example's placeholders match
-no disk, so the launcher stops at its identity check until the real values are in.
+Copy `examples\settings.example.psd1` from this repository to `LauncherData\settings.psd1` on
+the stick, fill it in and delete its `IsExample` line; its comments say how to read each value.
+Until then the launcher stops and says the file is still the example. The settings follow
+schema 2 (`SchemaVersion = 2`): every value is checked before the launcher reads the PC, and a
+value of the wrong type or an unknown word is refused rather than guessed. The path settings are
+relative to the folder that holds `Launcher` and `LauncherData`, without a drive, `.` or `..`.
+Keep the file ASCII, or save it as UTF-8 with BOM; a file without a byte order mark that holds
+other characters is refused. The file is read as data, so nothing in it runs.
 
 ## Install or update
 
@@ -83,15 +103,48 @@ with `X:` as the stick's Data partition:
 powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Deploy-PortableVM.ps1 -Target X:\
 ```
 
-It needs `Launcher\settings.psd1` on the stick and refuses while a VM runs on the PC. It builds
-the new launcher in `Launcher.new` and checks every copy against the clone before it changes
-anything. Then the old `Launcher` becomes `Launcher.previous`, an older launcher `.cmd` at the
-stick's root moves in there too, and `Start VM.cmd` takes its place. Your settings and log come
-along, and the VM folders stay as they are. The tool deletes nothing, so remove or move away
+It needs a `LauncherData\settings.psd1` that passes the launcher's checks and refuses while a
+VM runs on the PC. On a stick without a `Launcher` folder it installs the launcher. Otherwise
+it builds the new launcher in `Launcher.new` and checks every copy against the clone before it
+changes anything. Then the old `Launcher` becomes `Launcher.previous`, an older launcher `.cmd`
+at the stick's root moves in there too, and `Start VM.cmd` takes its place. `LauncherData` and
+the VM folders stay as they are. The tool deletes nothing, so remove or move away
 `Launcher.previous` before the next deploy. `-WhatIf` runs the checks only.
 
+A stick whose settings are still in `Launcher\settings.psd1`, from a launcher before phase 3,
+needs one deploy with `-MigrateSettings`; try it with `-WhatIf` first, which prints the plan:
+
+```text
+powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Deploy-PortableVM.ps1 -Target X:\ -MigrateSettings -WhatIf
+```
+
+It writes `LauncherData\settings.psd1` as schema 2 with every value and comment of the old file,
+adds `-VmDisplayName` and `-GuestName` when you give them, and keeps a copy of the old file in
+`LauncherData\backups\legacy\Launcher`. It moves `Launcher\launcher.log` to
+`LauncherData\logs` and the copies the launcher used to keep beside the VM files
+(`*.vmdk.orig`, `*.vbox.launcher-backup`, `VirtualBox.xml.launcher-backup`) to
+`LauncherData\backups\legacy`, where it disarms the descriptor copies. Any other `*.orig` or
+`*.launcher-backup` file stays where it is, and the report counts it. The code swap comes last,
+so the old launcher works until then; if the migration stops, run the same command again.
+
 To go back, rename `Launcher` to any other name, rename `Launcher.previous` to `Launcher`, and
-move the old `.cmd` from it back to the stick's root.
+move the old `.cmd` from it back to the stick's root. After a migration, `Launcher.previous`
+still holds the old settings file, so the old launcher finds it; `Start VM.cmd` can stay.
+
+## Public interface
+
+What a stick, a script or a user may rely on between versions:
+
+- `Start VM.cmd` at the stick folder starts the launcher; `Launcher\Start-PortableVM.ps1
+  -DryRun` runs every check without changing or starting anything.
+- Exit codes: the launcher returns 0 when the VM started, is already running or a dry run
+  passed, else 1; `tools\Deploy-PortableVM.ps1` 0 when done, 1 when it refused or failed;
+  `tools\Get-StickInventory.ps1` 0 after its report, 2 when it cannot run;
+  `tools\Find-PrivateData.ps1` 0 when clean, 1 on a finding, 2 when it cannot run.
+- The settings are `LauncherData\settings.psd1` in schema 2; `examples\settings.example.psd1`
+  lists every key with its default.
+- `Launcher` holds code only, which each deploy replaces; `LauncherData` holds what the launcher
+  keeps between runs, which a deploy leaves alone.
 
 ## Known limits
 

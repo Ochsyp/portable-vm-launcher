@@ -1,8 +1,9 @@
 # Characterisation tests of src\PortableVM.psm1: what the launcher decides, logs and writes, as it
-# did before the redesign. The stick and the PC are synthetic: disks and partitions are
-# PSCustomObjects, the stick's files live in TestDrive, every adapter is mocked, and
-# $env:PVM_TEST makes an unmocked one throw. A test whose name says "known issue" pins behaviour
-# that the phase it names changes.
+# did before the redesign, apart from the changes CHANGELOG.md lists. The stick and the PC are
+# synthetic: disks and partitions are PSCustomObjects, the stick's files live in TestDrive, with
+# the settings and the log in LauncherData, every adapter is mocked, and $env:PVM_TEST makes an
+# unmocked one throw. A test whose name says "known issue" pins behaviour that the phase it names
+# changes. tests\Settings.Tests.ps1 tests the settings checks themselves.
 
 BeforeAll {
     $script:previousTestFlag = $env:PVM_TEST
@@ -44,18 +45,33 @@ BeforeAll {
         [pscustomobject]$partition
     }
 
-    # Return the settings of the synthetic stick, with the values in $Change replaced.
+    # Return the schema 2 settings of the synthetic stick, with the values in $Change replaced; a
+    # $null in $Change leaves that key out.
     function Get-TestSettingTable {
         param([hashtable]$Change = @{})
         $settings = @{
-            Hypervisor = 'Auto'; VMwareView = 'Window'; HideDataPartition = $false
+            SchemaVersion = 2; Hypervisor = 'Auto'; VMwareView = 'Window'; HideDataPartition = $false
             StickMbrSignature = '5CA1AB1E'; StickSectors = 4000000; VmSectors = 3900000; DataPartitionStart = 2500000
             VirtualBoxVmUuid = $script:uuid; VirtualBoxHome = 'VirtualBox'
             VirtualBoxVbox = 'VirtualBox\Test VM\Test VM.vbox'; VirtualBoxDisk = 'VirtualBox\Test VM\stick.vmdk'
             VMwareVmx = 'VMware\Test VM.vmx'; VMwareDisk = 'VMware\stick.vmdk'
         }
-        foreach ($key in $Change.Keys) { $settings[$key] = $Change[$key] }
+        foreach ($key in $Change.Keys) {
+            if ($null -eq $Change[$key]) { $settings.Remove($key) } else { $settings[$key] = $Change[$key] }
+        }
         $settings
+    }
+
+    # Return the hashtable $Settings as the text of a PowerShell data file, a key per line in
+    # sorted order, with CRLF line endings.
+    function ConvertTo-TestSettingsText {
+        param([hashtable]$Settings)
+        $lines = foreach ($key in ($Settings.Keys | Sort-Object)) {
+            $value = $Settings[$key]
+            $literal = if ($value -is [bool]) { "`$$value".ToLower() } elseif ($value -is [string]) { "'$($value.Replace("'", "''"))'" } else { "$value" }
+            "    $key = $literal"
+        }
+        "@{`r`n" + ($lines -join "`r`n") + "`r`n}`r`n"
     }
 
     # Return the text of a descriptor whose one extent maps the whole VM range of disk 1, with the
@@ -76,11 +92,12 @@ BeforeAll {
         (@($lines) + $Add + '') -join "`r`n"
     }
 
-    # Create a synthetic stick in TestDrive\$Name and return its paths. Launcher\settings.psd1 holds
-    # Get-TestSettingTable with $Change applied, written as PowerShell data. The VMware folder holds
-    # the .vmx and a CRLF descriptor; the VirtualBox home holds VirtualBox.xml and the VM with an LF
-    # descriptor, and their paths on the stick carry the drive letter OldLetter. The two programs
-    # are empty files below Programs.
+    # Create a synthetic stick in TestDrive\$Name and return its paths. Launcher is empty, as no
+    # code runs from it in the tests, and LauncherData\settings.psd1 holds Get-TestSettingTable with
+    # $Change applied, written as PowerShell data. The VMware folder holds the .vmx and a CRLF
+    # descriptor; the VirtualBox home holds VirtualBox.xml and the VM with an LF descriptor, and
+    # their paths on the stick carry the drive letter OldLetter. The two programs are empty files
+    # below Programs.
     function Initialize-TestStick {
         param(
             [string]$Name = 'stick',
@@ -90,7 +107,10 @@ BeforeAll {
         $stick = [pscustomobject]@{
             Root           = $root
             Launcher       = Join-Path $root 'Launcher'
-            Log            = Join-Path $root 'Launcher\launcher.log'
+            Data           = Join-Path $root 'LauncherData'
+            Settings       = Join-Path $root 'LauncherData\settings.psd1'
+            Log            = Join-Path $root 'LauncherData\logs\launcher.log'
+            Backups        = Join-Path $root 'LauncherData\backups'
             Vmx            = Join-Path $root 'VMware\Test VM.vmx'
             VMwareDisk     = Join-Path $root 'VMware\stick.vmdk'
             Vbox           = Join-Path $root 'VirtualBox\Test VM\Test VM.vbox'
@@ -101,13 +121,8 @@ BeforeAll {
             Letter         = $root.Substring(0, 1).ToUpper()
             OldLetter      = if ($root.Substring(0, 1).ToUpper() -eq 'Q') { 'R' } else { 'Q' }
         }
-        $settings = Get-TestSettingTable -Change $Change
-        $lines = foreach ($key in ($settings.Keys | Sort-Object)) {
-            $value = $settings[$key]
-            $literal = if ($value -is [bool]) { "`$$value".ToLower() } elseif ($value -is [string]) { "'$value'" } else { "$value" }
-            "    $key = $literal"
-        }
-        Write-TestFile -Path (Join-Path $stick.Launcher 'settings.psd1') -Text ("@{`r`n" + ($lines -join "`r`n") + "`r`n}`r`n")
+        $null = New-Item -ItemType Directory -Path $stick.Launcher -Force
+        Write-TestFile -Path $stick.Settings -Text (ConvertTo-TestSettingsText -Settings (Get-TestSettingTable -Change $Change))
         Write-TestFile -Path (Join-Path $stick.VMwareDir 'vmware.exe') -Text ''
         Write-TestFile -Path (Join-Path $stick.VirtualBoxDir 'VBoxManage.exe') -Text ''
         Write-TestFile -Path $stick.Vmx -Text (Get-TestVmxText)
@@ -297,43 +312,63 @@ Describe 'Raw-disk descriptors' {
                 'ddb.virtualHWVersion = "20"', '') -join "`r`n")
     }
 
+    It 'disarm every FLAT extent that names a raw device, in any case, and keep every other line and line ending' {
+        $text = ("createType=`"fullDevice`"`r`nRW 10 FLAT `"\\.\PhysicalDrive1`" 0`r`nrw 5 flat `"\\?\PhysicalDrive2`" 7`n" +
+            "RDONLY 4 FLAT `"\\.\Harddisk3Partition1`" 0`r`nNOACCESS 3 FLAT `"\\?\GLOBALROOT\Device\Harddisk1\Partition0`" 0`r`n" +
+            "RW 2 FLAT `"\\.\portablevm-disarmed`" 0`r`nRW 1 FLAT `"stick-flat.vmdk`" 0`r`nRW 6 ZERO`r`n# PhysicalDrive1`r`n")
+        $disarmed = ConvertTo-PvmDisarmedDescriptorText -Text $text
+        $disarmed | Should -BeExactly ("createType=`"fullDevice`"`r`nRW 10 FLAT `"\\.\PortableVM-disarmed`" 0`r`nrw 5 flat `"\\.\PortableVM-disarmed`" 7`n" +
+            "RDONLY 4 FLAT `"\\.\PortableVM-disarmed`" 0`r`nNOACCESS 3 FLAT `"\\.\PortableVM-disarmed`" 0`r`n" +
+            "RW 2 FLAT `"\\.\portablevm-disarmed`" 0`r`nRW 1 FLAT `"stick-flat.vmdk`" 0`r`nRW 6 ZERO`r`n# PhysicalDrive1`r`n")
+        ConvertTo-PvmDisarmedDescriptorText -Text $disarmed | Should -BeExactly $disarmed
+    }
+
+    It 'arm a disarmed copy again when it is pointed at the stick' {
+        $layout = @{ CreateType = 'fullDevice'; Extents = @('RW 3900000 FLAT "\\.\PhysicalDrive3" 0') }
+        $disarmed = ConvertTo-PvmDisarmedDescriptorText -Text (Get-TestDescriptorText)
+        ConvertTo-PvmDescriptorText -Text $disarmed -Layout $layout | Should -BeExactly ((Get-TestDescriptorText).Replace('PhysicalDrive1', 'PhysicalDrive3'))
+    }
+
     Context 'on disk' {
         BeforeEach {
             Mock -ModuleName PortableVM Write-Host {}
             $script:descriptor = Join-Path $TestDrive 'descriptor\stick.vmdk'
+            $script:backup = Join-Path $TestDrive 'descriptor\backups\VMware\stick.vmdk.orig'
             $script:log = Join-Path $TestDrive 'descriptor\launcher.log'
             Write-TestFile -Path $script:descriptor -Text (Get-TestDescriptorText)
+            Remove-Item -LiteralPath (Join-Path $TestDrive 'descriptor\backups') -Recurse -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath "$script:descriptor.orig", $script:log, (Join-Path $TestDrive 'descriptor\new.vmdk') -ErrorAction SilentlyContinue
             $script:layout = @{ CreateType = 'fullDevice'; Extents = @('RW 3900000 FLAT "\\.\PhysicalDrive3" 0') }
         }
 
-        It 'are rewritten as UTF-8 without a BOM, with an .orig copy of the first version kept' {
-            Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout -LogPath $script:log
+        It 'are rewritten as UTF-8 without a BOM, with the first version kept, disarmed, at the backup path' {
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout -BackupPath $script:backup -LogPath $script:log
             [IO.File]::ReadAllText($script:descriptor) | Should -BeExactly ((Get-TestDescriptorText).Replace('PhysicalDrive1', 'PhysicalDrive3'))
             [IO.File]::ReadAllBytes($script:descriptor)[0] | Should -Be ([byte][char]'#')
-            [IO.File]::ReadAllText("$script:descriptor.orig") | Should -BeExactly (Get-TestDescriptorText)
+            [IO.File]::ReadAllText($script:backup) | Should -BeExactly ((Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', '\\.\PortableVM-disarmed'))
+            "$script:descriptor.orig" | Should -Not -Exist
             Get-TestLog -Path $script:log | Should -BeExactly @('stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0')
 
-            Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3900000 FLAT "\\.\PhysicalDrive4" 0') } -LogPath $script:log
-            [IO.File]::ReadAllText("$script:descriptor.orig") | Should -BeExactly (Get-TestDescriptorText)
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3900000 FLAT "\\.\PhysicalDrive4" 0') } -BackupPath $script:backup -LogPath $script:log
+            [IO.File]::ReadAllText($script:backup) | Should -BeExactly ((Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', '\\.\PortableVM-disarmed'))
         }
 
         It 'are left alone when they already point at the stick' {
-            Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3900000 FLAT "\\.\PhysicalDrive1" 0') } -LogPath $script:log
-            "$script:descriptor.orig" | Should -Not -Exist
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3900000 FLAT "\\.\PhysicalDrive1" 0') } -BackupPath $script:backup -LogPath $script:log
+            $script:backup | Should -Not -Exist
             Get-TestLog -Path $script:log | Should -BeExactly @('stick.vmdk already points at the stick')
         }
 
         It 'are only logged under -WhatIf' {
-            Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout -LogPath $script:log -WhatIf
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout -BackupPath $script:backup -LogPath $script:log -WhatIf
             [IO.File]::ReadAllText($script:descriptor) | Should -BeExactly (Get-TestDescriptorText)
-            "$script:descriptor.orig" | Should -Not -Exist
+            $script:backup | Should -Not -Exist
             Get-TestLog -Path $script:log | Should -BeExactly @('stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0')
         }
 
         It 'stop the launcher when they hold no extent' {
             Write-TestFile -Path $script:descriptor -Text 'createType="fullDevice"'
-            $message = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout -LogPath $script:log } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $message = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout -BackupPath $script:backup -LogPath $script:log } catch { Get-PvmStopMessage -ErrorRecord $_ }
             $message | Should -BeExactly "Unexpected content in $script:descriptor - no disk extent found. Nothing was started."
         }
 
@@ -372,30 +407,34 @@ Describe 'Drive letters' {
         BeforeEach {
             Mock -ModuleName PortableVM Write-Host {}
             $script:file = Join-Path $TestDrive 'letters\VirtualBox.xml'
+            $script:backup = Join-Path $TestDrive 'letters\backups\VirtualBox\VirtualBox.xml.launcher-backup'
             $script:log = Join-Path $TestDrive 'letters\launcher.log'
             Write-TestFile -Path $script:file -Text '<e src="Q:\Portable\Stick\x.vbox"/>'
-            Remove-Item -LiteralPath "$script:file.launcher-backup", $script:log -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath (Join-Path $TestDrive 'letters\backups') -Recurse -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $script:log -ErrorAction SilentlyContinue
+            $script:change = @{ Path = $script:file; Root = 'D:\Portable\Stick'; BackupPath = $script:backup; LogPath = $script:log }
         }
 
-        It 'are rewritten, with a .launcher-backup copy of the first version kept' {
-            Set-PvmDriveLetterInFile -Path $script:file -Root 'D:\Portable\Stick' -Letter 'E' -LogPath $script:log
+        It 'are rewritten, with a copy of the first version kept at the backup path' {
+            Set-PvmDriveLetterInFile @script:change -Letter 'E'
             [IO.File]::ReadAllText($script:file) | Should -BeExactly '<e src="E:\Portable\Stick\x.vbox"/>'
-            Set-PvmDriveLetterInFile -Path $script:file -Root 'D:\Portable\Stick' -Letter 'F' -LogPath $script:log
+            Set-PvmDriveLetterInFile @script:change -Letter 'F'
             [IO.File]::ReadAllText($script:file) | Should -BeExactly '<e src="F:\Portable\Stick\x.vbox"/>'
-            [IO.File]::ReadAllText("$script:file.launcher-backup") | Should -BeExactly '<e src="Q:\Portable\Stick\x.vbox"/>'
+            [IO.File]::ReadAllText($script:backup) | Should -BeExactly '<e src="Q:\Portable\Stick\x.vbox"/>'
+            "$script:file.launcher-backup" | Should -Not -Exist
             Get-TestLog -Path $script:log | Should -BeExactly @('VirtualBox.xml: paths moved to drive E:', 'VirtualBox.xml: paths moved to drive F:')
         }
 
         It 'are left alone when the letter already fits, also in another case' {
-            Set-PvmDriveLetterInFile -Path $script:file -Root 'D:\Portable\Stick' -Letter 'q' -LogPath $script:log
-            "$script:file.launcher-backup" | Should -Not -Exist
+            Set-PvmDriveLetterInFile @script:change -Letter 'q'
+            $script:backup | Should -Not -Exist
             Get-TestLog -Path $script:log | Should -BeExactly @('VirtualBox.xml: drive letter OK')
         }
 
         It 'are only logged under -WhatIf' {
-            Set-PvmDriveLetterInFile -Path $script:file -Root 'D:\Portable\Stick' -Letter 'E' -LogPath $script:log -WhatIf
+            Set-PvmDriveLetterInFile @script:change -Letter 'E' -WhatIf
             [IO.File]::ReadAllText($script:file) | Should -BeExactly '<e src="Q:\Portable\Stick\x.vbox"/>'
-            "$script:file.launcher-backup" | Should -Not -Exist
+            $script:backup | Should -Not -Exist
             Get-TestLog -Path $script:log | Should -BeExactly @('VirtualBox.xml: paths moved to drive E:')
         }
     }
@@ -404,12 +443,23 @@ Describe 'Drive letters' {
 Describe 'Running VMs' {
     # -ForEach data is built before BeforeAll runs, so it spells the UUID out.
     It 'count a VirtualBox process as this VM when <Case>' -ForEach @(
-        @{ Case = 'its command line names the UUID'; CommandLine = 'VirtualBoxVM.exe --startvm 5ca1ab1e-0000-4000-8000-000000000001'; Uuid = '5ca1ab1e-0000-4000-8000-000000000001'; Expected = $true }
-        @{ Case = 'its command line cannot be read'; CommandLine = $null; Uuid = '5ca1ab1e-0000-4000-8000-000000000001'; Expected = $true }
-        @{ Case = 'the UUID setting is empty (known issue, phase 3)'; CommandLine = 'VirtualBoxVM.exe --startvm other'; Uuid = ''; Expected = $true }
-        @{ Case = 'it names another VM, which it is not'; CommandLine = 'VirtualBoxVM.exe --startvm 5ca1ab1e-0000-4000-8000-000000000009'; Uuid = '5ca1ab1e-0000-4000-8000-000000000001'; Expected = $false }
+        @{ Case = 'its command line names the UUID'; CommandLine = 'VirtualBoxVM.exe --startvm 5ca1ab1e-0000-4000-8000-000000000001'; Expected = $true }
+        @{ Case = 'it names the UUID in braces and upper case'; CommandLine = 'VirtualBoxVM.exe --startvm {5CA1AB1E-0000-4000-8000-000000000001}'; Expected = $true }
+        @{ Case = 'the UUID is in a comment beside another GUID'; CommandLine = 'VirtualBoxVM.exe --comment "copy of 5ca1ab1e-0000-4000-8000-000000000001" --startvm 5ca1ab1e-0000-4000-8000-000000000009'; Expected = $true }
+        @{ Case = 'its command line cannot be read'; CommandLine = $null; Expected = $true }
+        @{ Case = 'it names another VM, which it is not'; CommandLine = 'VirtualBoxVM.exe --startvm 5ca1ab1e-0000-4000-8000-000000000009'; Expected = $false }
+        @{ Case = 'it holds the UUID only as part of a longer value, which it is not'; CommandLine = 'VirtualBoxVM.exe --startvm 15ca1ab1e-0000-4000-8000-0000000000012'; Expected = $false }
     ) {
-        Test-PvmVirtualBoxVmProcess -Process ([pscustomobject]@{ CommandLine = $CommandLine }) -VmUuid $Uuid | Should -Be $Expected
+        Test-PvmVirtualBoxVmProcess -Process ([pscustomobject]@{ CommandLine = $CommandLine }) -VmUuid '5ca1ab1e-0000-4000-8000-000000000001' | Should -Be $Expected
+    }
+
+    It 'find a VM in the VirtualBox list only by the UUID in braces at the end of its line: <Case>' -ForEach @(
+        @{ Case = 'listed'; Output = "`"Other`" {5ca1ab1e-0000-4000-8000-000000000009}`r`n`"Test VM`" {5CA1AB1E-0000-4000-8000-000000000001}`r`n"; Expected = $true }
+        @{ Case = 'only in another VM''s name'; Output = "`"Copy of {5ca1ab1e-0000-4000-8000-000000000001}`" {5ca1ab1e-0000-4000-8000-000000000009}"; Expected = $false }
+        @{ Case = 'not listed'; Output = "`"Other`" {5ca1ab1e-0000-4000-8000-000000000009}"; Expected = $false }
+        @{ Case = 'an empty list'; Output = ''; Expected = $false }
+    ) {
+        Test-PvmVirtualBoxVmListed -Output $Output -VmUuid '5ca1ab1e-0000-4000-8000-000000000001' | Should -Be $Expected
     }
 
     It 'count a VMware process as this VM when <Case>' -ForEach @(
@@ -542,7 +592,10 @@ Describe 'A start' {
             Should -Invoke -CommandName Invoke-PvmGetProcess -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $Filter -ceq $script:virtualBoxVmFilter }
             [IO.File]::ReadAllText($script:stick.VMwareDisk) | Should -BeLike '*RW 2500000 FLAT "\\.\PhysicalDrive3" 0*RW 1400000 ZERO*'
             [IO.File]::ReadAllText($script:stick.VMwareDisk) | Should -BeLike '*createType="fullDevice"*'
-            "$($script:stick.VMwareDisk).orig" | Should -Exist
+            [IO.File]::ReadAllText((Join-Path $script:stick.Backups 'VMware\stick.vmdk.orig')) |
+                Should -BeExactly ((Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', '\\.\PortableVM-disarmed'))
+            "$($script:stick.VMwareDisk).orig" | Should -Not -Exist
+            @(Get-ChildItem -LiteralPath $script:stick.Launcher -Force) | Should -BeNullOrEmpty
             Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter {
                 $FilePath -eq (Join-Path $script:stick.VMwareDir 'vmware.exe') -and ($ArgumentList -join ' ') -ceq "-n -q -x `"$($script:stick.Vmx)`""
             }
@@ -651,8 +704,11 @@ Describe 'A start' {
             $below = $script:stick.Root.Substring(2)
             [IO.File]::ReadAllText($script:stick.Vbox) | Should -BeLike "*location=`"$($script:stick.Letter):$below\VirtualBox\Test VM\stick.vmdk`"*"
             [IO.File]::ReadAllText($script:stick.VirtualBoxXml) | Should -BeLike "*src=`"$($script:stick.Letter):$($below.Replace('\', '/'))/VirtualBox/Test VM/Test VM.vbox`"*"
-            "$($script:stick.Vbox).launcher-backup" | Should -Exist
-            "$($script:stick.VirtualBoxXml).launcher-backup" | Should -Exist
+            Join-Path $script:stick.Backups 'VirtualBox\Test VM\Test VM.vbox.launcher-backup' | Should -Exist
+            Join-Path $script:stick.Backups 'VirtualBox\VirtualBox.xml.launcher-backup' | Should -Exist
+            Join-Path $script:stick.Backups 'VirtualBox\Test VM\stick.vmdk.orig' | Should -Exist
+            "$($script:stick.Vbox).launcher-backup" | Should -Not -Exist
+            "$($script:stick.VirtualBoxXml).launcher-backup" | Should -Not -Exist
             [IO.File]::ReadAllText($script:stick.VirtualBoxDisk) | Should -BeExactly ((Get-TestDescriptorText -Newline "`n").Replace('PhysicalDrive1', 'PhysicalDrive3'))
             Should -Invoke -CommandName Invoke-PvmGetProcess -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $Filter -ceq $script:vmwareFilter }
             Should -Invoke -CommandName Invoke-PvmGetProcess -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $Filter -ceq $script:virtualBoxOpenFilter }
@@ -815,11 +871,60 @@ Describe 'A start' {
         }
 
         It 'stops at once on a missing settings file, naming it' {
-            Remove-Item -LiteralPath (Join-Path $script:stick.Launcher 'settings.psd1')
+            Remove-Item -LiteralPath $script:stick.Settings
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
             $result.ExitCode | Should -Be 1
-            $result.Message | Should -BeLike 'Unexpected error: *settings.psd1*'
+            $result.Message | Should -BeExactly "LauncherData\settings.psd1 is missing. Copy examples\settings.example.psd1 there and fill it in.`n`nNothing was started."
+            # The message spans lines, so the log is compared as text.
+            [IO.File]::ReadAllText($script:stick.Log).TrimEnd().EndsWith("  STOPPED: $($result.Message)") | Should -BeTrue
             Should -Invoke -CommandName Invoke-PvmGetPartition -ModuleName PortableVM -Times 0 -Exactly
+        }
+
+        It 'stops before it reads the PC on settings with problems, naming each bad key and no value' {
+            $script:stick = Initialize-TestStick -Name 'other-stick' -Change @{ Hypervisor = 'VBox'; StickSectors = '4000000'; VMwareVmx = '..\Test VM.vmx' }
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly ("LauncherData\settings.psd1 has 3 problems:`n" +
+                "- Hypervisor: must be 'Auto', 'VMware' or 'VirtualBox'`n" +
+                "- StickSectors: must be a whole number above 0`n" +
+                "- VMwareVmx: must name a .vmx file below the folder that holds Launcher and LauncherData, without a drive, '.' or '..'`n`nNothing was started.")
+            Should -Invoke -CommandName Invoke-PvmGetPartition -ModuleName PortableVM -Times 0 -Exactly
+            Should -Invoke -CommandName Invoke-PvmGetProcess -ModuleName PortableVM -Times 0 -Exactly
+        }
+
+        It 'stops on schema 1 settings, saying how to fix them' {
+            Write-TestFile -Path $script:stick.Settings -Text (ConvertTo-TestSettingsText -Settings (Get-TestSettingTable -Change @{ SchemaVersion = $null }))
+            (Invoke-PortableVM -LauncherPath $script:stick.Launcher).Message |
+                Should -BeExactly "LauncherData\settings.psd1 has 1 problem:`n- SchemaVersion: missing; add SchemaVersion = 2 (see examples\settings.example.psd1)`n`nNothing was started."
+        }
+
+        It 'stops while Launcher holds a settings file, which it no longer reads' {
+            Write-TestFile -Path (Join-Path $script:stick.Launcher 'settings.psd1') -Text (ConvertTo-TestSettingsText -Settings (Get-TestSettingTable))
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeLike 'Launcher\settings.psd1 is there, but the launcher reads its settings from LauncherData\settings.psd1.*'
+            Should -Invoke -CommandName Invoke-PvmGetPartition -ModuleName PortableVM -Times 0 -Exactly
+        }
+
+        It 'stops without LauncherData, creating and logging nothing, and names the migration when the old settings are there' {
+            Remove-Item -LiteralPath $script:stick.Data -Recurse
+            $before = @(Get-ChildItem -LiteralPath $script:stick.Root -Recurse -Force | ForEach-Object { $_.FullName })
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Caption | Should -BeExactly 'Portable VM'
+            $result.Message | Should -BeLike 'LauncherData, the folder beside Launcher that holds the settings and the log, is missing.*'
+            @(Get-ChildItem -LiteralPath $script:stick.Root -Recurse -Force | ForEach-Object { $_.FullName }) | Should -BeExactly $before
+            Should -Invoke -CommandName Invoke-PvmGetPartition -ModuleName PortableVM -Times 0 -Exactly
+
+            Write-TestFile -Path (Join-Path $script:stick.Launcher 'settings.psd1') -Text (ConvertTo-TestSettingsText -Settings (Get-TestSettingTable -Change @{ SchemaVersion = $null }))
+            (Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun).Message | Should -BeLike '*tools\Deploy-PortableVM.ps1 -MigrateSettings*'
+            $script:stick.Data | Should -Not -Exist
+        }
+
+        It 'creates the logs folder when it is missing, also in a dry run' {
+            $script:stick.Log | Should -Not -Exist
+            (Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun).ExitCode | Should -Be 0
+            (Get-TestLog -Path $script:stick.Log)[0] | Should -BeExactly '----- Start VM (dry run) -----'
         }
 
         It 'stops when neither hypervisor is installed' {
@@ -834,8 +939,9 @@ Describe 'A start' {
         }
 
         It 'logs a VMware suspend before the .vbox can fail' {
-            # VirtualBoxVbox names a folder, which cannot be read as a file.
-            $script:stick = Initialize-TestStick -Name 'other-stick' -Change @{ VirtualBoxVbox = 'VirtualBox\Test VM' }
+            # The .vbox is a folder, which cannot be read as a file.
+            Remove-Item -LiteralPath $script:stick.Vbox
+            $null = New-Item -ItemType Directory -Path $script:stick.Vbox
             Add-Content -LiteralPath $script:stick.Vmx -Value 'checkpoint.vmState = "Test VM.vmss"'
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
             $result.ExitCode | Should -Be 1
@@ -949,6 +1055,45 @@ Describe 'A start' {
             $result.ExitCode | Should -Be 1
             $result.Message | Should -BeLike $Message
             Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+        }
+    }
+
+    Context 'with display names' {
+        BeforeEach {
+            $script:stick = Initialize-TestStick -Name 'names-stick' -Change @{ VmDisplayName = 'Test VM'; GuestName = 'Test OS' }
+            Set-TestPc -Stick $script:stick -Installed 'VMware', 'VirtualBox'
+        }
+        AfterEach { Remove-Item -LiteralPath $script:stick.Root -Recurse -Force }
+
+        It 'names the VM and the guest in a stop and uses the VM''s name as the title' {
+            $script:stick = Initialize-TestStick -Name 'names-stick' -Change @{ VmDisplayName = 'Test VM'; GuestName = 'Test OS'; Hypervisor = 'VMware' }
+            [IO.File]::WriteAllText($script:stick.Vbox, [IO.File]::ReadAllText($script:stick.Vbox).Replace('OSType="Debian_64"', 'OSType="Debian_64" stateFile="Snapshots\x.sav"'))
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.Message | Should -BeExactly 'Test VM has a saved state in VirtualBox. Resume it in VirtualBox (on a PC with VirtualBox) and shut Test OS down normally before starting it in VMware - otherwise Test OS''s disk can get corrupted.'
+            $result.Caption | Should -BeExactly 'Test VM'
+        }
+
+        It 'names the VM in the already-running message' {
+            $script:testProcesses = @([pscustomobject]@{ Name = 'vmware-vmx.exe'; CommandLine = "vmware-vmx.exe `"$($script:stick.Vmx)`"" })
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.Message | Should -BeExactly 'Test VM is already running.'
+            $result.Caption | Should -BeExactly 'Test VM'
+        }
+
+        It 'asks with the names in the question and the VM''s name as the title' {
+            Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"')
+            $script:asked = $null
+            $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskResume { param($Question, $Caption) $script:asked = @($Question, $Caption); $true }
+            $script:asked[0] | Should -BeExactly "Test VM is suspended in VMware. Resume it only if the stick has not been booted any other way since the suspend; otherwise the resume can corrupt Test OS's disk.`n`nResume Test VM now?"
+            $script:asked[1] | Should -BeExactly 'Test VM'
+        }
+
+        It 'keeps the neutral words and the title Portable VM with the default names' {
+            $script:stick = Initialize-TestStick -Name 'names-stick' -Change @{ VmDisplayName = 'The VM' }
+            $script:testProcesses = @([pscustomobject]@{ Name = 'vmware-vmx.exe'; CommandLine = "vmware-vmx.exe `"$($script:stick.Vmx)`"" })
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.Message | Should -BeExactly 'The VM is already running.'
+            $result.Caption | Should -BeExactly 'Portable VM'
         }
     }
 }
