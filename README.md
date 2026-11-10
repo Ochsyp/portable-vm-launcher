@@ -125,10 +125,13 @@ adds `-VmDisplayName` and `-GuestName` when you give them, and keeps a copy of t
 (`*.vmdk.orig`, `*.vbox.launcher-backup`, `VirtualBox.xml.launcher-backup`) to
 `LauncherData\backups\legacy`, where it disarms the descriptor copies. Any other `*.orig` or
 `*.launcher-backup` file stays where it is, and the report counts it. The code swap comes last,
-so the old launcher works until then. If the migration stops, remove what its message names, if
-anything, and run the same command again: it keeps the `LauncherData\settings.psd1` it wrote,
-with any change made to it since, and moves what is left, also a log or copy that the old
-launcher wrote in between.
+so the old launcher works until then. If the migration stops before the code swap, remove what
+its message names, if anything, and run the same command again: it keeps the
+`LauncherData\settings.psd1` it wrote and moves what is left, also a log or copy that the old
+launcher wrote in between. When the two settings files differ by then, it names the settings that
+differ and asks you to make the files agree first. If it stops later, do what its message says;
+the new launcher is in place by then. A settings file without a byte order mark whose values read
+differently as UTF-8 and as ANSI is refused until it is saved with one.
 
 To go back, rename `Launcher` to any other name, rename `Launcher.previous` to `Launcher`, and
 move the old `.cmd` from it back to the stick's root. After a migration, `Launcher.previous`

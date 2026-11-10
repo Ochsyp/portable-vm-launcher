@@ -66,10 +66,10 @@ stick's Data partition and `X:\` standing for the folder that holds `Launcher`:
 7. Run the dry runs of step 2 again. Their lines must land in `LauncherData\logs\launcher.log`,
    nothing new may appear in `Launcher`, and they must match step 2 apart from the timestamps,
    the version line and the VM's and the guest's names.
-8. Run the inventory again: `LauncherData` found, settings of schema 2, no settings file in
-   `Launcher`, no descriptor `.orig` copy and no `.launcher-backup` copy beside the VM files,
-   legacy copies in `LauncherData`, none of them naming a raw device; every other answer as in
-   step 1.
+8. Run the inventory again: `LauncherData` and its log found, settings of schema 2, no settings
+   file in `Launcher`, no descriptor `.orig` copy and no `.launcher-backup` copy beside the VM
+   files, legacy copies in `LauncherData`, none of them naming a raw device; every other answer
+   as in step 1.
 9. Start the VM once through `Start VM.cmd`, then shut the guest down from inside it.
 
 If the migration stops before the code swap (`Launcher\VERSION` is still the old one), the old

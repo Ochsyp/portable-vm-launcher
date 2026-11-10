@@ -85,10 +85,9 @@ Describe 'Reading a settings file' {
         Get-ImportError -Path $path | Should -BeLike '*save it as UTF-8 with BOM'
     }
 
-    It 'reads a file without a byte order mark as UTF-8 with -Legacy when it is valid UTF-8, as editors save it' {
-        $path = Write-TestByte -Name 'utf8-legacy.psd1' -Bytes ((New-Object System.Text.UTF8Encoding $false).GetBytes("# $script:sampleName`r`n@{ GuestName = '$script:sampleName' }"))
-        (Import-PvmDataFile -Path $path -Legacy)['GuestName'] | Should -BeExactly $script:sampleName
-        ConvertFrom-PvmDataFileByte -Bytes ([IO.File]::ReadAllBytes($path)) -Legacy | Should -BeExactly "# $script:sampleName`r`n@{ GuestName = '$script:sampleName' }"
+    It 'reads a file without a byte order mark as ANSI with -Legacy also when it holds UTF-8, as the launcher before schema 2 did' {
+        $bytes = (New-Object System.Text.UTF8Encoding $false).GetBytes("@{ GuestName = '$script:sampleName' }")
+        ConvertFrom-PvmDataFileByte -Bytes $bytes -Legacy | Should -BeExactly ([Text.Encoding]::Default.GetString($bytes))
     }
 
     It 'refuses bytes that are no valid UTF-8 after a UTF-8 byte order mark' {
@@ -193,17 +192,18 @@ Describe 'Checking settings against schema 2' {
         $problems[0] | Should -BeLike "${Key}: must *"
     }
 
-    It 'accepts a name with letters outside ASCII, an emoji, a zero-width joiner or a no-break space' {
+    It 'accepts a name with letters outside ASCII, an emoji, a joiner inside it, a no-break space or a letter newer than the .NET tables' {
         $penguin = [char]::ConvertFromUtf32(0x1F427)
-        foreach ($name in $script:sampleName, "Debian $penguin", ('a' + [char]0x200D + 'b'), ('Test' + [char]0x00A0 + 'OS')) {
+        foreach ($name in $script:sampleName, "Debian $penguin", ('a' + [char]0x200D + 'b'), ('Test' + [char]0x00A0 + 'OS'), ('Node ' + [char]0x20BF), ([string][char]0x1C90 + 'a')) {
             @(Test-PvmSetting -Settings (Get-GoodSetting -Change @{ GuestName = $name })) | Should -BeNullOrEmpty
         }
     }
 
-    It 'refuses a name with a lone surrogate or a direction override' {
-        foreach ($name in ('Test' + [char]0xD83D), ('Test' + [char]0x202E + 'OS')) {
+    It 'refuses a name with a lone surrogate, a direction override, a tag, or a joiner or blank at either end' {
+        $tag = [char]::ConvertFromUtf32(0xE0001)
+        foreach ($name in ('Test' + [char]0xD83D), ('Test' + [char]0x202E + 'OS'), "Test$tag", ('Debian ' + [char]0x200D), ([string][char]0x200D + ' ' + [char]0x200D), ([string][char]0x200C + 'Test')) {
             Test-PvmSetting -Settings (Get-GoodSetting -Change @{ GuestName = $name }) |
-                Should -BeExactly @('GuestName: must be text of 1 to 40 characters, without control or formatting characters and without blanks at either end')
+                Should -BeExactly @('GuestName: must be 1 to 40 characters of text, without control or formatting characters, and without a blank or a joiner at either end')
         }
     }
 

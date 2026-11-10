@@ -110,7 +110,8 @@ function Read-PrivateSetting {
     [CmdletBinding()]
     [OutputType([hashtable])]
     param([Parameter(Mandatory)][string]$Path)
-    $bytes = [IO.File]::ReadAllBytes($Path)
+    # .NET reads a relative path from the process's folder, not from PowerShell's location.
+    $bytes = [IO.File]::ReadAllBytes((Convert-Path -LiteralPath $Path))
     $text = $null
     foreach ($encoding in (New-Object System.Text.UTF8Encoding $true), (New-Object System.Text.UnicodeEncoding $false, $true), (New-Object System.Text.UnicodeEncoding $true, $true)) {
         $preamble = $encoding.GetPreamble()
@@ -182,6 +183,8 @@ function Find-Value {
 }
 
 try {
+    # Git runs in PowerShell's location, but a relative path is made absolute here all the same.
+    $RepositoryPath = Convert-Path -LiteralPath $RepositoryPath
     if ($SettingsPath) {
         # A file named on purpose must be there: the check must not pass because a path was wrong.
         foreach ($path in $SettingsPath) {

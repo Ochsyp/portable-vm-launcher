@@ -6,6 +6,8 @@
 BeforeAll {
     $script:repoRoot = Split-Path $PSScriptRoot -Parent
     $script:utf8 = New-Object System.Text.UTF8Encoding $false
+    # A made-up name with letters outside ASCII that Windows-1252 holds too.
+    $script:sampleName = 'K' + [char]0x00E9 + 'l' + [char]0x00F8 + 'n' + [char]0x00EF
     . (Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1')
     . (Join-Path $script:repoRoot 'tools\Get-StickInventory.ps1')
 
@@ -360,7 +362,8 @@ Describe 'Deploy-PortableVM -MigrateSettings' {
     It 'refuses <Case>, changing nothing' -ForEach @(
         @{ Case = 'without -MigrateSettings'; Setup = {}; Extra = @{}; Message = 'The stick keeps its settings in Launcher\settings.psd1*-MigrateSettings*' }
         @{ Case = 'settings that fail the checks of schema 2'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text (Get-TestSettingsText).Replace("'Auto'", "'VBox'") }; Extra = @{ MigrateSettings = $true }; Message = "*do not pass the checks of schema 2, so nothing was changed.*`n- Hypervisor: must be*" }
-        @{ Case = 'a name that fails the checks'; Setup = {}; Extra = @{ MigrateSettings = $true; GuestName = ' Test OS' }; Message = "*`n- GuestName: must be text of 1 to 40 characters*" }
+        @{ Case = 'a name that fails the checks'; Setup = {}; Extra = @{ MigrateSettings = $true; GuestName = ' Test OS' }; Message = "*`n- GuestName: must be 1 to 40 characters of text*" }
+        @{ Case = 'a resume when the two settings files differ'; Setup = { Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text).Replace("'Window'", "'FullScreen'") }; Extra = @{ MigrateSettings = $true }; Message = 'Launcher\settings.psd1 and LauncherData\settings.psd1 differ in VMwareView, so nothing was changed. The new launcher reads LauncherData\settings.psd1: make the two files agree, then run the same command again.' }
         @{ Case = 'settings that run code'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text '@{ Hypervisor = $(Get-Date) }' }; Extra = @{ MigrateSettings = $true }; Message = 'Launcher\settings.psd1 cannot be read: line 1 holds an expression*' }
         @{ Case = 'LauncherData without settings.psd1'; Setup = { $null = New-Item -ItemType Directory -Path (Join-Path $script:target 'LauncherData') }; Extra = @{ MigrateSettings = $true }; Message = 'LauncherData is there, but without settings.psd1*' }
         @{ Case = 'a resume whose LauncherData settings fail the checks'; Setup = { Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text).Replace("'Auto'", "'VBox'") }; Extra = @{ MigrateSettings = $true }; Message = "LauncherData\settings.psd1 is there from a migration that stopped, and this run keeps it, but it must pass the checks first*`n- Hypervisor: must be*" }
@@ -428,31 +431,62 @@ Describe 'Deploy-PortableVM -MigrateSettings' {
         Join-Path $script:target 'VMware\stick.vmdk.orig' | Should -Not -Exist
     }
 
-    It 'keeps LauncherData''s settings on a resume, changes made since included, and finishes with or without the same names' {
-        $kept = (Get-TestSchema2Text -Add "GuestName = 'Test OS'").Replace("'Window'", "'FullScreen'")
+    It 'keeps LauncherData''s settings and names on a resume and finishes, <Case>' -ForEach @(
+        @{ Case = 'with the same name given again'; Extra = @{ GuestName = 'Test OS' } }
+        @{ Case = 'without names'; Extra = @{} }
+    ) {
+        $kept = Get-TestSchema2Text -Add "GuestName = 'Test OS'"
         Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text $kept
-        $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings -GuestName 'Test OS'
+        $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings @Extra
         $result.Mode | Should -BeExactly 'Resume'
+        (Format-DeployReport -Result $result)[1] | Should -BeExactly 'settings: LauncherData\settings.psd1 was kept as it is, with a copy of the old file in LauncherData\backups\legacy\Launcher.'
         [IO.File]::ReadAllText((Join-Path $script:target 'LauncherData\settings.psd1')) | Should -BeExactly $kept
         [IO.File]::ReadAllText((Join-Path $script:legacy 'VMware\stick.vmdk.orig')) | Should -BeExactly (Get-TestDescriptorText -Device '\\.\PortableVM-disarmed')
         @(Get-ChildItem -LiteralPath (Join-Path $script:target 'Launcher') -Name | Sort-Object) | Should -BeExactly @('PortableVM.psm1', 'SHA256SUMS', 'Start-PortableVM.ps1', 'VERSION')
     }
 
-    It 'keeps, on a resume, the log and the settings file that the old launcher changed after the stop, beside the earlier ones' {
+    It 'keeps, on a resume, the log and a settings file that the old launcher changed after the stop, beside the earlier ones' {
         Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
         Write-TestFile -Path (Join-Path $script:target 'LauncherData\logs\launcher.log') -Text "old log line`r`n"
         Write-TestFile -Path (Join-Path $script:legacy 'Launcher\settings.psd1') -Text (Get-TestSettingsText)
         Write-TestFile -Path (Join-Path $script:target 'Launcher\launcher.log') -Text "line after the stop`r`n"
-        Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text (Get-TestSettingsText).Replace("'Window'", "'FullScreen'")
+        $edited = (Get-TestSettingsText).Replace("# The stick's settings", "# The stick's settings, edited after the stop")
+        Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text $edited
         $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings
         $result.Mode | Should -BeExactly 'Resume'
         $result.Plan.Log | Should -BeTrue
         [IO.File]::ReadAllText((Join-Path $script:target 'LauncherData\logs\launcher.log')) | Should -BeExactly "old log line`r`n"
         [IO.File]::ReadAllText((Join-Path $script:target 'LauncherData\logs\launcher (2).log')) | Should -BeExactly "line after the stop`r`n"
         [IO.File]::ReadAllText((Join-Path $script:legacy 'Launcher\settings.psd1')) | Should -BeExactly (Get-TestSettingsText)
-        [IO.File]::ReadAllText((Join-Path $script:legacy 'Launcher\settings (2).psd1')) | Should -BeExactly (Get-TestSettingsText).Replace("'Window'", "'FullScreen'")
+        [IO.File]::ReadAllText((Join-Path $script:legacy 'Launcher\settings (2).psd1')) | Should -BeExactly $edited
         [IO.File]::ReadAllText((Join-Path $script:target 'LauncherData\settings.psd1')) | Should -BeExactly (Get-TestSchema2Text)
         Join-Path $script:target 'Launcher.previous\settings.psd1' | Should -Exist
+    }
+
+    It 'keeps comments outside ASCII of a schema 1 file that an editor saved as UTF-8 without a byte order mark' {
+        $comment = "# $script:sampleName's stick"
+        $text = (Get-TestSettingsText).Replace("# The stick's settings", $comment)
+        [IO.File]::WriteAllBytes((Join-Path $script:target 'Launcher\settings.psd1'), (New-Object System.Text.UTF8Encoding $false).GetBytes($text))
+        $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings
+        $written = [IO.File]::ReadAllBytes((Join-Path $script:target 'LauncherData\settings.psd1'))
+        @($written[0..2]) | Should -Be @(0xEF, 0xBB, 0xBF)
+        (New-Object System.Text.UTF8Encoding $false).GetString($written, 3, $written.Length - 3) | Should -BeExactly (Get-TestSchema2Text).Replace("# The stick's settings", $comment)
+    }
+
+    It 'refuses, changing nothing, a schema 1 file without a byte order mark whose values read differently as UTF-8 and as ANSI' {
+        $text = (Get-TestSettingsText).Replace("'VMware\Test VM.vmx'", "'VMware\$script:sampleName.vmx'")
+        [IO.File]::WriteAllBytes((Join-Path $script:target 'Launcher\settings.psd1'), (New-Object System.Text.UTF8Encoding $false).GetBytes($text))
+        $before = Get-TestTree -Root $script:target
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings } |
+            Should -Throw -ExpectedMessage 'Launcher\settings.psd1 has no byte order mark, and VMwareVmx read differently as UTF-8*save the file as UTF-8 with BOM or as ANSI*'
+        Get-TestTree -Root $script:target | Should -BeExactly $before
+    }
+
+    It 'reads a schema 1 file in ANSI as the launcher before LauncherData did' {
+        $text = (Get-TestSettingsText).Replace("# The stick's settings", "# $script:sampleName").Replace("'VMware\Test VM.vmx'", "'VMware\$script:sampleName.vmx'")
+        [IO.File]::WriteAllBytes((Join-Path $script:target 'Launcher\settings.psd1'), [Text.Encoding]::Default.GetBytes($text))
+        $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings
+        (Import-PvmDataFile -Path (Join-Path $script:target 'LauncherData\settings.psd1'))['VMwareVmx'] | Should -BeExactly "VMware\$script:sampleName.vmx"
     }
 
     It 'refuses to resume with a Launcher.new that is not what this run would stage' {

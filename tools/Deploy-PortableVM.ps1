@@ -175,6 +175,49 @@ function Test-DeploySameValue {
     $true
 }
 
+# Return, sorted, the keys of the hashtables $Left and $Right, matched without case and other than
+# those in $Ignore, whose values differ in type or text, or that only one of them holds.
+function Get-DeployDifferentKey {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][hashtable]$Left,
+        [Parameter(Mandatory)][hashtable]$Right,
+        [string[]]$Ignore = @()
+    )
+    $names = @(@($Left.Keys) + @($Right.Keys) | ForEach-Object { "$_" } | Sort-Object -Unique | Where-Object { $Ignore -notcontains $_ })
+    foreach ($name in $names) {
+        $a = Get-DeployValue -Values $Left -Key $name
+        $b = Get-DeployValue -Values $Right -Key $name
+        if ($null -eq $a -and $null -eq $b) { continue }
+        if ($null -eq $a -or $null -eq $b -or $a.GetType() -ne $b.GetType() -or "$a" -cne "$b") { $name }
+    }
+}
+
+# Return the text of the schema 1 settings file whose bytes are $Bytes, as the migration writes it
+# on. Without a byte order mark the launcher before LauncherData read the file as ANSI, while an
+# editor such as Notepad or VS Code saves it as UTF-8. When the two readings differ only in
+# comments, the UTF-8 text keeps them as the editor wrote them; when a value differs, the
+# migration cannot tell which one the stick uses, and this throws, naming the keys.
+function Get-DeployLegacyText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][byte[]]$Bytes)
+    $text = ConvertFrom-PvmDataFileByte -Bytes $Bytes -Legacy
+    $ansi = (Get-PvmDataFileHashtable -Text $text).SafeGetValue()
+    $bom = ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) -or
+    ($Bytes.Length -ge 2 -and (($Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) -or ($Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF)))
+    if ($bom -or @($Bytes | Where-Object { $_ -gt 0x7F }).Count -eq 0) { return $text }
+    try { $utf8 = (New-Object System.Text.UTF8Encoding $false, $true).GetString($Bytes) }
+    catch { return $text }
+    $keys = @()
+    try { $keys = @(Get-DeployDifferentKey -Left $ansi -Right (Get-PvmDataFileHashtable -Text $utf8).SafeGetValue()) }
+    catch { $keys = @('the whole file') }
+    if ($keys.Count -eq 0) { return $utf8 }
+    throw ("Launcher\settings.psd1 has no byte order mark, and $($keys -join ', ') read differently as UTF-8, as an editor saves it, than as ANSI, as the launcher before LauncherData read it, so nothing was changed. " +
+        'Check with a dry run of that launcher which files it uses, save the file as UTF-8 with BOM or as ANSI to match, then run the same command again.')
+}
+
 # Return the value of the key $Key in the hashtable $Values, with the key matched without case, or
 # $null when it has none.
 function Get-DeployValue {
@@ -327,9 +370,14 @@ function Get-DeployMigrationPlan {
     $oldSettings = Join-Path $Target 'Launcher\settings.psd1'
     $data = Join-Path $Target 'LauncherData'
     $settings = Join-Path $data 'settings.psd1'
-    $text = ConvertFrom-PvmDataFileByte -Bytes ([IO.File]::ReadAllBytes($oldSettings)) -Legacy
-    try { $old = (Get-PvmDataFileHashtable -Text $text).SafeGetValue() }
-    catch { throw "Launcher\settings.psd1 cannot be read, so nothing was changed: $($_.Exception.Message)." }
+    try {
+        $text = Get-DeployLegacyText -Bytes ([IO.File]::ReadAllBytes($oldSettings))
+        $old = (Get-PvmDataFileHashtable -Text $text).SafeGetValue()
+    } catch {
+        $reason = $_.Exception.Message
+        if ($reason -like 'Launcher\settings.psd1 has no byte order mark*') { throw }
+        throw "Launcher\settings.psd1 cannot be read, so nothing was changed: $reason."
+    }
     $bytes = $null
     if ($Resume) {
         if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) {
@@ -347,6 +395,13 @@ function Get-DeployMigrationPlan {
             if ($given -and "$(Get-DeployValue -Values $values -Key $name)" -cne $given) {
                 throw "LauncherData\settings.psd1 is there from a migration that stopped, and this run keeps it, but its $name is not the one given, so nothing was changed. Set VmDisplayName and GuestName in LauncherData\settings.psd1, then run the same command without -VmDisplayName and -GuestName."
             }
+        }
+        # The old launcher may have run on Launcher\settings.psd1 since: a change there must not
+        # be lost without a word. Defaults count as written, and the keys schema 2 added do not count.
+        try { $different = @(Get-DeployDifferentKey -Left (Merge-PvmSetting -Settings $old) -Right (Merge-PvmSetting -Settings $values) -Ignore 'SchemaVersion', 'IsExample', 'VmDisplayName', 'GuestName') }
+        catch { $different = @('sector values that are no whole numbers') }
+        if ($different.Count -gt 0) {
+            throw "Launcher\settings.psd1 and LauncherData\settings.psd1 differ in $($different -join ', '), so nothing was changed. The new launcher reads LauncherData\settings.psd1: make the two files agree, then run the same command again."
         }
     } else {
         try { $new = ConvertTo-PvmSchema2Text -Text $text -VmDisplayName $VmDisplayName -GuestName $GuestName }
@@ -622,7 +677,11 @@ function Format-DeployReport {
     "$(if ($done) { 'deployed' } else { 'would deploy' }) $($Result.Version) ($($Result.Mode))."
     $plan = $Result.Plan
     if ($plan) {
-        "settings: LauncherData\settings.psd1 $(if ($done) { 'holds' } else { 'would hold' }) them in schema 2, with a copy of the old file in LauncherData\backups\legacy\Launcher."
+        if ($Result.Mode -eq 'Resume') {
+            "settings: LauncherData\settings.psd1 $(if ($done) { 'was kept' } else { 'would be kept' }) as it is, with a copy of the old file in LauncherData\backups\legacy\Launcher."
+        } else {
+            "settings: LauncherData\settings.psd1 $(if ($done) { 'holds' } else { 'would hold' }) them in schema 2, with a copy of the old file in LauncherData\backups\legacy\Launcher."
+        }
         "log $moved to LauncherData\logs: $(if ($plan.Log) { 1 } else { 0 })."
         "descriptor copies $moved to LauncherData\backups\legacy and disarmed: $($plan.Descriptors)."
         "VirtualBox copies $moved to LauncherData\backups\legacy: $($plan.VirtualBoxCopies)."

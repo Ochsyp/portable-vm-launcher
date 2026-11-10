@@ -421,6 +421,19 @@ Describe 'Find-PrivateData' {
         ($lines -join "`n") | Should -Match '-SettingsPath names no file'
     }
 
+    It 'reads a relative -SettingsPath from PowerShell''s location, not from the process''s folder' {
+        $sample = Join-Path $TestDrive 'find-relative'
+        Initialize-SampleRepository -Path $sample -Files @{ 'guest.txt' = 'the guest is Sample OS' }
+        Invoke-SampleGit -Path $sample -Arguments @('add', '-A')
+        # Written after the add, so the settings file stays untracked.
+        [IO.File]::WriteAllText((Join-Path $sample 's.psd1'), "@{ GuestName = 'Sample OS' }", $script:utf8)
+        $tool = Join-Path $script:repoRoot 'tools\Find-PrivateData.ps1'
+        $command = "Set-Location -LiteralPath '$sample'; & '$tool' -RepositoryPath . -SettingsPath .\s.psd1; exit `$LASTEXITCODE"
+        $lines = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command $command 2>&1 | ForEach-Object { "$_" })
+        $LASTEXITCODE | Should -Be 1
+        ($lines -join "`n") | Should -Match 'a value of GuestName is in index: guest\.txt'
+    }
+
     It 'runs on its own clone when no -RepositoryPath is given, as pre-push calls it' {
         $tool = Join-Path $script:repoRoot 'tools\Find-PrivateData.ps1'
         $null = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $tool 2>&1
