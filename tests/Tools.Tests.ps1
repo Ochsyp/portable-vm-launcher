@@ -195,7 +195,7 @@ Describe 'Deploy-PortableVM' {
         @{ Case = 'when Launcher holds a file named like the old .cmd'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Launcher\Start Old.cmd') -Text 'rem x' }; Extra = @{}; Message = 'Launcher holds a file with the name of an old launcher .cmd*' }
         @{ Case = 'with schema 2 settings in Launcher'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text (Get-TestSchema2Text) }; Extra = @{}; Message = 'Launcher\settings.psd1 holds schema 2 settings, but the launcher reads them from LauncherData\settings.psd1.*' }
         @{ Case = 'with -MigrateSettings on a migrated stick'; Setup = {}; Extra = @{ MigrateSettings = $true }; Message = 'The settings are in LauncherData already, so there is nothing to migrate.*' }
-        @{ Case = 'with a name but no -MigrateSettings'; Setup = {}; Extra = @{ VmDisplayName = 'Test VM' }; Message = '-VmDisplayName and -GuestName go only with -MigrateSettings.*' }
+        @{ Case = 'with a name but no -MigrateSettings'; Setup = {}; Extra = @{ VmDisplayName = 'Test VM' }; Message = '-VmDisplayName and -GuestName go only with -MigrateSettings, which writes them into the new LauncherData\settings.psd1.*' }
     ) {
         & $Setup
         $before = Get-TestTree -Root $script:target
@@ -341,14 +341,30 @@ Describe 'Deploy-PortableVM -MigrateSettings' {
         )
     }
 
+    It 'runs as a script with -WhatIf, printing its plan and changing nothing' {
+        $before = Get-TestTree -Root $script:target
+        $tool = Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1'
+        $output = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $tool -Target $script:target -MigrateSettings -WhatIf 2>&1 | ForEach-Object { "$_" })
+        $exitCode = $LASTEXITCODE
+        if ($output -match 'A VM runs on this PC') {
+            Set-ItResult -Skipped -Because 'a VM runs on this PC'
+            return
+        }
+        $exitCode | Should -Be 0
+        ($output -join "`n") | Should -Match 'Deploy-PortableVM: would deploy \S+ \(Migrate\)\.'
+        ($output -join "`n") | Should -Match 'Deploy-PortableVM: descriptor copies to move to LauncherData\\backups\\legacy and disarmed: 2\.'
+        $output | Where-Object { $_ -like 'What if:*' -and $_ -notlike '*"Deploy the launcher *" on target "the -Target folder".' } | Should -BeNullOrEmpty
+        Get-TestTree -Root $script:target | Should -BeExactly $before
+    }
+
     It 'refuses <Case>, changing nothing' -ForEach @(
         @{ Case = 'without -MigrateSettings'; Setup = {}; Extra = @{}; Message = 'The stick keeps its settings in Launcher\settings.psd1*-MigrateSettings*' }
         @{ Case = 'settings that fail the checks of schema 2'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text (Get-TestSettingsText).Replace("'Auto'", "'VBox'") }; Extra = @{ MigrateSettings = $true }; Message = "*do not pass the checks of schema 2, so nothing was changed.*`n- Hypervisor: must be*" }
         @{ Case = 'a name that fails the checks'; Setup = {}; Extra = @{ MigrateSettings = $true; GuestName = ' Test OS' }; Message = "*`n- GuestName: must be text of 1 to 40 characters*" }
         @{ Case = 'settings that run code'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text '@{ Hypervisor = $(Get-Date) }' }; Extra = @{ MigrateSettings = $true }; Message = 'Launcher\settings.psd1 cannot be read: line 1 holds an expression*' }
         @{ Case = 'LauncherData without settings.psd1'; Setup = { $null = New-Item -ItemType Directory -Path (Join-Path $script:target 'LauncherData') }; Extra = @{ MigrateSettings = $true }; Message = 'LauncherData is there, but without settings.psd1*' }
-        @{ Case = 'other values in LauncherData'; Setup = { Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text).Replace("'Window'", "'FullScreen'") }; Extra = @{ MigrateSettings = $true }; Message = 'LauncherData\settings.psd1 holds other values than Launcher\settings.psd1*' }
-        @{ Case = 'other names in LauncherData'; Setup = { Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text -Add "GuestName = 'Test OS'") }; Extra = @{ MigrateSettings = $true }; Message = 'LauncherData\settings.psd1 holds other names than this run would write.*' }
+        @{ Case = 'a resume whose LauncherData settings fail the checks'; Setup = { Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text).Replace("'Auto'", "'VBox'") }; Extra = @{ MigrateSettings = $true }; Message = "LauncherData\settings.psd1 is there from a migration that stopped, and this run keeps it, but it must pass the checks first*`n- Hypervisor: must be*" }
+        @{ Case = 'a resume with a name that LauncherData does not hold'; Setup = { Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text -Add "GuestName = 'Test OS'") }; Extra = @{ MigrateSettings = $true; GuestName = 'Other OS' }; Message = '*but its GuestName is not the one given, so nothing was changed. Set VmDisplayName and GuestName in LauncherData\settings.psd1*' }
     ) {
         & $Setup
         $before = Get-TestTree -Root $script:target
@@ -410,6 +426,33 @@ Describe 'Deploy-PortableVM -MigrateSettings' {
         [IO.File]::ReadAllText((Join-Path $script:legacy 'VMware\stick (2).vmdk.orig')) | Should -BeExactly (Get-TestDescriptorText -Device '\\.\PortableVM-disarmed')
         [IO.File]::ReadAllText((Join-Path $script:legacy 'Launcher\settings.psd1')) | Should -BeExactly (Get-TestSettingsText)
         Join-Path $script:target 'VMware\stick.vmdk.orig' | Should -Not -Exist
+    }
+
+    It 'keeps LauncherData''s settings on a resume, changes made since included, and finishes with or without the same names' {
+        $kept = (Get-TestSchema2Text -Add "GuestName = 'Test OS'").Replace("'Window'", "'FullScreen'")
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text $kept
+        $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings -GuestName 'Test OS'
+        $result.Mode | Should -BeExactly 'Resume'
+        [IO.File]::ReadAllText((Join-Path $script:target 'LauncherData\settings.psd1')) | Should -BeExactly $kept
+        [IO.File]::ReadAllText((Join-Path $script:legacy 'VMware\stick.vmdk.orig')) | Should -BeExactly (Get-TestDescriptorText -Device '\\.\PortableVM-disarmed')
+        @(Get-ChildItem -LiteralPath (Join-Path $script:target 'Launcher') -Name | Sort-Object) | Should -BeExactly @('PortableVM.psm1', 'SHA256SUMS', 'Start-PortableVM.ps1', 'VERSION')
+    }
+
+    It 'keeps, on a resume, the log and the settings file that the old launcher changed after the stop, beside the earlier ones' {
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\logs\launcher.log') -Text "old log line`r`n"
+        Write-TestFile -Path (Join-Path $script:legacy 'Launcher\settings.psd1') -Text (Get-TestSettingsText)
+        Write-TestFile -Path (Join-Path $script:target 'Launcher\launcher.log') -Text "line after the stop`r`n"
+        Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text (Get-TestSettingsText).Replace("'Window'", "'FullScreen'")
+        $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings
+        $result.Mode | Should -BeExactly 'Resume'
+        $result.Plan.Log | Should -BeTrue
+        [IO.File]::ReadAllText((Join-Path $script:target 'LauncherData\logs\launcher.log')) | Should -BeExactly "old log line`r`n"
+        [IO.File]::ReadAllText((Join-Path $script:target 'LauncherData\logs\launcher (2).log')) | Should -BeExactly "line after the stop`r`n"
+        [IO.File]::ReadAllText((Join-Path $script:legacy 'Launcher\settings.psd1')) | Should -BeExactly (Get-TestSettingsText)
+        [IO.File]::ReadAllText((Join-Path $script:legacy 'Launcher\settings (2).psd1')) | Should -BeExactly (Get-TestSettingsText).Replace("'Window'", "'FullScreen'")
+        [IO.File]::ReadAllText((Join-Path $script:target 'LauncherData\settings.psd1')) | Should -BeExactly (Get-TestSchema2Text)
+        Join-Path $script:target 'Launcher.previous\settings.psd1' | Should -Exist
     }
 
     It 'refuses to resume with a Launcher.new that is not what this run would stage' {
@@ -504,6 +547,7 @@ Describe 'Get-StickInventory' {
         @{ Name = 'VirtualBox.xml lists the VM'; Answer = $true }
         @{ Name = "VirtualBox.xml lists the VM's .vbox with a drive letter"; Answer = $true }
         @{ Name = 'VirtualBox descriptor found'; Answer = $true }
+        @{ Name = 'VirtualBox descriptor has a .orig copy'; Answer = $false }
         @{ Name = 'VirtualBox files have .launcher-backup copies'; Answer = $false }
         @{ Name = 'VMware Workstation installed'; Answer = $false }
         @{ Name = 'VirtualBox installed'; Answer = $false }
@@ -525,6 +569,7 @@ Describe 'Get-StickInventory' {
         @{ Name = "VirtualBox host I/O cache is on for the descriptor's controller"; Answer = $false }
         @{ Name = 'VirtualBox descriptor has a bandwidth group'; Answer = $true }
         @{ Name = 'VirtualBox .vbox holds paths with a drive letter'; Answer = $true }
+        @{ Name = 'VirtualBox descriptor has a .orig copy'; Answer = $true }
         @{ Name = 'VirtualBox files have .launcher-backup copies'; Answer = $true }
         @{ Name = 'VMware Workstation installed'; Answer = $true }
         @{ Name = 'VirtualBox installed'; Answer = $true }
@@ -536,6 +581,7 @@ Describe 'Get-StickInventory' {
         Write-TestFile -Path (Join-Path $root 'VMware\old.vmdk') -Text 'RW 9 FLAT "\\.\PhysicalDrive1" 0'
         Write-TestFile -Path (Join-Path $root 'VMware\stick-pt.vmdk') -Text 'partition table'
         Write-TestFile -Path (Join-Path $root 'VMware\stick.vmdk.orig') -Text 'old'
+        Write-TestFile -Path (Join-Path $root 'VirtualBox\Test VM\stick.vmdk.orig') -Text 'old'
         Write-TestFile -Path (Join-Path $root 'VirtualBox\VirtualBox.xml.launcher-backup') -Text 'old'
         Write-TestFile -Path (Join-Path $root 'Programs\vmware.exe') -Text ''
         Write-TestFile -Path (Join-Path $root 'Programs\VBoxManage.exe') -Text ''

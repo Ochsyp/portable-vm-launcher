@@ -10,8 +10,9 @@
 # Run it in Windows PowerShell 5.1:
 #   powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Find-PrivateData.ps1 -History
 # .githooks/pre-push runs it like that before every push. -RepositoryPath checks another clone
-# than the one this script is in. Exits 0 when nothing is found or there is nothing to look for,
-# 1 on a match, 2 when the check cannot run.
+# than the one this script is in. -SettingsPath takes one file when the script runs with -File,
+# several from PowerShell, and each file it names must exist. Exits 0 when nothing is found or
+# there is nothing to look for, 1 on a match, 2 when the check cannot run.
 
 [CmdletBinding()]
 param(
@@ -102,6 +103,35 @@ function Get-PrivateValue {
     } | Sort-Object Name, Value -Unique
 }
 
+# Return the hashtable in the settings file $Path, read as data without running anything in it.
+# The text is decoded by its byte order mark, else as UTF-8 when it is valid UTF-8, as editors
+# save it, else as ANSI, so that a name outside ASCII is looked for as it is written in the files.
+function Read-PrivateSetting {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([Parameter(Mandatory)][string]$Path)
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $text = $null
+    foreach ($encoding in (New-Object System.Text.UTF8Encoding $true), (New-Object System.Text.UnicodeEncoding $false, $true), (New-Object System.Text.UnicodeEncoding $true, $true)) {
+        $preamble = $encoding.GetPreamble()
+        if ($bytes.Length -ge $preamble.Length -and [Convert]::ToBase64String($bytes, 0, $preamble.Length) -eq [Convert]::ToBase64String($preamble)) {
+            $text = $encoding.GetString($bytes, $preamble.Length, $bytes.Length - $preamble.Length)
+            break
+        }
+    }
+    if ($null -eq $text) {
+        try { $text = (New-Object System.Text.UTF8Encoding $false, $true).GetString($bytes) }
+        catch { $text = [Text.Encoding]::Default.GetString($bytes) }
+    }
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -gt 0) { throw 'The settings file is no valid PowerShell data.' }
+    $hashtable = $ast.Find({ $args[0] -is [System.Management.Automation.Language.HashtableAst] }, $false)
+    if ($null -eq $hashtable) { throw 'The settings file holds no hashtable.' }
+    $hashtable.SafeGetValue()
+}
+
 # Return whether $Text holds $Value, compared without case. A number counts only as a whole
 # number, not as part of a longer one.
 function Test-ContainsValue {
@@ -152,12 +182,19 @@ function Find-Value {
 }
 
 try {
-    if (-not $SettingsPath) {
-        $SettingsPath = @((Join-Path $RepositoryPath 'LauncherData\settings.psd1'), (Join-Path $RepositoryPath 'Launcher\settings.psd1'))
+    if ($SettingsPath) {
+        # A file named on purpose must be there: the check must not pass because a path was wrong.
+        foreach ($path in $SettingsPath) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                Write-Output "Find-PrivateData: -SettingsPath names no file: $path"
+                exit 2
+            }
+        }
+    } else {
+        $SettingsPath = @((Join-Path $RepositoryPath 'LauncherData\settings.psd1'), (Join-Path $RepositoryPath 'Launcher\settings.psd1')) |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
     }
-    $settings = @($SettingsPath | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | ForEach-Object {
-            Import-PowerShellDataFile -LiteralPath $_
-        })
+    $settings = @($SettingsPath | Where-Object { $_ } | ForEach-Object { Read-PrivateSetting -Path $_ })
     $gitDir = @(Invoke-Git -Arguments @('rev-parse', '--absolute-git-dir'))[0]
     $denylistPath = Join-Path $gitDir 'info\privacy-denylist'
     $denylist = @()

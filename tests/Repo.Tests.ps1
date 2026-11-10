@@ -254,7 +254,7 @@ Describe 'Static guards' {
             ForEach-Object { $_.Member.Extent.Text } | Where-Object { $allowed -cnotcontains $_ } | Should -BeNullOrEmpty
     }
 
-    It 'keep the deploy tool from deleting anything, and let it replace a file only to disarm a descriptor copy' {
+    It 'keep the deploy tool from deleting anything: no Remove-Item, Clear-*, .Delete or -Force that replaces, and [IO.File]::Replace only to disarm a descriptor copy' {
         $ast = Get-SourceAst -Path (Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1')
         Get-SourceCommand -Ast $ast | Where-Object { $_.Name -in 'Remove-Item', 'Clear-Content', 'Clear-Item' } | Should -BeNullOrEmpty
         $members = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
@@ -291,7 +291,7 @@ Describe 'Example settings' {
         $read | Where-Object { $script:schema -notcontains $_ } | Should -BeNullOrEmpty
     }
 
-    It 'holds a signature no disk can match, so the launcher stops at its identity check' {
+    It 'holds a signature no disk can match, which the settings check refuses until real values are in' {
         # The launcher compares the setting with the disk's signature as 8 hex digits, or 'none'.
         $script:settings.StickMbrSignature | Should -Not -Match '^([0-9A-Fa-f]{8}|none)$'
     }
@@ -399,6 +399,26 @@ Describe 'Find-PrivateData' {
 
         [IO.File]::WriteAllText((Join-Path $sample 'LauncherData\settings.psd1'), "@{ SchemaVersion = 2; VmDisplayName = 'the VM'; GuestName = 'the guest' }", $script:utf8)
         (Invoke-FindPrivateData -Path $sample).ExitCode | Should -Be 0
+    }
+
+    It 'reads a settings file saved as UTF-8 without a byte order mark as UTF-8, so a name outside ASCII is found' {
+        $sample = Join-Path $TestDrive 'find-utf8'
+        Initialize-SampleRepository -Path $sample -Files @{ 'guest.txt' = "the guest is $script:umlautName OS" }
+        Invoke-SampleGit -Path $sample -Arguments @('add', '-A')
+        $null = New-Item -ItemType Directory -Path (Join-Path $sample 'LauncherData')
+        [IO.File]::WriteAllText((Join-Path $sample 'LauncherData\settings.psd1'), "@{ SchemaVersion = 2; GuestName = '$script:umlautName OS' }", $script:utf8)
+        $result = Invoke-FindPrivateData -Path $sample
+        $result.ExitCode | Should -Be 1
+        ($result.Lines -join "`n") | Should -Match 'a value of GuestName is in index: guest\.txt'
+    }
+
+    It 'stops with exit code 2 when -SettingsPath names a file that is not there' {
+        $sample = Join-Path $TestDrive 'find-missing'
+        Initialize-SampleRepository -Path $sample -Files @{ 'a.txt' = 'text' }
+        $tool = Join-Path $script:repoRoot 'tools\Find-PrivateData.ps1'
+        $lines = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $tool -RepositoryPath $sample -SettingsPath (Join-Path $sample 'none.psd1') 2>&1 | ForEach-Object { "$_" })
+        $LASTEXITCODE | Should -Be 2
+        ($lines -join "`n") | Should -Match '-SettingsPath names no file'
     }
 
     It 'runs on its own clone when no -RepositoryPath is given, as pre-push calls it' {

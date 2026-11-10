@@ -82,12 +82,19 @@ function Get-DeployVmProcess {
     Get-CimInstance -ClassName Win32_Process -Filter $VmProcessFilter | ForEach-Object { $_.Name }
 }
 
-# Return the SHA-256 hash of the file $Path in lowercase hex.
+# Return the SHA-256 hash of the file $Path in lowercase hex. It hashes with .NET, since
+# Get-FileHash returns nothing while -WhatIf is in effect, and the checks run under -WhatIf too.
 function Get-DeployHash {
     [CmdletBinding()]
     [OutputType([string])]
     param([Parameter(Mandatory)][string]$Path)
-    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::OpenRead($Path)
+    try { ($sha.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join '' }
+    finally {
+        $stream.Dispose()
+        $sha.Dispose()
+    }
 }
 
 # Return the .cmd files directly in the folder $Folder that start the launcher, which their text
@@ -168,39 +175,43 @@ function Test-DeploySameValue {
     $true
 }
 
-# Return a copy of the hashtable $Values without the keys $Without, compared without case.
-function Get-DeployValueWithout {
+# Return the value of the key $Key in the hashtable $Values, with the key matched without case, or
+# $null when it has none.
+function Get-DeployValue {
     [CmdletBinding()]
-    [OutputType([hashtable])]
     param(
         [Parameter(Mandatory)][hashtable]$Values,
-        [Parameter(Mandatory)][string[]]$Without
+        [Parameter(Mandatory)][string]$Key
     )
-    $copy = @{}
-    foreach ($key in $Values.Keys) { if ($Without -notcontains "$key") { $copy["$key"] = $Values[$key] } }
-    $copy
+    foreach ($name in $Values.Keys) { if ("$name" -eq $Key) { return $Values[$name] } }
+    $null
 }
 
 # Return the copies that the launcher before LauncherData kept beside the files it rewrote, in the
-# folders that the path settings in $Settings name below $Target: Move, the copies a migration
+# folders that the path settings of each table in $Settings name below $Target; a value that
+# breaks the path rule (Get-PvmPathProblem) names no folder. Move holds the copies a migration
 # moves, each with its Path, its Relative path below $Target and its Kind, Descriptor (a
 # *.vmdk.orig under $MaxDescriptorBytes) or VirtualBox (a *.vbox.launcher-backup or
-# VirtualBox.xml.launcher-backup); and Keep, the number of other *.orig and *.launcher-backup
-# files there, which stay.
+# VirtualBox.xml.launcher-backup); Keep is the number of other *.orig and *.launcher-backup files
+# there, which stay.
 function Find-DeployLegacyCopy {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory)][string]$Target,
-        [Parameter(Mandatory)][hashtable]$Settings
+        [Parameter(Mandatory)][hashtable[]]$Settings
     )
     $root = [IO.Path]::GetFullPath($Target).TrimEnd('\') + '\'
-    $folders = @(
-        Split-Path (Join-Path $Target $Settings['VMwareDisk'])
-        Split-Path (Join-Path $Target $Settings['VirtualBoxDisk'])
-        Split-Path (Join-Path $Target $Settings['VirtualBoxVbox'])
-        Join-Path $Target $Settings['VirtualBoxHome']
-    ) | ForEach-Object { [IO.Path]::GetFullPath($_) } | Sort-Object -Unique
+    # The extension each path setting needs; the folder setting names its folder itself.
+    $rules = [ordered]@{ VMwareDisk = '.vmdk'; VirtualBoxDisk = '.vmdk'; VirtualBoxVbox = '.vbox'; VirtualBoxHome = '' }
+    $folders = @(foreach ($table in $Settings) {
+            foreach ($key in $rules.Keys) {
+                $value = Get-DeployValue -Values $table -Key $key
+                if ($value -isnot [string] -or (Get-PvmPathProblem -Value $value -Extension $rules[$key])) { continue }
+                $path = Join-Path $Target $value
+                if ($rules[$key]) { Split-Path $path } else { $path }
+            }
+        }) | ForEach-Object { [IO.Path]::GetFullPath($_) } | Sort-Object -Unique
     $move = @()
     $keep = 0
     foreach ($folder in $folders) {
@@ -298,10 +309,12 @@ function Test-DeployStagedCode {
 
 # Return the plan of a migration of the stick folder $Target from schema 1, checked before any
 # change and refusing what it cannot do: Bytes, the new LauncherData\settings.psd1 (ASCII, or
-# UTF-8 with a BOM when it holds other characters); Values, its settings; Copies, the copies to
-# move (Find-DeployLegacyCopy); Log, whether Launcher\launcher.log moves; and the counts that the
-# report shows. With -Resume, LauncherData exists from a migration that stopped, and what it holds
-# must be what this run writes.
+# UTF-8 with a BOM when it holds other characters); Values, the settings the new launcher reads;
+# Copies, the copies to move (Find-DeployLegacyCopy); Log, whether Launcher\launcher.log moves;
+# and the counts that the report shows. With -Resume, LauncherData is there from a migration that
+# stopped: its settings.psd1 stays as it is, with any change made to it since, so it must pass the
+# checks, and names given must be the ones it holds. The copies are then looked for in the folders
+# of both settings files, and Bytes is $null.
 function Get-DeployMigrationPlan {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -313,56 +326,54 @@ function Get-DeployMigrationPlan {
     )
     $oldSettings = Join-Path $Target 'Launcher\settings.psd1'
     $data = Join-Path $Target 'LauncherData'
+    $settings = Join-Path $data 'settings.psd1'
     $text = ConvertFrom-PvmDataFileByte -Bytes ([IO.File]::ReadAllBytes($oldSettings)) -Legacy
-    try {
-        $old = (Get-PvmDataFileHashtable -Text $text).SafeGetValue()
-        $new = ConvertTo-PvmSchema2Text -Text $text -VmDisplayName $VmDisplayName -GuestName $GuestName
-    } catch {
-        throw "Launcher\settings.psd1 cannot be turned into schema 2, so nothing was changed: $($_.Exception.Message)."
-    }
-    $bytes = if ($new -match '[^\x00-\x7F]') {
-        [byte[]]((New-Object System.Text.UTF8Encoding $true).GetPreamble() + (New-Object System.Text.UTF8Encoding $false).GetBytes($new))
-    } else {
-        [Text.Encoding]::ASCII.GetBytes($new)
-    }
-    # The new file is read back the way the launcher reads it, and must hold the old values plus
-    # the new keys.
-    $values = (Get-PvmDataFileHashtable -Text (ConvertFrom-PvmDataFileByte -Bytes $bytes)).SafeGetValue()
-    $expected = @{}
-    foreach ($key in $old.Keys) { $expected["$key"] = $old[$key] }
-    $expected['SchemaVersion'] = 2
-    if ($VmDisplayName) { $expected['VmDisplayName'] = $VmDisplayName }
-    if ($GuestName) { $expected['GuestName'] = $GuestName }
-    if (-not (Test-DeploySameValue -Left $values -Right $expected)) { throw 'The settings in schema 2 would not hold the values of Launcher\settings.psd1, so nothing was changed.' }
-    $problems = @(Test-PvmSetting -Settings $values)
-    if ($problems.Count -gt 0) {
-        throw ("The settings in Launcher\settings.psd1, with the names given, do not pass the checks of schema 2, so nothing was changed. Fix them, then run the same command again:`n" +
-            (($problems | ForEach-Object { "- $_" }) -join "`n"))
-    }
+    try { $old = (Get-PvmDataFileHashtable -Text $text).SafeGetValue() }
+    catch { throw "Launcher\settings.psd1 cannot be read, so nothing was changed: $($_.Exception.Message)." }
+    $bytes = $null
     if ($Resume) {
-        $settings = Join-Path $data 'settings.psd1'
         if (-not (Test-Path -LiteralPath $settings -PathType Leaf)) {
             throw 'LauncherData is there, but without settings.psd1, so the migration cannot tell what happened. Rename LauncherData to another name, then run the same command again.'
         }
-        try { $current = Import-PvmDataFile -Path $settings }
-        catch { throw "LauncherData\settings.psd1 cannot be read: $($_.Exception.Message)." }
-        if (-not (Test-DeploySameValue -Left $current -Right $values)) {
-            $names = 'VmDisplayName', 'GuestName'
-            if (Test-DeploySameValue -Left (Get-DeployValueWithout -Values $current -Without $names) -Right (Get-DeployValueWithout -Values $values -Without $names)) {
-                throw 'LauncherData\settings.psd1 holds other names than this run would write. Run the same command with the -VmDisplayName and -GuestName of the first run, or with neither if it had none.'
-            }
-            throw ('LauncherData\settings.psd1 holds other values than Launcher\settings.psd1, so the migration cannot tell which to keep, and nothing was changed. ' +
-                'To keep LauncherData\settings.psd1, move Launcher\settings.psd1 out of Launcher and deploy without -MigrateSettings; ' +
-                'to migrate Launcher\settings.psd1 again, rename LauncherData to another name first.')
+        try { $null = Import-PvmSetting -Path $settings }
+        catch {
+            $stop = Get-PvmStopMessage -ErrorRecord $_
+            if ($null -eq $stop) { throw }
+            throw "LauncherData\settings.psd1 is there from a migration that stopped, and this run keeps it, but it must pass the checks first, so nothing was changed. $stop"
         }
-        $legacySettings = Join-Path $data 'backups\legacy\Launcher\settings.psd1'
-        if ((Test-Path -LiteralPath $legacySettings) -and (Get-DeployHash -Path $legacySettings) -ne (Get-DeployHash -Path $oldSettings)) {
-            throw 'LauncherData\backups\legacy\Launcher\settings.psd1 differs from Launcher\settings.psd1, so nothing was changed. Move one of them away, then run the same command again.'
+        $values = Import-PvmDataFile -Path $settings
+        foreach ($name in 'VmDisplayName', 'GuestName') {
+            $given = if ($name -eq 'VmDisplayName') { $VmDisplayName } else { $GuestName }
+            if ($given -and "$(Get-DeployValue -Values $values -Key $name)" -cne $given) {
+                throw "LauncherData\settings.psd1 is there from a migration that stopped, and this run keeps it, but its $name is not the one given, so nothing was changed. Set VmDisplayName and GuestName in LauncherData\settings.psd1, then run the same command without -VmDisplayName and -GuestName."
+            }
+        }
+    } else {
+        try { $new = ConvertTo-PvmSchema2Text -Text $text -VmDisplayName $VmDisplayName -GuestName $GuestName }
+        catch { throw "Launcher\settings.psd1 cannot be turned into schema 2, so nothing was changed: $($_.Exception.Message)." }
+        $bytes = if ($new -match '[^\x00-\x7F]') {
+            [byte[]]((New-Object System.Text.UTF8Encoding $true).GetPreamble() + (New-Object System.Text.UTF8Encoding $false).GetBytes($new))
+        } else {
+            [Text.Encoding]::ASCII.GetBytes($new)
+        }
+        # The new file is read back the way the launcher reads it, and must hold the old values
+        # plus the new keys.
+        $values = (Get-PvmDataFileHashtable -Text (ConvertFrom-PvmDataFileByte -Bytes $bytes)).SafeGetValue()
+        $expected = @{}
+        foreach ($key in $old.Keys) { $expected["$key"] = $old[$key] }
+        $expected['SchemaVersion'] = 2
+        if ($VmDisplayName) { $expected['VmDisplayName'] = $VmDisplayName }
+        if ($GuestName) { $expected['GuestName'] = $GuestName }
+        if (-not (Test-DeploySameValue -Left $values -Right $expected)) { throw 'The settings in schema 2 would not hold the values of Launcher\settings.psd1, so nothing was changed.' }
+        $problems = @(Test-PvmSetting -Settings $values)
+        if ($problems.Count -gt 0) {
+            throw ("The settings in Launcher\settings.psd1, with the names given, do not pass the checks of schema 2, so nothing was changed. Fix them, then run the same command again:`n" +
+                (($problems | ForEach-Object { "- $_" }) -join "`n"))
         }
     }
-    $copies = Find-DeployLegacyCopy -Target $Target -Settings $values
+    $copies = Find-DeployLegacyCopy -Target $Target -Settings $values, $old
     $oldLog = Join-Path $Target 'Launcher\launcher.log'
-    $log = (Test-Path -LiteralPath $oldLog -PathType Leaf) -and -not (Test-Path -LiteralPath (Join-Path $data 'logs\launcher.log'))
+    $log = Test-Path -LiteralPath $oldLog -PathType Leaf
     foreach ($copy in $copies.Move) { Write-Verbose "The migration moves $($copy.Relative) to LauncherData\backups\legacy." }
     foreach ($path in @(@($copies.Move | ForEach-Object { $_.Path }) + @(if ($log) { $oldLog }))) { Assert-DeployWriteAccess -Path $path }
     [pscustomobject]@{
@@ -377,11 +388,12 @@ function Get-DeployMigrationPlan {
 }
 
 # Move what a migration moves into the stick folder $Target's LauncherData, which exists by then,
-# as $Plan (Get-DeployMigrationPlan) says: the copy of the schema 1 settings when it is not there
-# yet, the log, and each copy to the same path below LauncherData\backups\legacy, or a free name
-# beside it (Get-DeployFreePath) when that is taken. Then every descriptor copy there is disarmed
-# (Set-DeployDisarmedCopy), which repeats safely after a stop. Move-Item without -Force never
-# replaces a file.
+# as $Plan (Get-DeployMigrationPlan) says: a copy of Launcher\settings.psd1 to
+# backups\legacy\Launcher unless one with its bytes is there, the log to logs, and each copy to
+# the same path below backups\legacy. A name that is taken there gets a free one beside it
+# (Get-DeployFreePath), so a log or a copy that the old launcher wrote after a migration stopped
+# is kept too. Then every descriptor copy there is disarmed (Set-DeployDisarmedCopy), which
+# repeats safely after a stop. Move-Item without -Force never replaces a file.
 function Move-DeployLegacyData {
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -392,9 +404,12 @@ function Move-DeployLegacyData {
     $legacy = Join-Path $data 'backups\legacy'
     if (-not $PSCmdlet.ShouldProcess($data, 'Move the legacy log and copies')) { return }
     $null = New-Item -ItemType Directory -Path (Join-Path $data 'logs'), (Join-Path $legacy 'Launcher') -Force
-    $legacySettings = Join-Path $legacy 'Launcher\settings.psd1'
-    if (-not (Test-Path -LiteralPath $legacySettings)) { $null = Copy-DeployFile -Source (Join-Path $Target 'Launcher\settings.psd1') -Destination $legacySettings }
-    if ($Plan.Log) { Move-Item -LiteralPath (Join-Path $Target 'Launcher\launcher.log') -Destination (Join-Path $data 'logs\launcher.log') }
+    $oldSettings = Join-Path $Target 'Launcher\settings.psd1'
+    $hash = Get-DeployHash -Path $oldSettings
+    if (@(Get-ChildItem -LiteralPath (Join-Path $legacy 'Launcher') -File | Where-Object { (Get-DeployHash -Path $_.FullName) -eq $hash }).Count -eq 0) {
+        $null = Copy-DeployFile -Source $oldSettings -Destination (Get-DeployFreePath -Path (Join-Path $legacy 'Launcher\settings.psd1'))
+    }
+    if ($Plan.Log) { Move-Item -LiteralPath (Join-Path $Target 'Launcher\launcher.log') -Destination (Get-DeployFreePath -Path (Join-Path $data 'logs\launcher.log')) }
     foreach ($copy in $Plan.Copies.Move) {
         $destination = Get-DeployFreePath -Path (Join-Path $legacy $copy.Relative)
         $null = New-Item -ItemType Directory -Path (Split-Path $destination) -Force
@@ -440,7 +455,7 @@ function Invoke-PvmDeploy {
         if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "The clone has no $(Split-Path $source -Leaf)." }
     }
     if (($VmDisplayName -or $GuestName) -and -not $MigrateSettings) {
-        throw '-VmDisplayName and -GuestName go only with -MigrateSettings. Once the settings are in LauncherData, set VmDisplayName and GuestName in LauncherData\settings.psd1.'
+        throw '-VmDisplayName and -GuestName go only with -MigrateSettings, which writes them into the new LauncherData\settings.psd1. Where that file is there already, set VmDisplayName and GuestName in it.'
     }
     Import-DeployModule -RepositoryPath $RepositoryPath
     $running = @(Get-DeployVmProcess)
@@ -525,6 +540,8 @@ function Invoke-PvmDeploy {
     $result = [pscustomobject]@{ Version = $version; Mode = $mode; MovedCmdCount = $oldCmds.Count; Plan = $plan; Applied = $false }
     # The target is not named, since the stick's folder names can be private.
     if (-not $PSCmdlet.ShouldProcess('the -Target folder', "Deploy the launcher $version")) { return $result }
+    # That was the one question -Confirm asks: the steps below run as one unit, without asking again.
+    $ConfirmPreference = 'None'
 
     # Everything is staged and checked first, so a failed copy changes nothing the launcher uses.
     try {
@@ -618,8 +635,17 @@ function Format-DeployReport {
 if ($MyInvocation.InvocationName -ne '.') {
     try {
         if (-not $Target) { throw 'Give -Target, the folder on the stick that holds the Launcher and LauncherData folders.' }
+        # -WhatIf and -Confirm go to Invoke-PvmDeploy alone: left in effect for the whole script,
+        # they also reach the modules PowerShell loads on the way, which then skip or ask about
+        # parts of their setup. For the same reason CimCmdlets, which the VM check needs, is loaded
+        # before the deploy.
+        $whatIf = [bool]$WhatIfPreference
+        $confirm = $PSBoundParameters.ContainsKey('Confirm') -and [bool]$PSBoundParameters['Confirm']
+        $WhatIfPreference = $false
+        $ConfirmPreference = 'High'
+        Import-Module -Name CimCmdlets
         $deploy = @{ RepositoryPath = (Split-Path $PSScriptRoot -Parent); Target = $Target; MigrateSettings = $MigrateSettings; VmDisplayName = $VmDisplayName; GuestName = $GuestName }
-        $done = Invoke-PvmDeploy @deploy
+        $done = Invoke-PvmDeploy @deploy -WhatIf:$whatIf -Confirm:$confirm
         foreach ($line in Format-DeployReport -Result $done) { Write-Output "Deploy-PortableVM: $line" }
         exit 0
     } catch {

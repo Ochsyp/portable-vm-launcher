@@ -85,6 +85,12 @@ Describe 'Reading a settings file' {
         Get-ImportError -Path $path | Should -BeLike '*save it as UTF-8 with BOM'
     }
 
+    It 'reads a file without a byte order mark as UTF-8 with -Legacy when it is valid UTF-8, as editors save it' {
+        $path = Write-TestByte -Name 'utf8-legacy.psd1' -Bytes ((New-Object System.Text.UTF8Encoding $false).GetBytes("# $script:umlautName`r`n@{ GuestName = '$script:umlautName' }"))
+        (Import-PvmDataFile -Path $path -Legacy)['GuestName'] | Should -BeExactly $script:umlautName
+        ConvertFrom-PvmDataFileByte -Bytes ([IO.File]::ReadAllBytes($path)) -Legacy | Should -BeExactly "# $script:umlautName`r`n@{ GuestName = '$script:umlautName' }"
+    }
+
     It 'refuses bytes that are no valid UTF-8 after a UTF-8 byte order mark' {
         $path = Write-TestByte -Name 'broken.psd1' -Bytes ([byte[]](0xEF, 0xBB, 0xBF) + [Text.Encoding]::ASCII.GetBytes("@{ A = '") + [byte[]](0xC3, 0x28) + [Text.Encoding]::ASCII.GetBytes("' }"))
         Get-ImportError -Path $path | Should -BeExactly 'it is no valid UTF-8'
@@ -187,8 +193,18 @@ Describe 'Checking settings against schema 2' {
         $problems[0] | Should -BeLike "${Key}: must *"
     }
 
-    It 'accepts a name with letters outside ASCII' {
-        @(Test-PvmSetting -Settings (Get-GoodSetting -Change @{ GuestName = $script:umlautName })) | Should -BeNullOrEmpty
+    It 'accepts a name with letters outside ASCII, an emoji, a zero-width joiner or a no-break space' {
+        $penguin = [char]::ConvertFromUtf32(0x1F427)
+        foreach ($name in $script:umlautName, "Debian $penguin", ('a' + [char]0x200D + 'b'), ('Test' + [char]0x00A0 + 'OS')) {
+            @(Test-PvmSetting -Settings (Get-GoodSetting -Change @{ GuestName = $name })) | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'refuses a name with a lone surrogate or a direction override' {
+        foreach ($name in ('Test' + [char]0xD83D), ('Test' + [char]0x202E + 'OS')) {
+            Test-PvmSetting -Settings (Get-GoodSetting -Change @{ GuestName = $name }) |
+                Should -BeExactly @('GuestName: must be text of 1 to 40 characters, without control or formatting characters and without blanks at either end')
+        }
     }
 
     It 'wants VmSectors above DataPartitionStart and at most StickSectors: <Case>' -ForEach @(

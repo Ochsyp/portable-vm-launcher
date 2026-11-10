@@ -46,32 +46,38 @@ Phase 3 moves the settings, the log and the launcher's backups into `LauncherDat
 settings to schema 2 and checks them. Before its pull request is merged, with `X:` as the
 stick's Data partition and `X:\` standing for the folder that holds `Launcher`:
 
-1. Copy the stick's config text files to a folder on the PC outside the repository, and record
-   the hash of every file below `X:\` there, so that step 6 can show that nothing was lost.
+1. Copy the stick's config text files to a folder on the PC outside the repository, run the
+   inventory and keep its answers, and list the `*.orig` and `*.launcher-backup` files beside
+   the VM files.
 2. With the phase 2 launcher still on the stick, run a dry run in each hypervisor (set
    `Hypervisor` for the second one and put the file back afterwards), and keep the lines they
    add to `Launcher\launcher.log`.
 3. Move `Launcher.previous` aside, since a deploy refuses while it exists, then run the
-   migration with `-WhatIf` (README, *Install or update*). Its plan must count the copies the
-   inventory reported, and the stick must be unchanged.
+   migration with `-WhatIf` (README, *Install or update*). Its plan must count the copies listed
+   in step 1, and the stick must be unchanged. Then record the hash of every file below `X:\`,
+   so that step 6 can show that nothing was lost.
 4. Run the migration without `-WhatIf`. `Launcher` must hold only the code, `VERSION` and
    `SHA256SUMS`.
 5. Compare: `LauncherData\settings.psd1` must hold the old values plus `SchemaVersion = 2` (and
    the names, if given) and pass the checks; the old settings file must be byte-identical in
    `Launcher.previous` and in `LauncherData\backups\legacy\Launcher`.
-6. Every file recorded in step 1 must be at its old path with the same hash, or at the path the
+6. Every file recorded in step 3 must be at its old path with the same hash, or at the path the
    migration gave it: a moved descriptor copy differs only in its disarmed device names.
 7. Run the dry runs of step 2 again. Their lines must land in `LauncherData\logs\launcher.log`,
    nothing new may appear in `Launcher`, and they must match step 2 apart from the timestamps,
    the version line and the VM's and the guest's names.
 8. Run the inventory again: `LauncherData` found, settings of schema 2, no settings file in
-   `Launcher`, no `.orig` or `.launcher-backup` copy beside the VM files, legacy copies in
-   `LauncherData`, none of them naming a raw device.
+   `Launcher`, no descriptor `.orig` copy and no `.launcher-backup` copy beside the VM files,
+   legacy copies in `LauncherData`, none of them naming a raw device; every other answer as in
+   step 1.
 9. Start the VM once through `Start VM.cmd`, then shut the guest down from inside it.
 
-If the migration stops before the code swap (`Launcher\VERSION` is still the old one), run the
-same command again, or rename `LauncherData` to put the stick back as it was; the old launcher
-works throughout. After the swap, go back as the README says.
+If the migration stops before the code swap (`Launcher\VERSION` is still the old one), the old
+launcher keeps working: remove what the message names, if anything, and run the same command
+again. Renaming `LauncherData` puts the stick back only when the migration stopped before it
+moved anything; after that, the log and the copies it moved are in `LauncherData\logs` and
+`LauncherData\backups\legacy`, the descriptor copies disarmed, and have to be moved back by
+hand. After the swap, go back as the README says.
 
 ## Rules for the real stick
 

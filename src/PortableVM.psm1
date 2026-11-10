@@ -314,8 +314,15 @@ function Get-PvmValueProblem {
         'Schema' { if (-not ($Value -is [int] -and $Value -eq 2)) { return 'must be 2, the only schema this launcher reads' } }
         'Bool' { if ($Value -isnot [bool]) { return 'must be $true or $false' } }
         'Name' {
-            if (-not ($text -and $Value -match '\A(?!\s)[^\p{C}\p{Zl}\p{Zp}]{1,40}(?<!\s)\z')) {
-                return 'must be text of 1 to 40 characters, without control characters and without blanks at either end'
+            # A character is anything but a control, format or private-use character, a line or
+            # paragraph separator or a lone surrogate; a surrogate pair, such as an emoji, and the
+            # zero-width joiners that some scripts and emoji need count as characters too.
+            $joiners = [string][char]0x200C + [char]0x200D
+            $high = '{0}-{1}' -f [char]0xD800, [char]0xDBFF
+            $low = '{0}-{1}' -f [char]0xDC00, [char]0xDFFF
+            $character = "(?:[^\p{C}\p{Zl}\p{Zp}]|[$joiners]|[$high][$low])"
+            if (-not ($text -and $Value -match "\A(?!\s)$character{1,40}(?<!\s)\z")) {
+                return 'must be text of 1 to 40 characters, without control or formatting characters and without blanks at either end'
             }
         }
         'Choice' {
@@ -394,10 +401,11 @@ function Merge-PvmSetting {
 }
 
 # Return the text of a settings file from its bytes $Bytes, decoded strictly. A byte order mark
-# chooses UTF-8 or UTF-16. Without one the file must be ASCII: Windows PowerShell 5.1, and so
-# Import-PowerShellDataFile in the tools, reads such a file as ANSI, and the launcher and the
-# tools must see the same text. -Legacy reads a file without a byte order mark as ANSI, as the
-# launcher before schema 2 did. Throws the reason, which quotes nothing from the file.
+# chooses UTF-8 or UTF-16. Without one the file must be ASCII: Windows PowerShell 5.1 reads such a
+# file as ANSI, and the launcher and the tools must see the same text. -Legacy, for a schema 1
+# file that deploy migrates, reads a file without a byte order mark as UTF-8 when it is valid
+# UTF-8, as editors such as Notepad and VS Code save it, else as ANSI, as the launcher before
+# schema 2 read it. Throws the reason, which quotes nothing from the file.
 function ConvertFrom-PvmDataFileByte {
     [CmdletBinding()]
     [OutputType([string])]
@@ -419,7 +427,8 @@ function ConvertFrom-PvmDataFileByte {
         $encoding = New-Object System.Text.UnicodeEncoding $true, $false, $true
         $skip = 2
     } elseif ($Legacy) {
-        return [Text.Encoding]::Default.GetString($Bytes)
+        try { return (New-Object System.Text.UTF8Encoding $false, $true).GetString($Bytes) }
+        catch { return [Text.Encoding]::Default.GetString($Bytes) }
     } else {
         if (@($Bytes | Where-Object { $_ -gt 0x7F }).Count -gt 0) {
             throw 'it holds characters outside ASCII but no byte order mark; save it as UTF-8 with BOM'

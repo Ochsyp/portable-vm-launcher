@@ -392,6 +392,7 @@ function Get-InventoryVirtualBoxCheck {
         if ($entry) { $entry.GetAttribute('src') -match '^[A-Za-z]:' }
     }
     Get-InventoryDescriptorCheck -Area 'VirtualBox' -Path $diskPath
+    Get-InventoryCheck -Name 'VirtualBox descriptor has a .orig copy' -Test { if ($diskPath) { Test-Path -LiteralPath "$diskPath.orig" } }
     Get-InventoryCheck -Name 'VirtualBox files have .launcher-backup copies' -Test {
         if ($vboxPath -and $registryPath) { (Test-Path -LiteralPath "$vboxPath.launcher-backup") -or (Test-Path -LiteralPath "$registryPath.launcher-backup") }
     }

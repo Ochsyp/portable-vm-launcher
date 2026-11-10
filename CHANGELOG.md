@@ -15,12 +15,13 @@ All notable changes to this project are listed here. The format follows
   start through ShouldProcess and reach the PC only through adapters that tests mock. What the
   launcher checks and does is unchanged; the start line of `Start VM.cmd` and the script's
   administrator-rights step stay exactly as they were, which `tests\Repo.Tests.ps1` checks.
-- `examples\settings.example.psd1`, whose placeholders match no disk, so the launcher stops at
-  its identity check until real values are filled in.
+- `examples\settings.example.psd1`, marked `IsExample = $true` and with placeholders that match
+  no disk, so the launcher refuses it as the example until the real values are in and the line
+  is deleted.
 - `tools\Deploy-PortableVM.ps1`, which copies the launcher from a clone to a stick. It checks
   every copy against the clone, writes `VERSION` and `SHA256SUMS`, swaps `Launcher.new` in and
-  keeps the old launcher as `Launcher.previous`, carries the stick's settings and log over,
-  moves an older launcher `.cmd` into `Launcher.previous`, and deletes nothing.
+  keeps the old launcher as `Launcher.previous`, leaves `LauncherData` as it is, moves an older
+  launcher `.cmd` into `Launcher.previous`, and deletes nothing.
 - `tools\Get-StickInventory.ps1`, a read-only report on the stick, its VM files and the PC that
   prints only check names with yes, no or unknown, for a first look at a real stick.
 - `tests\PortableVM.Tests.ps1` and `tests\Tools.Tests.ps1`: characterisation tests of the
