@@ -263,9 +263,11 @@ Describe 'Static guards' {
         $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandParameterAst] -and $args[0].ParameterName -eq 'Force' }, $true) |
             Where-Object { $_.Parent.GetCommandName() -ne 'Import-Module' -and $_.Parent.GetCommandName() -ne 'New-Item' -and $_.Parent.GetCommandName() -ne 'Get-ChildItem' } |
             ForEach-Object { "$($_.Parent.GetCommandName()) at line $($_.Extent.StartLineNumber)" } | Should -BeNullOrEmpty
-        $replaces = @($members | Where-Object { $_.Member.Extent.Text -eq 'Replace' -and $_.Expression -is [System.Management.Automation.Language.TypeExpressionAst] })
+        $replaces = @($members | Where-Object {
+                $_.Member.Extent.Text -eq 'Replace' -and $_.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
+                @('IO.File', 'System.IO.File', 'File') -contains $_.Expression.TypeName.FullName
+            })
         $replaces.Count | Should -Be 1
-        $replaces[0].Expression.TypeName.FullName | Should -BeIn @('IO.File', 'System.IO.File')
         for ($parent = $replaces[0].Parent; $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
         $parent.Name | Should -BeExactly 'Set-DeployDisarmedCopy'
     }

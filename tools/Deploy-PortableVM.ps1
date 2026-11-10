@@ -26,10 +26,12 @@
 #
 # It refuses, changing nothing, while a VM runs on this PC, when the settings fail the checks, when
 # Launcher.new, "Start VM.cmd.new", LauncherData.new or Launcher.previous is left from an earlier
-# deploy, or when a .cmd at -Target is in the way. It deletes nothing, changes no VM file and
-# names no file from the stick in its output; -Verbose names the copies a migration moves. When a
-# step fails it says what is left to fix by hand. -WhatIf runs the checks and prints the plan
-# only. Exits 0 when done, 1 when it refused or failed.
+# deploy, or when a .cmd at -Target is in the way. A migration also refuses an old settings file
+# without a byte order mark whose values read differently as UTF-8 and as ANSI, and, when it
+# resumes, two settings files that differ. It deletes nothing, changes no VM file and names no file
+# from the stick in its output: a path below -Target in an error is left out, and -Verbose shows
+# it and the copies a migration moves. When a step fails it says what is left to fix by hand.
+# -WhatIf runs the checks and prints the plan only. Exits 0 when done, 1 when it refused or failed.
 
 [CmdletBinding(SupportsShouldProcess)]
 param(
@@ -354,10 +356,11 @@ function Test-DeployStagedCode {
 # change and refusing what it cannot do: Bytes, the new LauncherData\settings.psd1 (ASCII, or
 # UTF-8 with a BOM when it holds other characters); Values, the settings the new launcher reads;
 # Copies, the copies to move (Find-DeployLegacyCopy); Log, whether Launcher\launcher.log moves;
-# and the counts that the report shows. With -Resume, LauncherData is there from a migration that
-# stopped: its settings.psd1 stays as it is, with any change made to it since, so it must pass the
-# checks, and names given must be the ones it holds. The copies are then looked for in the folders
-# of both settings files, and Bytes is $null.
+# and the counts that the report shows. The old file is read by Get-DeployLegacyText. With
+# -Resume, LauncherData is there from a migration that stopped: its settings.psd1 stays as it is,
+# so it must pass the checks, hold the names given, and agree with Launcher\settings.psd1 once
+# both have their defaults, apart from SchemaVersion, IsExample and the names. The copies are then
+# looked for in the folders of both settings files, and Bytes is $null.
 function Get-DeployMigrationPlan {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -708,7 +711,19 @@ if ($MyInvocation.InvocationName -ne '.') {
         foreach ($line in Format-DeployReport -Result $done) { Write-Output "Deploy-PortableVM: $line" }
         exit 0
     } catch {
-        Write-Output "Deploy-PortableVM: $($_.Exception.Message)"
+        $message = $_.Exception.Message
+        Write-Verbose $message
+        # The stick's folder and file names can be private, so a path below -Target that an error
+        # quotes is left out; -Verbose above shows it.
+        $prefixes = @()
+        if ($Target) {
+            $prefixes += $Target.TrimEnd('\')
+            try { $prefixes += [IO.Path]::GetFullPath($Target).TrimEnd('\') } catch { Write-Verbose "-Target is no full path: $($_.Exception.Message)" }
+        }
+        foreach ($prefix in @($prefixes | Where-Object { $_ } | Sort-Object Length -Descending)) {
+            $message = [regex]::Replace($message, [regex]::Escape($prefix) + '[^''"\r\n]*', '<a path below -Target, which -Verbose shows>', 'IgnoreCase')
+        }
+        Write-Output "Deploy-PortableVM: $message"
         exit 1
     }
 }

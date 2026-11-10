@@ -298,6 +298,35 @@ function Get-PvmPathProblem {
     if ($Extension -and -not $Value.EndsWith($Extension, [StringComparison]::OrdinalIgnoreCase)) { return $problem }
 }
 
+# Return whether $Value can name the VM or the guest in a message or a dialog title: 1 to 40
+# characters, a surrogate pair such as an emoji counting as one; no control, format or private-use
+# character, line or paragraph separator or lone surrogate, apart from the zero-width joiners that
+# some scripts and emoji need inside a name; no blank or joiner at either end; and at least one
+# letter, number, punctuation mark or symbol that shows, not a filler such as U+3164. Categories
+# come from CharUnicodeInfo, whose tables are complete, unlike those of .NET's regular expressions
+# (which take U+00AD for a dash); a character those tables do not know yet counts as one that shows.
+function Test-PvmNameText {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+    $joiners = @(0x200C, 0x200D)
+    if ($Value.Length -eq 0 -or $Value -cne $Value.Trim() -or $joiners -contains [int]$Value[0] -or $joiners -contains [int]$Value[$Value.Length - 1]) { return $false }
+    $refused = 'Control', 'Format', 'PrivateUse', 'Surrogate', 'LineSeparator', 'ParagraphSeparator'
+    $fillers = @(0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800)
+    $count = 0
+    $shows = $false
+    for ($i = 0; $i -lt $Value.Length; $i++) {
+        $category = "$([Globalization.CharUnicodeInfo]::GetUnicodeCategory($Value, $i))"
+        $pair = [char]::IsSurrogatePair($Value, $i)
+        $code = if ($pair) { [char]::ConvertToUtf32($Value, $i) } else { [int]$Value[$i] }
+        if ($refused -contains $category -and -not ($category -eq 'Format' -and $joiners -contains $code)) { return $false }
+        if ($category -match 'Letter|Number|Punctuation|Symbol|OtherNotAssigned' -and $fillers -notcontains $code) { $shows = $true }
+        $count++
+        if ($pair) { $i++ }
+    }
+    $shows -and $count -le 40
+}
+
 # Return what is wrong with $Value as the value of the schema entry $Entry (Get-PvmSettingSchema),
 # or nothing when it is good. Values are not converted: 'false' is no $false, and '42' and 42.0
 # are no whole numbers. The formats are anchored with \A and \z, since $ also matches before a
@@ -314,19 +343,8 @@ function Get-PvmValueProblem {
         'Schema' { if (-not ($Value -is [int] -and $Value -eq 2)) { return 'must be 2, the only schema this launcher reads' } }
         'Bool' { if ($Value -isnot [bool]) { return 'must be $true or $false' } }
         'Name' {
-            # A character is anything but a control, format or private-use character, a line or
-            # paragraph separator or a lone surrogate. A surrogate pair, such as an emoji, counts
-            # as one, unless it is a tag, which shows as nothing. The zero-width joiners that some
-            # scripts and emoji need are allowed inside the name, but neither they nor a blank
-            # may start or end it, so a name always shows. The .NET tables of Windows PowerShell
-            # 5.1 list newer characters as unassigned, which are allowed too.
-            $joiners = [string][char]0x200C + [char]0x200D
-            $high = '{0}-{1}' -f [char]0xD800, [char]0xDBFF
-            $low = '{0}-{1}' -f [char]0xDC00, [char]0xDFFF
-            $tag = '{0}[{1}-{2}]' -f [char]0xDB40, [char]0xDC00, [char]0xDC7F
-            $character = "(?:[^\p{Cc}\p{Cf}\p{Co}\p{Cs}\p{Zl}\p{Zp}]|[$joiners]|(?!$tag)[$high][$low])"
-            if (-not ($text -and $Value -match "\A(?![\s$joiners])$character{1,40}(?<![\s$joiners])\z")) {
-                return 'must be 1 to 40 characters of text, without control or formatting characters, and without a blank or a joiner at either end'
+            if (-not ($text -and (Test-PvmNameText -Value $Value))) {
+                return 'must be 1 to 40 characters of text that shows, without control or formatting characters, and without a blank or a joiner at either end'
             }
         }
         'Choice' {

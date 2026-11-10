@@ -194,16 +194,23 @@ Describe 'Checking settings against schema 2' {
 
     It 'accepts a name with letters outside ASCII, an emoji, a joiner inside it, a no-break space or a letter newer than the .NET tables' {
         $penguin = [char]::ConvertFromUtf32(0x1F427)
-        foreach ($name in $script:sampleName, "Debian $penguin", ('a' + [char]0x200D + 'b'), ('Test' + [char]0x00A0 + 'OS'), ('Node ' + [char]0x20BF), ([string][char]0x1C90 + 'a')) {
+        $heart = [string][char]0x2764 + [char]0xFE0F
+        $names = $script:sampleName, "Debian $penguin", "Test $heart", ('a' + [char]0x200D + 'b'), ('Test' + [char]0x00A0 + 'OS'), ('Node ' + [char]0x20BF), ([string][char]0x1C90 + 'a'), ('x' * 39 + $penguin)
+        foreach ($name in $names) {
             @(Test-PvmSetting -Settings (Get-GoodSetting -Change @{ GuestName = $name })) | Should -BeNullOrEmpty
         }
     }
 
-    It 'refuses a name with a lone surrogate, a direction override, a tag, or a joiner or blank at either end' {
-        $tag = [char]::ConvertFromUtf32(0xE0001)
-        foreach ($name in ('Test' + [char]0xD83D), ('Test' + [char]0x202E + 'OS'), "Test$tag", ('Debian ' + [char]0x200D), ([string][char]0x200D + ' ' + [char]0x200D), ([string][char]0x200C + 'Test')) {
+    It 'refuses a name that shows nothing or holds a control, format or private-use character, or a joiner or blank at either end' {
+        $names = @(
+            ('Test' + [char]0xD83D), ('Test' + [char]0x202E + 'OS'), ('Test' + [char]::ConvertFromUtf32(0xE0001)), ('Te' + [char]0x00AD + 'st')
+            ('Test' + [char]::ConvertFromUtf32(0x1D173)), ('Te' + [char]::ConvertFromUtf32(0xF0000) + 'st'), ('Te' + [char]0xE000 + 'st')
+            ('Debian ' + [char]0x200D), ([string][char]0x200D + ' ' + [char]0x200D), ([string][char]0x200C + 'Test')
+            [string][char]0x3164, ([string][char]0x2800 + [char]0x2800), [string][char]0x034F, ([string][char]0x0301 + [char]0x0301), ('x' * 40 + [char]::ConvertFromUtf32(0x1F427))
+        )
+        foreach ($name in $names) {
             Test-PvmSetting -Settings (Get-GoodSetting -Change @{ GuestName = $name }) |
-                Should -BeExactly @('GuestName: must be 1 to 40 characters of text, without control or formatting characters, and without a blank or a joiner at either end')
+                Should -BeExactly @('GuestName: must be 1 to 40 characters of text that shows, without control or formatting characters, and without a blank or a joiner at either end')
         }
     }
 

@@ -359,6 +359,22 @@ Describe 'Deploy-PortableVM -MigrateSettings' {
         Get-TestTree -Root $script:target | Should -BeExactly $before
     }
 
+    It 'runs as a script and leaves out a path below -Target that an error quotes' {
+        $tool = Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1'
+        $held = [IO.File]::Open((Join-Path $script:target 'Launcher\settings.psd1'), 'Open', 'Read', 'None')
+        try { $output = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $tool -Target $script:target -MigrateSettings 2>&1 | ForEach-Object { "$_" }) }
+        finally { $held.Dispose() }
+        $exitCode = $LASTEXITCODE
+        if ($output -match 'A VM runs on this PC') {
+            Set-ItResult -Skipped -Because 'a VM runs on this PC'
+            return
+        }
+        $exitCode | Should -Be 1
+        $text = $output -join "`n"
+        $text | Should -Match 'Deploy-PortableVM: Launcher\\settings\.psd1 cannot be read: .*<a path below -Target, which -Verbose shows>'
+        $text.IndexOf($script:target, [StringComparison]::OrdinalIgnoreCase) | Should -Be -1
+    }
+
     It 'refuses <Case>, changing nothing' -ForEach @(
         @{ Case = 'without -MigrateSettings'; Setup = {}; Extra = @{}; Message = 'The stick keeps its settings in Launcher\settings.psd1*-MigrateSettings*' }
         @{ Case = 'settings that fail the checks of schema 2'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text (Get-TestSettingsText).Replace("'Auto'", "'VBox'") }; Extra = @{ MigrateSettings = $true }; Message = "*do not pass the checks of schema 2, so nothing was changed.*`n- Hypervisor: must be*" }
