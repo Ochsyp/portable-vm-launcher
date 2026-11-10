@@ -16,7 +16,7 @@ BeforeAll {
             ForEach-Object { Join-Path $script:repoRoot $_ })
     $script:utf8 = New-Object System.Text.UTF8Encoding $false
     # A name with a letter outside ASCII, as a denylisted name can have.
-    $script:umlautName = 'J' + [char]0x00FC + 'rgen'
+    $script:sampleName = 'K' + [char]0x00E9 + 'l' + [char]0x00F8 + 'n' + [char]0x00EF
 
     # Git for Windows' sh, which runs the hooks: the one on the path, as in Git Bash, or the one
     # in a folder above git.exe, which sits in cmd\ or mingw64\bin\ of the Git folder.
@@ -313,10 +313,10 @@ Describe 'privacy-scan' {
             'path.txt'               = 'log at C:/Us' + 'ers/someone/notes.txt'
             'mail.txt'               = 'write to someone' + '@' + 'mail.invalid'
             'mac.txt'                = "adapter $mac"
-            'name.txt'               = "made by $script:umlautName"
-            "$script:umlautName.txt" = 'nothing private inside'
+            'name.txt'               = "made by $script:sampleName"
+            "$script:sampleName.txt" = 'nothing private inside'
         }
-        [IO.File]::WriteAllText((Join-Path $sample '.git\info\privacy-denylist'), "# test`n  $script:umlautName  `n", $script:utf8)
+        [IO.File]::WriteAllText((Join-Path $sample '.git\info\privacy-denylist'), "# test`n  $script:sampleName  `n", $script:utf8)
         Invoke-SampleGit -Path $sample -Arguments @('add', '-A')
         $result = Invoke-PrivacyScan -Path $sample
         $result.ExitCode | Should -Be 1
@@ -326,7 +326,7 @@ Describe 'privacy-scan' {
         $text | Should -Match 'mac\.txt:1: MAC address'
         $text | Should -Match 'name\.txt:1: denylisted value'
         $text | Should -Match 'file name \d+ of the scanned paths: denylisted value'
-        $text.Contains($script:umlautName) | Should -BeFalse
+        $text.Contains($script:sampleName) | Should -BeFalse
     }
 
     It 'lets the synthetic UUID and GitHub no-reply e-mail addresses through' {
@@ -345,13 +345,13 @@ Describe 'Find-PrivateData' {
     It 'finds a denylisted name outside ASCII in contents, file names, messages and ref names, and never prints it' {
         $sample = Join-Path $TestDrive 'find-name'
         Initialize-SampleRepository -Path $sample -Files @{
-            'notes.txt'              = "made by $script:umlautName"
-            "$script:umlautName.txt" = 'nothing private inside'
+            'notes.txt'              = "made by $script:sampleName"
+            "$script:sampleName.txt" = 'nothing private inside'
         }
         Invoke-SampleGit -Path $sample -Arguments @('add', '-A')
-        Invoke-SampleGit -Path $sample -Arguments @('commit', '-q', '-m', "note for $script:umlautName")
-        Invoke-SampleGit -Path $sample -Arguments @('branch', "feat/$script:umlautName")
-        [IO.File]::WriteAllText((Join-Path $sample '.git\info\privacy-denylist'), "$script:umlautName`n", $script:utf8)
+        Invoke-SampleGit -Path $sample -Arguments @('commit', '-q', '-m', "note for $script:sampleName")
+        Invoke-SampleGit -Path $sample -Arguments @('branch', "feat/$script:sampleName")
+        [IO.File]::WriteAllText((Join-Path $sample '.git\info\privacy-denylist'), "$script:sampleName`n", $script:utf8)
         $result = Invoke-FindPrivateData -Path $sample
         $result.ExitCode | Should -Be 1
         $text = $result.Lines -join "`n"
@@ -359,7 +359,7 @@ Describe 'Find-PrivateData' {
         $text | Should -Match 'is in index path: <value>\.txt'
         $text | Should -Match 'is in message of commit [0-9a-f]+'
         $text | Should -Match 'is in a ref name'
-        $text.Contains($script:umlautName) | Should -BeFalse
+        $text.Contains($script:sampleName) | Should -BeFalse
     }
 
     It 'matches a number from the settings only as a whole number, and skips short ones' {
@@ -403,10 +403,10 @@ Describe 'Find-PrivateData' {
 
     It 'reads a settings file saved as UTF-8 without a byte order mark as UTF-8, so a name outside ASCII is found' {
         $sample = Join-Path $TestDrive 'find-utf8'
-        Initialize-SampleRepository -Path $sample -Files @{ 'guest.txt' = "the guest is $script:umlautName OS" }
+        Initialize-SampleRepository -Path $sample -Files @{ 'guest.txt' = "the guest is $script:sampleName OS" }
         Invoke-SampleGit -Path $sample -Arguments @('add', '-A')
         $null = New-Item -ItemType Directory -Path (Join-Path $sample 'LauncherData')
-        [IO.File]::WriteAllText((Join-Path $sample 'LauncherData\settings.psd1'), "@{ SchemaVersion = 2; GuestName = '$script:umlautName OS' }", $script:utf8)
+        [IO.File]::WriteAllText((Join-Path $sample 'LauncherData\settings.psd1'), "@{ SchemaVersion = 2; GuestName = '$script:sampleName OS' }", $script:utf8)
         $result = Invoke-FindPrivateData -Path $sample
         $result.ExitCode | Should -Be 1
         ($result.Lines -join "`n") | Should -Match 'a value of GuestName is in index: guest\.txt'

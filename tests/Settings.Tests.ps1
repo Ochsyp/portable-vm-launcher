@@ -11,8 +11,8 @@ BeforeAll {
     $script:repoRoot = Split-Path $PSScriptRoot -Parent
     Import-Module (Join-Path $script:repoRoot 'src\PortableVM.psm1') -Force
     $script:example = Join-Path $script:repoRoot 'examples\settings.example.psd1'
-    # A name with a letter outside ASCII.
-    $script:umlautName = 'J' + [char]0x00FC + 'rgen'
+    # A made-up name with letters outside ASCII that Windows-1252 holds too, so it also tests ANSI.
+    $script:sampleName = 'K' + [char]0x00E9 + 'l' + [char]0x00F8 + 'n' + [char]0x00EF
 
     # Write the bytes $Bytes to TestDrive\$Name and return the path.
     function Write-TestByte {
@@ -66,29 +66,29 @@ Describe 'Reading a settings file' {
     }
 
     It 'loads UTF-8 and UTF-16 with a byte order mark, characters outside ASCII included' {
-        $text = "@{ GuestName = '$script:umlautName' }"
+        $text = "@{ GuestName = '$script:sampleName' }"
         foreach ($encoding in (New-Object System.Text.UTF8Encoding $true), (New-Object System.Text.UnicodeEncoding $false, $true), (New-Object System.Text.UnicodeEncoding $true, $true)) {
             $path = Write-TestByte -Name 'bom.psd1' -Bytes ([byte[]]($encoding.GetPreamble() + $encoding.GetBytes($text)))
-            (Import-PvmDataFile -Path $path)['GuestName'] | Should -BeExactly $script:umlautName
+            (Import-PvmDataFile -Path $path)['GuestName'] | Should -BeExactly $script:sampleName
         }
     }
 
     It 'refuses characters outside ASCII without a byte order mark, and asks for UTF-8 with BOM' {
-        $path = Write-TestByte -Name 'utf8-no-bom.psd1' -Bytes ((New-Object System.Text.UTF8Encoding $false).GetBytes("@{ GuestName = '$script:umlautName' }"))
+        $path = Write-TestByte -Name 'utf8-no-bom.psd1' -Bytes ((New-Object System.Text.UTF8Encoding $false).GetBytes("@{ GuestName = '$script:sampleName' }"))
         Get-ImportError -Path $path | Should -BeExactly 'it holds characters outside ASCII but no byte order mark; save it as UTF-8 with BOM'
     }
 
     It 'reads a file without a byte order mark as ANSI with -Legacy, as the launcher before schema 2 did' {
-        $bytes = [Text.Encoding]::Default.GetBytes("@{ GuestName = '$script:umlautName' }")
+        $bytes = [Text.Encoding]::Default.GetBytes("@{ GuestName = '$script:sampleName' }")
         $path = Write-TestByte -Name 'ansi.psd1' -Bytes $bytes
         (Import-PvmDataFile -Path $path -Legacy)['GuestName'] | Should -BeExactly ([Text.Encoding]::Default.GetString($bytes) -replace "^@\{ GuestName = '|' \}$", '')
         Get-ImportError -Path $path | Should -BeLike '*save it as UTF-8 with BOM'
     }
 
     It 'reads a file without a byte order mark as UTF-8 with -Legacy when it is valid UTF-8, as editors save it' {
-        $path = Write-TestByte -Name 'utf8-legacy.psd1' -Bytes ((New-Object System.Text.UTF8Encoding $false).GetBytes("# $script:umlautName`r`n@{ GuestName = '$script:umlautName' }"))
-        (Import-PvmDataFile -Path $path -Legacy)['GuestName'] | Should -BeExactly $script:umlautName
-        ConvertFrom-PvmDataFileByte -Bytes ([IO.File]::ReadAllBytes($path)) -Legacy | Should -BeExactly "# $script:umlautName`r`n@{ GuestName = '$script:umlautName' }"
+        $path = Write-TestByte -Name 'utf8-legacy.psd1' -Bytes ((New-Object System.Text.UTF8Encoding $false).GetBytes("# $script:sampleName`r`n@{ GuestName = '$script:sampleName' }"))
+        (Import-PvmDataFile -Path $path -Legacy)['GuestName'] | Should -BeExactly $script:sampleName
+        ConvertFrom-PvmDataFileByte -Bytes ([IO.File]::ReadAllBytes($path)) -Legacy | Should -BeExactly "# $script:sampleName`r`n@{ GuestName = '$script:sampleName' }"
     }
 
     It 'refuses bytes that are no valid UTF-8 after a UTF-8 byte order mark' {
@@ -195,7 +195,7 @@ Describe 'Checking settings against schema 2' {
 
     It 'accepts a name with letters outside ASCII, an emoji, a zero-width joiner or a no-break space' {
         $penguin = [char]::ConvertFromUtf32(0x1F427)
-        foreach ($name in $script:umlautName, "Debian $penguin", ('a' + [char]0x200D + 'b'), ('Test' + [char]0x00A0 + 'OS')) {
+        foreach ($name in $script:sampleName, "Debian $penguin", ('a' + [char]0x200D + 'b'), ('Test' + [char]0x00A0 + 'OS')) {
             @(Test-PvmSetting -Settings (Get-GoodSetting -Change @{ GuestName = $name })) | Should -BeNullOrEmpty
         }
     }
