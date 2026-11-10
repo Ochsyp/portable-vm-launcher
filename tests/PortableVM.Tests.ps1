@@ -67,6 +67,15 @@ BeforeAll {
             '# The Disk Data Base', '#DDB', '', 'ddb.adapterType = "lsilogic"', '') -join $Newline
     }
 
+    # Return the text of the synthetic .vmx with CRLF line endings: complete, with uuid.action =
+    # "keep" and suspend.disabled = "TRUE" unless $Without names their keys, and the lines in $Add.
+    function Get-TestVmxText {
+        param([string[]]$Without = @(), [string[]]$Add = @())
+        $lines = @('.encoding = "windows-1252"', 'config.version = "8"', 'displayName = "Test VM"', 'scsi0:0.fileName = "stick.vmdk"',
+            'uuid.action = "keep"', 'suspend.disabled = "TRUE"') | Where-Object { $Without -notcontains ($_ -split ' = ')[0] }
+        (@($lines) + $Add + '') -join "`r`n"
+    }
+
     # Create a synthetic stick in TestDrive\$Name and return its paths. Launcher\settings.psd1 holds
     # Get-TestSettingTable with $Change applied, written as PowerShell data. The VMware folder holds
     # the .vmx and a CRLF descriptor; the VirtualBox home holds VirtualBox.xml and the VM with an LF
@@ -101,7 +110,7 @@ BeforeAll {
         Write-TestFile -Path (Join-Path $stick.Launcher 'settings.psd1') -Text ("@{`r`n" + ($lines -join "`r`n") + "`r`n}`r`n")
         Write-TestFile -Path (Join-Path $stick.VMwareDir 'vmware.exe') -Text ''
         Write-TestFile -Path (Join-Path $stick.VirtualBoxDir 'VBoxManage.exe') -Text ''
-        Write-TestFile -Path $stick.Vmx -Text ".encoding = `"windows-1252`"`r`ndisplayName = `"Test VM`"`r`nscsi0:0.fileName = `"stick.vmdk`"`r`n"
+        Write-TestFile -Path $stick.Vmx -Text (Get-TestVmxText)
         Write-TestFile -Path $stick.VMwareDisk -Text (Get-TestDescriptorText)
         Write-TestFile -Path $stick.VirtualBoxDisk -Text (Get-TestDescriptorText -Newline "`n")
         $below = $root.Substring(2)
@@ -413,27 +422,54 @@ Describe 'Running VMs' {
 }
 
 Describe 'Saved states' {
-    It 'are found in a .vbox only as a stateFile on its Machine: <Case>' -ForEach @(
-        @{ Case = 'saved'; Text = '<Machine uuid="{x}" stateFile="Snapshots\x.sav" name="x">'; Expected = $true }
-        @{ Case = 'empty stateFile'; Text = '<Machine uuid="{x}" stateFile="" name="x">'; Expected = $false }
-        @{ Case = 'no stateFile'; Text = '<Machine uuid="{x}" name="x">'; Expected = $false }
-        @{ Case = 'stateFile on a snapshot'; Text = '<Machine uuid="{x}"><Snapshot stateFile="x.sav">'; Expected = $false }
-    ) {
-        Test-PvmVirtualBoxSavedText -Text $Text | Should -Be $Expected
+    It 'read the .vmx settings: the last of two values counts, quotes are optional, comments are skipped' {
+        $values = ConvertFrom-PvmVmxText -Text "Suspend.Disabled = `"FALSE`"`r`nsuspend.disabled=`"TRUE`" # set by hand`r`n# uuid.action = `"create`"`r`nuuid.action = keep # note`r`nno equals sign"
+        $values['suspend.disabled'] | Should -BeExactly 'TRUE'
+        $values['uuid.action'] | Should -BeExactly 'keep'
+        $values.Count | Should -Be 2
     }
 
-    It 'are found in a .vmx only as a checkpoint.vmState line with a value: <Case>' -ForEach @(
-        @{ Case = 'suspended'; Text = "a = `"1`"`r`ncheckpoint.vmState = `"Test VM.vmss`""; Expected = $true }
-        @{ Case = 'empty value'; Text = 'checkpoint.vmState = ""'; Expected = $false }
-        @{ Case = 'commented out'; Text = '# checkpoint.vmState = "Test VM.vmss"'; Expected = $false }
-        @{ Case = 'no such line'; Text = 'displayName = "Test VM"'; Expected = $false }
-    ) {
-        Test-PvmVMwareSuspendedText -Text $Text | Should -Be $Expected
+    It 'count a .vmx that cannot be read as unknown' {
+        $path = Join-Path $TestDrive 'locked.vmx'
+        Write-TestFile -Path $path -Text 'config.version = "8"'
+        $lock = [IO.File]::Open($path, 'Open', 'Read', 'None')
+        try { $state = Get-PvmVMwareState -Path $path } finally { $lock.Dispose() }
+        $state.State | Should -BeExactly 'Unknown'
+        $state.Reason | Should -BeLike 'the file cannot be read (*'
     }
 
-    It 'count a missing file as no saved state' {
-        Test-PvmVirtualBoxSaved -Path (Join-Path $TestDrive 'missing.vbox') | Should -BeFalse
-        Test-PvmVMwareSuspended -Path (Join-Path $TestDrive 'missing.vmx') | Should -BeFalse
+    It 'are told from a .vmx: <Case>' -ForEach @(
+        @{ Case = 'suspended'; Text = "config.version = `"8`"`r`ncheckpoint.vmState = `"Test VM.vmss`""; State = 'Saved' }
+        @{ Case = 'resumed, with an empty checkpoint'; Text = "config.version = `"8`"`r`ncheckpoint.vmState = `"`""; State = 'NotSaved' }
+        @{ Case = 'commented out'; Text = "config.version = `"8`"`r`n# checkpoint.vmState = `"Test VM.vmss`""; State = 'NotSaved' }
+        @{ Case = 'never suspended'; Text = 'config.version = "8"'; State = 'NotSaved' }
+        @{ Case = 'without config.version'; Text = 'checkpoint.vmState = "x.vmss"'; State = 'Unknown' }
+        @{ Case = 'with checkpoint.vmState set twice'; Text = "config.version = `"8`"`r`ncheckpoint.vmState = `"x.vmss`"`r`ncheckpoint.vmState = `"`""; State = 'Unknown' }
+        @{ Case = 'empty'; Text = ''; State = 'Unknown' }
+    ) {
+        $path = Join-Path $TestDrive 'state.vmx'
+        Write-TestFile -Path $path -Text $Text
+        (Get-PvmVMwareState -Path $path).State | Should -BeExactly $State
+    }
+
+    It 'are told from a .vbox: <Case>' -ForEach @(
+        @{ Case = 'saved'; Text = '<VirtualBox xmlns="http://www.virtualbox.org/"><Machine uuid="{x}" stateFile="Snapshots\x.sav"/></VirtualBox>'; State = 'Saved' }
+        @{ Case = 'not saved'; Text = '<VirtualBox xmlns="http://www.virtualbox.org/"><Machine uuid="{x}" stateFile=""/></VirtualBox>'; State = 'NotSaved' }
+        @{ Case = 'saved only in a snapshot'; Text = '<VirtualBox xmlns="http://www.virtualbox.org/"><Machine uuid="{x}"><Snapshot stateFile="x.sav"/></Machine></VirtualBox>'; State = 'NotSaved' }
+        @{ Case = 'no XML'; Text = '<VirtualBox><Machine'; State = 'Unknown' }
+        @{ Case = 'without a Machine'; Text = '<VirtualBox xmlns="http://www.virtualbox.org/"/>'; State = 'Unknown' }
+        @{ Case = 'with a DTD'; Text = '<!DOCTYPE x [<!ENTITY e "x">]><VirtualBox><Machine uuid="{x}"/></VirtualBox>'; State = 'Unknown' }
+    ) {
+        $path = Join-Path $TestDrive 'state.vbox'
+        Write-TestFile -Path $path -Text $Text
+        (Get-PvmVirtualBoxState -Path $path).State | Should -BeExactly $State
+    }
+
+    It 'count a missing file as unknown, saying so' {
+        $vmware = Get-PvmVMwareState -Path (Join-Path $TestDrive 'missing.vmx')
+        $vmware.State | Should -BeExactly 'Unknown'
+        $vmware.Reason | Should -BeExactly 'the file does not exist'
+        (Get-PvmVirtualBoxState -Path (Join-Path $TestDrive 'missing.vbox')).State | Should -BeExactly 'Unknown'
     }
 }
 
@@ -733,25 +769,26 @@ Describe 'A start' {
         }
         AfterEach { Remove-Item -LiteralPath $script:stick.Root -Recurse -Force }
 
-        It 'resumes a VMware suspend in VMware and logs it' {
-            Add-Content -LiteralPath $script:stick.Vmx -Value 'checkpoint.vmState = "Test VM.vmss"'
-            $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+        It 'resumes a VMware suspend in VMware, after a Yes' {
+            Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"')
+            $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskResume { $true }
             Get-TestLog -Path $script:stick.Log | Should -Contain 'Saved state found: suspended in VMware'
             Get-TestLog -Path $script:stick.Log | Should -Contain 'Using VMware'
             Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
         }
 
-        It 'resumes a VirtualBox save in VirtualBox' {
+        It 'resumes a VirtualBox save in VirtualBox, after a Yes' {
             [IO.File]::WriteAllText($script:stick.Vbox, [IO.File]::ReadAllText($script:stick.Vbox).Replace('OSType="Debian_64"', 'OSType="Debian_64" stateFile="Snapshots\x.sav"'))
-            $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskResume { $true }
             Get-TestLog -Path $script:stick.Log | Should -Contain 'Using VirtualBox'
+            Get-TestLog -Path $script:stick.Log | Should -Contain 'Resume of the saved state in VirtualBox confirmed.'
             Should -Invoke -CommandName Invoke-PvmNative -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'startvm' }
         }
 
-        It 'uses VirtualBox when the .vmx is missing' {
+        It 'stops, rather than use VirtualBox, when the .vmx is missing' {
             Remove-Item -LiteralPath $script:stick.Vmx
-            $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher
-            Get-TestLog -Path $script:stick.Log | Should -Contain 'Using VirtualBox'
+            (Invoke-PortableVM -LauncherPath $script:stick.Launcher).ExitCode | Should -Be 1
+            Get-TestLog -Path $script:stick.Log | Should -Not -Contain 'Using VirtualBox'
         }
 
         It 'uses VirtualBox when the setting says so' {
@@ -804,7 +841,7 @@ Describe 'A start' {
             $result.ExitCode | Should -Be 1
             $log = Get-TestLog -Path $script:stick.Log
             $log[-2] | Should -BeExactly 'Saved state found: suspended in VMware'
-            $log[-1] | Should -BeLike 'STOPPED: Unexpected error: *'
+            $log[-1] | Should -BeLike 'STOPPED: The launcher cannot tell whether the VM has a saved state in VirtualBox, because the path is a folder, not a file: VirtualBoxVbox in settings.psd1 names *'
         }
 
         It 'logs the version from VERSION and the note on Memory Integrity' {
@@ -823,6 +860,95 @@ Describe 'A start' {
             finally { $lock.Dispose() }
             $result.ExitCode | Should -Be 0
             Get-TestLog -Path $script:stick.Log | Should -Contain 'Launcher version unreadable'
+        }
+    }
+
+    Context 'that guards against a suspend' {
+        BeforeEach {
+            $script:stick = Initialize-TestStick -Name 'guard-stick'
+            Set-TestPc -Stick $script:stick -Installed 'VMware', 'VirtualBox'
+            $script:suspended = Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"'
+        }
+        AfterEach { Remove-Item -LiteralPath $script:stick.Root -Recurse -Force }
+
+        It 'stops a VMware start without <Key>, naming the line to add, but a dry run carries on' -ForEach @(
+            @{ Key = 'suspend.disabled'; Message = 'The VM''s .vmx lacks suspend.disabled = "TRUE", *' }
+            @{ Key = 'uuid.action'; Message = 'The VM''s .vmx lacks uuid.action = "keep", *' }
+        ) {
+            Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without $Key)
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskResume { $true }
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeLike $Message
+            Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun
+            $result.ExitCode | Should -Be 0
+            @(Get-TestLog -Path $script:stick.Log | Where-Object { $_ -like "DRY RUN - a real start would stop here: $Message" }).Count | Should -Be 1
+        }
+
+        It 'asks before it resumes a VMware suspend, and logs the Yes' {
+            Write-TestFile -Path $script:stick.Vmx -Text $script:suspended
+            $script:question = $null
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskResume { param($Question) $script:question = $Question; $true }
+            $result.ExitCode | Should -Be 0
+            $script:question | Should -BeExactly "The VM is suspended in VMware. Resume it only if the stick has not been booted any other way since the suspend; otherwise the resume can corrupt the guest's disk.`n`nResume the VM now?"
+            Get-TestLog -Path $script:stick.Log | Should -Contain 'Resume of the saved state in VMware confirmed.'
+            Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
+        }
+
+        It 'resumes nothing after a No, without a way to ask, or with SavedStatePolicy Refuse' {
+            Write-TestFile -Path $script:stick.Vmx -Text $script:suspended
+            $notResumed = 'The saved state in VMware was not resumed. Nothing was started. Start the VM again to be asked again*'
+            foreach ($answer in { $false }, { 'No' }, { $false; $false }, { $true; $true }) {
+                (Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskResume $answer).Message | Should -BeLike $notResumed
+            }
+            (Invoke-PortableVM -LauncherPath $script:stick.Launcher).Message | Should -BeLike $notResumed
+            (Get-TestLog -Path $script:stick.Log)[-1] | Should -BeLike "STOPPED: $notResumed"
+            $script:stick = Initialize-TestStick -Name 'guard-stick' -Change @{ SavedStatePolicy = 'Refuse' }
+            Write-TestFile -Path $script:stick.Vmx -Text $script:suspended
+            (Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskResume { $true }).Message |
+                Should -BeLike "The VM has a saved state in VMware, and SavedStatePolicy in settings.psd1 is 'Refuse', so the launcher does not resume it.*"
+            Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+        }
+
+        It 'stops a suspended VM whose .vmx lacks suspend.disabled, saying it still resumes with the line' {
+            Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without 'suspend.disabled' -Add 'checkpoint.vmState = "Test VM.vmss"')
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskResume { $true }
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeLike '*a VM that is suspended now still resumes with the line*'
+            Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+        }
+
+        It 'names a wrong value of suspend.disabled' {
+            Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without 'suspend.disabled' -Add 'suspend.disabled = "FALSE"')
+            (Invoke-PortableVM -LauncherPath $script:stick.Launcher).Message | Should -BeLike 'The VM''s .vmx has suspend.disabled = "FALSE" instead of "TRUE", *'
+        }
+
+        It 'asks before it resumes a VirtualBox save, and resumes nothing after a No' {
+            [IO.File]::WriteAllText($script:stick.Vbox, [IO.File]::ReadAllText($script:stick.Vbox).Replace('OSType="Debian_64"', 'OSType="Debian_64" stateFile="Snapshots\x.sav"'))
+            (Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskResume { $false }).Message | Should -BeLike 'The saved state in VirtualBox was not resumed. Nothing was started.*'
+            Should -Invoke -CommandName Invoke-PvmNative -ModuleName PortableVM -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'startvm' }
+            (Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskResume { $true }).ExitCode | Should -Be 0
+            Should -Invoke -CommandName Invoke-PvmNative -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'startvm' }
+        }
+
+        It 'only logs the question in a dry run' {
+            [IO.File]::WriteAllText($script:stick.Vbox, [IO.File]::ReadAllText($script:stick.Vbox).Replace('OSType="Debian_64"', 'OSType="Debian_64" stateFile="Snapshots\x.sav"'))
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun -AskResume { throw 'A dry run must not ask.' }
+            $result.ExitCode | Should -Be 0
+            Get-TestLog -Path $script:stick.Log | Should -Contain 'DRY RUN - a real start would ask whether to resume the saved state in VirtualBox.'
+        }
+
+        It 'stops when it cannot tell a saved state: <Case>' -ForEach @(
+            @{ Case = 'a missing .vmx'; Setup = { Remove-Item -LiteralPath $script:stick.Vmx }; Message = 'The launcher cannot tell whether the VM is suspended in VMware, because the file does not exist: VMwareVmx in settings.psd1 names *' }
+            @{ Case = 'a .vmx without config.version'; Setup = { Write-TestFile -Path $script:stick.Vmx -Text 'displayName = "Test VM"' }; Message = 'The launcher cannot tell whether the VM is suspended in VMware, because the file is no complete .vmx*' }
+            @{ Case = 'a .vmx that sets suspend.disabled twice'; Setup = { Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'suspend.disabled = "TRUE"') }; Message = 'The launcher cannot tell whether the VM is suspended in VMware, because the file sets suspend.disabled more than once*' }
+            @{ Case = 'a .vbox that is no XML'; Setup = { Write-TestFile -Path $script:stick.Vbox -Text '<VirtualBox' }; Message = 'The launcher cannot tell whether the VM has a saved state in VirtualBox, because the file is no valid XML*' }
+        ) {
+            & $Setup
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskResume { $true }
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeLike $Message
+            Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
         }
     }
 }
