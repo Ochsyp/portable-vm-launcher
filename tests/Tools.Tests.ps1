@@ -274,6 +274,9 @@ Describe 'Deploy-PortableVM' {
             Bytes = { (New-Object System.Text.UTF8Encoding $false).GetBytes("`$dash = `"a $([char]0x2014) b`"`r`n") } }
         @{ Case = 'stops while it loads, although it does not parse as UTF-8'; Cause = ''; Held = $false; Ansi = $true; Failure = $null
             Bytes = { [byte[]]([Text.Encoding]::ASCII.GetBytes('$m = ') + 0x93 + [Text.Encoding]::ASCII.GetBytes('a (b') + 0x94 + [Text.Encoding]::ASCII.GetBytes("`r`nthrow 'stopped while it loads'`r`n")) } }
+        # With a byte order mark, PowerShell reads UTF-8, where a curly quote ends a string.
+        @{ Case = 'does not parse as UTF-8 with a byte order mark'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $false; Failure = $null
+            Bytes = { (New-Object System.Text.UTF8Encoding $true).GetPreamble() + (New-Object System.Text.UTF8Encoding $false).GetBytes("`$x = `"a $([char]0x201D) b`"`r`n") } }
         @{ Case = 'is open in another program'; Cause = '. Cause: it is open in another program'; Held = $true; Ansi = $false; Failure = $null; Bytes = $null }
         # Errors in the shape PowerShell gives, so that no test changes an ACL of the clone or the
         # execution policy, or sets off antivirus software.
@@ -284,6 +287,10 @@ Describe 'Deploy-PortableVM' {
         @{ Case = 'is refused by the execution policy and does not parse either'; Cause = '. Cause: PowerShell''s execution policy blocks it'; Held = $false; Ansi = $false
             Bytes = { [Text.Encoding]::ASCII.GetBytes("function {`r`n") }
             Failure = { [Management.Automation.PSSecurityException]::new('X:\clone\src\PortableVM.psm1 is not signed.', [UnauthorizedAccessException]::new('Access is denied.')) } }
+        # A file that does not parse counts only when PowerShell reports a parse error.
+        @{ Case = 'fails with another error and does not parse either'; Cause = ''; Held = $false; Ansi = $false
+            Bytes = { [Text.Encoding]::ASCII.GetBytes("function {`r`n") }
+            Failure = { [Management.Automation.CommandNotFoundException]::new('X:\clone\src\PortableVM.psm1 was not found.', [IO.FileNotFoundException]::new('Not found.')) } }
         @{ Case = 'fails with a parse error although it parses'; Cause = ''; Held = $false; Ansi = $false; Bytes = $null
             Failure = {
                 $extent = [Management.Automation.Language.Parser]::ParseInput('x', [ref]$null, [ref]$null).Extent
