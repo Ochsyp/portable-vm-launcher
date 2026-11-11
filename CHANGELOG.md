@@ -98,9 +98,9 @@ Compared with the launcher on a stick before the redesign:
   too, and look for the VM's and the guest's names unless they are the neutral defaults. The
   rem line of `Start VM.cmd` names `LauncherData\settings.psd1`.
 - The deploy tool reports an error from Windows by its cause, such as a file that is open in
-  another program, and leaves out the system's message, which can name folders on the stick;
-  `-Verbose` shows that message. The launcher reports a settings file that cannot be opened by
-  its cause too.
+  another program or a drive that reports a read error, and leaves out the system's message, which
+  can name folders on the stick or above the clone; `-Verbose` shows that message. The launcher
+  reports a settings file that it cannot open by its cause too.
 - A start in VMware needs `suspend.disabled = "TRUE"` and `uuid.action = "keep"` in the `.vmx`;
   without them the launcher stops and names the line to add. With the key set, VMware refuses to
   suspend the VM, and a VM suspended before the key was added still resumes.

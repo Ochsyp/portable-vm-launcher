@@ -66,26 +66,38 @@ function Write-PvmLog {
 
 # Return a short cause for the error $ErrorRecord that quotes no path, for a message that must not
 # name a file on the stick: it is open in another program, access is denied, it is missing, an item
-# of that name exists already, the disk is full, a path is too long, else the type of the error.
+# of that name exists already, the disk is full, a path is too long, the drive is write-protected,
+# not ready or not connected, the drive reported a read or write error, or Windows cannot access
+# it; else the type of the error.
 function Get-PvmErrorCause {
     [CmdletBinding()]
     [OutputType([string])]
     param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord)
-    $exception = $ErrorRecord.Exception
-    if ($exception -is [System.Management.Automation.ActionPreferenceStopException] -and $null -ne $exception.ErrorRecord) { $exception = $exception.ErrorRecord.Exception }
+    $record = $ErrorRecord
+    $exception = $record.Exception
+    if ($exception -is [System.Management.Automation.ActionPreferenceStopException] -and $null -ne $exception.ErrorRecord) {
+        $record = $exception.ErrorRecord
+        $exception = $record.Exception
+    }
     while (($exception -is [System.Management.Automation.MethodInvocationException] -or $exception -is [System.Reflection.TargetInvocationException]) -and
         $null -ne $exception.InnerException) {
         $exception = $exception.InnerException
     }
-    # The low word of the HRESULT is the Windows error code.
-    $code = $exception.HResult -band 0xFFFF
+    # An HRESULT from Windows (facility 7) holds the Windows error code in its low word.
+    $code = if (($exception.HResult -band 0xFFFF0000) -eq 0x80070000) { $exception.HResult -band 0xFFFF } else { 0 }
     if ($code -eq 32 -or $code -eq 33) { return 'it is open in another program' }
     if ($exception -is [UnauthorizedAccessException] -or $code -eq 5) { return 'access is denied' }
     if ($exception -is [IO.FileNotFoundException] -or $exception -is [IO.DirectoryNotFoundException] -or
         $exception -is [System.Management.Automation.ItemNotFoundException] -or $code -eq 2 -or $code -eq 3) { return 'it is missing' }
-    if ($code -eq 80 -or $code -eq 183) { return 'an item of that name exists already' }
+    # New-Item reports a folder that is there already as an IOException without a Windows code.
+    if ($code -eq 80 -or $code -eq 183 -or "$($record.FullyQualifiedErrorId)" -like 'DirectoryExist,*') { return 'an item of that name exists already' }
     if ($code -eq 39 -or $code -eq 112) { return 'the disk is full' }
     if ($exception -is [IO.PathTooLongException] -or $code -eq 206) { return 'a path is too long' }
+    if ($code -eq 19) { return 'the drive is write-protected' }
+    if ($code -eq 21) { return 'the drive is not ready' }
+    if ($code -eq 1167) { return 'the drive is not connected' }
+    if (@(23, 31, 121, 483, 1117, 1392) -contains $code) { return 'the drive reported a read or write error' }
+    if ($code -eq 1920) { return 'Windows cannot access it' }
     "an error of type $($exception.GetType().Name)"
 }
 
@@ -527,7 +539,9 @@ function Get-PvmDataFileHashtable {
 # decoded by ConvertFrom-PvmDataFileByte (-Legacy for a schema 1 file), parsed by
 # Get-PvmDataFileHashtable, and turned into values only when each value is a constant: text, a
 # number, $true, $false or $null, or an array or hashtable of them. Throws the reason, which
-# quotes nothing from the file.
+# quotes nothing from the file and names no path. When the file cannot be opened, the reason is the
+# cause (Get-PvmErrorCause), and the message from Windows, which can quote the path, is in the
+# exception's Data['PvmDetail'] for a tool that shows it on request.
 function Import-PvmDataFile {
     [CmdletBinding()]
     [OutputType([hashtable])]
@@ -536,7 +550,11 @@ function Import-PvmDataFile {
         [switch]$Legacy
     )
     try { $bytes = [IO.File]::ReadAllBytes($Path) }
-    catch { throw "it cannot be opened, because $(Get-PvmErrorCause -ErrorRecord $_)" }
+    catch {
+        $reason = [System.Management.Automation.RuntimeException]::new((Get-PvmErrorCause -ErrorRecord $_))
+        $reason.Data['PvmDetail'] = $_.Exception.Message
+        throw $reason
+    }
     $hashtable = Get-PvmDataFileHashtable -Text (ConvertFrom-PvmDataFileByte -Bytes $bytes -Legacy:$Legacy)
     try { $hashtable.SafeGetValue() }
     catch { throw 'a value is an expression; use plain text, numbers, $true, $false or $null' }
@@ -544,7 +562,7 @@ function Import-PvmDataFile {
 
 # Return the settings in the file $Path, LauncherData\settings.psd1, checked by Test-PvmSetting
 # and with the defaults filled in (Merge-PvmSetting). Throws a stop that names every problem, or
-# says why the file cannot be read.
+# says why the file cannot be read; that stop keeps the Data['PvmDetail'] of Import-PvmDataFile.
 function Import-PvmSetting {
     [CmdletBinding()]
     [OutputType([hashtable])]
@@ -554,7 +572,11 @@ function Import-PvmSetting {
         throw (Get-PvmStopException -Message "$name is missing. Copy examples\settings.example.psd1 there and fill it in.")
     }
     try { $raw = Import-PvmDataFile -Path $Path }
-    catch { throw (Get-PvmStopException -Message "$name cannot be read: $($_.Exception.Message).") }
+    catch {
+        $stop = Get-PvmStopException -Message "$name cannot be read: $($_.Exception.Message)."
+        if ($_.Exception.Data['PvmDetail']) { $stop.Data['PvmDetail'] = $_.Exception.Data['PvmDetail'] }
+        throw $stop
+    }
     $problems = @(Test-PvmSetting -Settings $raw)
     if ($problems.Count -gt 0) {
         $noun = if ($problems.Count -eq 1) { 'problem' } else { 'problems' }

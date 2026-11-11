@@ -320,12 +320,21 @@ Describe 'Importing the settings' {
         $lines.Count | Should -Be 12
     }
 
-    It 'stops when the file is open in another program, naming the cause but no path' {
+    It 'stops when the file is open in another program, naming the cause but no path, and keeps the message from Windows aside' {
         $path = Write-TestByte -Name 'held.psd1' -Bytes ([Text.Encoding]::ASCII.GetBytes('@{ SchemaVersion = 2 }'))
         $held = [IO.File]::Open($path, 'Open', 'Read', 'None')
-        try { $message = try { $null = Import-PvmSetting -Path $path } catch { Get-PvmStopMessage -ErrorRecord $_ } }
-        finally { $held.Dispose() }
-        $message | Should -BeExactly 'LauncherData\settings.psd1 cannot be read: it cannot be opened, because it is open in another program.'
+        try {
+            $read = try { $null = Import-PvmDataFile -Path $path } catch { $_ }
+            $stop = try { $null = Import-PvmSetting -Path $path } catch { $_ }
+        } finally { $held.Dispose() }
+        # The reason reads as one of the module's own messages, which the deploy tool prints as it is.
+        $read.Exception.GetType() | Should -Be ([Management.Automation.RuntimeException])
+        $read.Exception.InnerException | Should -BeNullOrEmpty
+        $read.Exception.Message | Should -BeExactly 'it is open in another program'
+        Get-PvmStopMessage -ErrorRecord $stop | Should -BeExactly 'LauncherData\settings.psd1 cannot be read: it is open in another program.'
+        # The message from Windows quotes the path, in the language of Windows.
+        $read.Exception.Data['PvmDetail'] | Should -BeLike "*$path*"
+        $stop.Exception.Data['PvmDetail'] | Should -BeExactly $read.Exception.Data['PvmDetail']
     }
 
     It 'stops when the file is missing or cannot be read' {
@@ -360,6 +369,18 @@ Describe 'Causes of errors from Windows' {
         @{ Case = 'a full disk'; HResult = 0x80070070; Cause = 'the disk is full' }
         @{ Case = 'a disk without space'; HResult = 0x80070027; Cause = 'the disk is full' }
         @{ Case = 'a path that is too long'; HResult = 0x800700CE; Cause = 'a path is too long' }
+        @{ Case = 'a write-protected stick'; HResult = 0x80070013; Cause = 'the drive is write-protected' }
+        @{ Case = 'a drive that is not ready'; HResult = 0x80070015; Cause = 'the drive is not ready' }
+        @{ Case = 'a stick that was pulled'; HResult = 0x8007048F; Cause = 'the drive is not connected' }
+        @{ Case = 'a CRC error'; HResult = 0x80070017; Cause = 'the drive reported a read or write error' }
+        @{ Case = 'a device that does not work'; HResult = 0x8007001F; Cause = 'the drive reported a read or write error' }
+        @{ Case = 'a timeout'; HResult = 0x80070079; Cause = 'the drive reported a read or write error' }
+        @{ Case = 'a hardware error'; HResult = 0x800701E3; Cause = 'the drive reported a read or write error' }
+        @{ Case = 'an I/O device error'; HResult = 0x8007045D; Cause = 'the drive reported a read or write error' }
+        @{ Case = 'a corrupt file'; HResult = 0x80070570; Cause = 'the drive reported a read or write error' }
+        @{ Case = 'a file Windows cannot access'; HResult = 0x80070780; Cause = 'Windows cannot access it' }
+        @{ Case = 'a code that is not from Windows'; HResult = 0x80040020; Cause = 'an error of type IOException' }
+        @{ Case = 'an error of .NET'; HResult = 0x80131620; Cause = 'an error of type IOException' }
     ) {
         $exception = [IO.IOException]::new("The file 'X:\Ann's VM\stick.vmdk' failed.", [int]$HResult)
         $record = [Management.Automation.ErrorRecord]::new($exception, 'Test', 'NotSpecified', $null)
@@ -375,8 +396,17 @@ Describe 'Causes of errors from Windows' {
         @{ Type = 'InvalidOperationException'; Cause = 'an error of type InvalidOperationException' }
     ) {
         $exception = New-Object -TypeName $Type -ArgumentList "The path 'X:\Ann's VM' failed."
+        # The default HRESULT of each type holds its Windows code; a neutral one tests the type.
+        $null = [Exception].GetProperty('HResult').GetSetMethod($true).Invoke($exception, @([int]0x80131500))
         $record = [Management.Automation.ErrorRecord]::new($exception, 'Test', 'NotSpecified', $null)
         Get-PvmErrorCause -ErrorRecord $record | Should -BeExactly $Cause
+    }
+
+    It 'names a folder that New-Item finds there already, which PowerShell reports without a Windows code' {
+        $folder = Join-Path $TestDrive "Ann's VM [2]"
+        $null = New-Item -ItemType Directory -Path $folder
+        $record = try { $null = New-Item -ItemType Directory -Path $folder -ErrorAction Stop } catch { $_ }
+        Get-PvmErrorCause -ErrorRecord $record | Should -BeExactly 'an item of that name exists already'
     }
 
     It 'looks through the wrapper that PowerShell puts around an error of a .NET method' {

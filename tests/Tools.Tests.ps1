@@ -238,6 +238,40 @@ Describe 'Deploy-PortableVM' {
         Join-Path $script:target 'Launcher.previous\Old-Launcher.ps1' | Should -Exist
     }
 
+    It 'names the cause but no path when a program holds a file in Launcher, and shows the message from Windows with -Verbose' {
+        $script:failure = $null
+        $held = [IO.File]::Open((Join-Path $script:target 'Launcher\Old-Launcher.ps1'), 'Open', 'Read', 'Read')
+        try { $verbose = @(& { try { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -Verbose } catch { $script:failure = $_ } } 4>&1) }
+        finally { $held.Dispose() }
+        $script:failure.Exception.Message | Should -BeExactly ("Launcher could not be renamed, so the stick's launcher is unchanged. A window, console or program probably has " +
+            "the Launcher folder or a file in it open: close it, remove Launcher.new and 'Start VM.cmd.new', then deploy again. Cause: access is denied (-Verbose shows the details).")
+        # The message from Windows names the Launcher folder, in quotes of its language; the copies
+        # that staging made name Launcher.new.
+        $named = [regex]::Escape((Join-Path $script:target 'Launcher')) + '[^.\\]'
+        @($verbose | Where-Object { $_ -is [Management.Automation.VerboseRecord] -and $_.Message -match $named }) | Should -Not -BeNullOrEmpty
+        Join-Path $script:target 'Launcher\Old-Launcher.ps1' | Should -Exist
+        Join-Path $script:target 'Start Old.cmd' | Should -Exist
+    }
+
+    It 'names the cause of settings it cannot open, and shows the message from Windows with -Verbose' {
+        $script:failure = $null
+        $settings = Join-Path $script:target 'LauncherData\settings.psd1'
+        $held = [IO.File]::Open($settings, 'Open', 'Read', 'None')
+        try { $verbose = @(& { try { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -Verbose } catch { $script:failure = $_ } } 4>&1) }
+        finally { $held.Dispose() }
+        $script:failure.Exception.Message | Should -BeExactly ('The new launcher reads LauncherData\settings.psd1, which must pass its checks first, so nothing was changed. ' +
+            'LauncherData\settings.psd1 cannot be read: it is open in another program (-Verbose shows the details).')
+        @($verbose | Where-Object { $_ -is [Management.Automation.VerboseRecord] -and $_.Message.IndexOf($settings, [StringComparison]::OrdinalIgnoreCase) -ge 0 }) |
+            Should -Not -BeNullOrEmpty
+    }
+
+    It 'names only the type of the error when the clone''s module cannot be loaded, not its path' {
+        Write-TestFile -Path (Join-Path $script:clone 'src\PortableVM.psm1') -Text "function {`r`n"
+        $message = try { $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } catch { $_.Exception.Message }
+        $message | Should -BeLike "The clone's src\PortableVM.psm1 cannot be loaded, so the settings cannot be checked. Cause: an error of type * (-Verbose shows the details)."
+        $message.IndexOf($script:clone, [StringComparison]::OrdinalIgnoreCase) | Should -Be -1
+    }
+
     It 'only runs the checks under -WhatIf' {
         $before = Get-TestTree -Root $script:target
         $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -WhatIf
@@ -370,8 +404,43 @@ Describe 'Deploy-PortableVM -MigrateSettings' {
             return
         }
         $exitCode | Should -Be 1
-        $output | Should -Contain 'Deploy-PortableVM: Launcher\settings.psd1 cannot be read: it cannot be opened, because it is open in another program.'
+        $output | Should -Contain 'Deploy-PortableVM: Launcher\settings.psd1 cannot be read: it is open in another program (-Verbose shows the details).'
         ($output -join "`n").IndexOf($script:target, [StringComparison]::OrdinalIgnoreCase) | Should -Be -1
+    }
+
+    It 'runs as a script and prints only the cause of an error from Windows that no step catches' {
+        # A resume hashes a 'Start VM.cmd.new' that it could reuse, and another program holds it.
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        $cmd = Join-Path $script:target 'Start VM.cmd.new'
+        Copy-Item -LiteralPath (Join-Path $script:repoRoot 'Start VM.cmd') -Destination $cmd
+        $tool = Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1'
+        $held = [IO.File]::Open($cmd, 'Open', 'Read', 'None')
+        try { $output = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $tool -Target $script:target -MigrateSettings 2>&1 | ForEach-Object { "$_" }) }
+        finally { $held.Dispose() }
+        $exitCode = $LASTEXITCODE
+        if ($output -match 'A VM runs on this PC') {
+            Set-ItResult -Skipped -Because 'a VM runs on this PC'
+            return
+        }
+        $exitCode | Should -Be 1
+        $output | Should -Contain 'Deploy-PortableVM: the deploy stopped: it is open in another program (-Verbose shows the details).'
+        ($output -join "`n").IndexOf($script:target, [StringComparison]::OrdinalIgnoreCase) | Should -Be -1
+    }
+
+    It 'names the cause of <Case> that it cannot open, and shows the message from Windows with -Verbose' -ForEach @(
+        @{ Case = 'the old settings'; File = 'Launcher\settings.psd1'; Resume = $false; Message = 'Launcher\settings.psd1 cannot be read: it is open in another program (-Verbose shows the details).' }
+        @{ Case = 'the settings a resume keeps'; File = 'LauncherData\settings.psd1'; Resume = $true; Message = ('LauncherData\settings.psd1 is there from a migration that stopped, and this run keeps it, ' +
+                'but it must pass the checks first, so nothing was changed. LauncherData\settings.psd1 cannot be read: it is open in another program (-Verbose shows the details).') }
+    ) {
+        if ($Resume) { Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text) }
+        $script:failure = $null
+        $settings = Join-Path $script:target $File
+        $held = [IO.File]::Open($settings, 'Open', 'Read', 'None')
+        try { $verbose = @(& { try { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings -Verbose } catch { $script:failure = $_ } } 4>&1) }
+        finally { $held.Dispose() }
+        $script:failure.Exception.Message | Should -BeExactly $Message
+        @($verbose | Where-Object { $_ -is [Management.Automation.VerboseRecord] -and $_.Message.IndexOf($settings, [StringComparison]::OrdinalIgnoreCase) -ge 0 }) |
+            Should -Not -BeNullOrEmpty
     }
 
     It 'runs as a script and says so when the -Target folder does not exist, also when its name holds brackets' {
@@ -558,6 +627,75 @@ Describe 'Get-DeployCause' {
             'a move onto an existing file' {
                 Set-Content -LiteralPath "$file.2" -Value 'y'
                 try { Move-Item -LiteralPath "$file.2" -Destination $file -ErrorAction Stop } catch { $_ }
+            }
+        }
+        $text = Get-DeployCause -ErrorRecord $record
+        $text | Should -BeExactly "$Cause (-Verbose shows the details)"
+        $text | Should -Not -Match 'Ann'
+    }
+
+    It 'passes on a message of the module and sends the message from Windows behind it to -Verbose' {
+        $exception = [Management.Automation.RuntimeException]::new('it is open in another program')
+        $exception.Data['PvmDetail'] = "The process cannot access the file 'X:\Ann's VM\settings.psd1'."
+        $record = try { throw $exception } catch { $_ }
+        $output = @(Get-DeployCause -ErrorRecord $record -Verbose 4>&1)
+        @($output | Where-Object { $_ -is [string] }) | Should -BeExactly @('it is open in another program (-Verbose shows the details)')
+        @($output | Where-Object { $_ -is [Management.Automation.VerboseRecord] } | ForEach-Object { $_.Message }) |
+            Should -BeExactly @("The process cannot access the file 'X:\Ann's VM\settings.psd1'.")
+        # A stop's message ends with a full stop, which stays at the end.
+        Get-DeployOwnMessage -ErrorRecord $record -Message 'LauncherData\settings.psd1 cannot be read: it is open in another program.' |
+            Should -BeExactly 'LauncherData\settings.psd1 cannot be read: it is open in another program (-Verbose shows the details).'
+    }
+
+    It 'ends a message with the cause as a sentence of its own' {
+        $record = try { throw 'in use' } catch { $_ }
+        Format-DeployCause -ErrorRecord $record | Should -BeExactly 'Cause: in use.'
+        $record = try { throw 'The copy of PortableVM.psm1 does not match the clone.' } catch { $_ }
+        Format-DeployCause -ErrorRecord $record | Should -BeExactly 'Cause: The copy of PortableVM.psm1 does not match the clone.'
+        $record = try { $null = [IO.File]::ReadAllBytes((Join-Path $script:cause 'none.vmdk')) } catch { $_ }
+        Format-DeployCause -ErrorRecord $record | Should -BeExactly 'Cause: it is missing (-Verbose shows the details).'
+    }
+}
+
+Describe 'Rename-DeployItem' {
+    BeforeAll {
+        Import-Module (Join-Path $script:repoRoot 'src\PortableVM.psm1') -Force -Global
+    }
+
+    BeforeEach {
+        $script:folder = Join-Path $TestDrive "rename\Ann's VM [3]"
+        Remove-Item -LiteralPath (Join-Path $TestDrive 'rename') -Recurse -Force -ErrorAction SilentlyContinue
+        $null = New-Item -ItemType Directory -Path (Join-Path $script:folder 'Launcher')
+        Set-Content -LiteralPath (Join-Path $script:folder 'Launcher\a.ps1') -Value 'x'
+        Set-Content -LiteralPath (Join-Path $script:folder 'Start VM.cmd.new') -Value 'x'
+    }
+
+    It 'renames a folder and a file whose paths hold brackets and an apostrophe, also given a relative path' {
+        # Should -Exist would read the brackets as a wildcard.
+        Rename-DeployItem -Path (Join-Path $script:folder 'Launcher') -NewName 'Launcher.previous'
+        Test-Path -LiteralPath (Join-Path $script:folder 'Launcher.previous\a.ps1') | Should -BeTrue
+        Push-Location -LiteralPath $script:folder
+        try { Rename-DeployItem -Path 'Start VM.cmd.new' -NewName 'Start VM.cmd' }
+        finally { Pop-Location }
+        Test-Path -LiteralPath (Join-Path $script:folder 'Start VM.cmd') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $script:folder 'Start VM.cmd.new') | Should -BeFalse
+    }
+
+    It 'fails with an error whose cause Get-DeployCause names, without the path, when <Case>' -ForEach @(
+        @{ Case = 'a program holds a file in the folder'; Cause = 'access is denied' }
+        @{ Case = 'the item is missing'; Cause = 'it is missing' }
+        @{ Case = 'the new name is taken'; Cause = 'an item of that name exists already' }
+    ) {
+        $launcher = Join-Path $script:folder 'Launcher'
+        $record = switch ($Case) {
+            'a program holds a file in the folder' {
+                $held = [IO.File]::Open((Join-Path $launcher 'a.ps1'), 'Open', 'Read', 'Read')
+                try { try { Rename-DeployItem -Path $launcher -NewName 'Launcher.previous' } catch { $_ } } finally { $held.Dispose() }
+            }
+            'the item is missing' { try { Rename-DeployItem -Path (Join-Path $script:folder 'none') -NewName 'Launcher.previous' } catch { $_ } }
+            'the new name is taken' {
+                $null = New-Item -ItemType Directory -Path (Join-Path $script:folder 'Launcher.previous')
+                try { Rename-DeployItem -Path $launcher -NewName 'Launcher.previous' } catch { $_ }
             }
         }
         $text = Get-DeployCause -ErrorRecord $record
