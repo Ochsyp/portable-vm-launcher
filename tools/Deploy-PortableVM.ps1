@@ -158,11 +158,14 @@ function Rename-DeployItem {
 function Import-DeployModule {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$RepositoryPath)
-    try { Import-Module -Name (Join-Path $RepositoryPath 'src\PortableVM.psm1') -Force -Global -ErrorAction Stop }
+    $module = Join-Path $RepositoryPath 'src\PortableVM.psm1'
+    try { Import-Module -Name $module -Force -Global -ErrorAction Stop }
     catch {
         # The message can quote the clone's full path, so it goes to -Verbose. Get-PvmErrorCause is
-        # in the module that did not load, so the likely causes are told apart here: PowerShell
-        # wraps a parse error, and a file it cannot read, in errors of its own.
+        # in the module that did not load, so the likely causes are told apart here; PowerShell
+        # wraps each in an error of its own. A refusal of the execution policy wraps an access
+        # error, and content that antivirus software blocks comes as a parse error, so a parse
+        # error counts only when the file itself does not parse.
         Write-Verbose $_.Exception.Message
         $record = $_
         if ($record.Exception -is [System.Management.Automation.ActionPreferenceStopException] -and $null -ne $record.Exception.ErrorRecord) {
@@ -171,7 +174,18 @@ function Import-DeployModule {
         $exception = $record.Exception
         while ($null -ne $exception.InnerException) { $exception = $exception.InnerException }
         $code = if (($exception.HResult -band 0xFFFF0000) -eq 0x80070000) { $exception.HResult -band 0xFFFF } else { 0 }
-        $cause = if ($record.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ParserError) { 'it does not parse' }
+        # ParseFile would report a file it cannot read as a parse error, so the text is read first.
+        $parseErrors = @()
+        try {
+            $text = [IO.File]::ReadAllText($module)
+            $errors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$errors)
+            $parseErrors = @($errors)
+        } catch {
+            Write-Verbose "The module cannot be read to parse it: $($_.Exception.Message)"
+        }
+        $cause = if ($record.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::SecurityError) { "PowerShell's execution policy blocks it" }
+        elseif ($parseErrors.Count -gt 0) { 'it does not parse' }
         elseif ($code -eq 32 -or $code -eq 33) { 'it is open in another program' }
         elseif ($exception -is [UnauthorizedAccessException] -or $code -eq 5) { 'access is denied' }
         $because = if ($cause) { ". Cause: $cause" } else { '' }

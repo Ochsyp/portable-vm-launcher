@@ -266,21 +266,36 @@ Describe 'Deploy-PortableVM' {
     }
 
     It 'names the cause but no path when the clone''s module <Case>, and shows the message with -Verbose' -ForEach @(
-        @{ Case = 'does not parse'; Held = $false; Cause = 'it does not parse' }
-        @{ Case = 'is open in another program'; Held = $true; Cause = 'it is open in another program' }
+        @{ Case = 'does not parse'; Kind = 'parse'; Cause = '. Cause: it does not parse' }
+        @{ Case = 'is open in another program'; Kind = 'held'; Cause = '. Cause: it is open in another program' }
+        # Errors in the shape PowerShell gives for causes a test cannot make on its own.
+        @{ Case = 'may not be read'; Kind = 'mock'; Cause = '. Cause: access is denied'
+            Failure = { [Management.Automation.CommandNotFoundException]::new('X:\clone\src\PortableVM.psm1 may not be read.', [UnauthorizedAccessException]::new('Access is denied.')) } }
+        @{ Case = 'is refused by the execution policy'; Kind = 'mock'; Cause = '. Cause: PowerShell''s execution policy blocks it'
+            Failure = { [Management.Automation.PSSecurityException]::new('X:\clone\src\PortableVM.psm1 is not signed.', [UnauthorizedAccessException]::new('Access is denied.')) } }
+        @{ Case = 'fails with a parse error although it parses'; Kind = 'mock'; Cause = ''
+            Failure = {
+                $extent = [Management.Automation.Language.Parser]::ParseInput('x', [ref]$null, [ref]$null).Extent
+                [Management.Automation.ParseException]::new([Management.Automation.Language.ParseError[]]@([Management.Automation.Language.ParseError]::new($extent, 'ContentBlocked', 'X:\clone\src\PortableVM.psm1 is blocked.')))
+            } }
     ) {
         $module = Join-Path $script:clone 'src\PortableVM.psm1'
-        if (-not $Held) { Write-TestFile -Path $module -Text "function {`r`n" }
         $script:failure = $null
-        $held = if ($Held) { [IO.File]::Open($module, 'Open', 'Read', 'None') }
+        $holder = $null
+        if ($Kind -eq 'parse') { Write-TestFile -Path $module -Text "function {`r`n" }
+        if ($Kind -eq 'held') { $holder = [IO.File]::Open($module, 'Open', 'Read', 'None') }
+        if ($Kind -eq 'mock') {
+            $script:loadFailure = & $Failure
+            Mock Import-Module { throw $script:loadFailure }
+        }
         try {
             # The message PowerShell gives for the same import, which -Verbose must show.
             $expected = try { Import-Module -Name $module -Force -Global -ErrorAction Stop } catch { $_.Exception.Message }
             $verbose = @(& { try { $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -Verbose } catch { $script:failure = $_ } } 4>&1)
         } finally {
-            if ($held) { $held.Dispose() }
+            if ($holder) { $holder.Dispose() }
         }
-        $script:failure.Exception.Message | Should -BeExactly "The clone's src\PortableVM.psm1 cannot be loaded, so the settings cannot be checked. Cause: $Cause (-Verbose shows the details)."
+        $script:failure.Exception.Message | Should -BeExactly "The clone's src\PortableVM.psm1 cannot be loaded, so the settings cannot be checked$Cause (-Verbose shows the details)."
         $expected | Should -Not -BeNullOrEmpty
         @($verbose | Where-Object { $_ -is [Management.Automation.VerboseRecord] -and $_.Message -eq $expected }) | Should -Not -BeNullOrEmpty
     }
@@ -442,7 +457,9 @@ Describe 'Deploy-PortableVM -MigrateSettings' {
 
     It 'says which file it is when the settings a resume keeps cannot be read a second time' {
         Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
-        # The first read passes; then another program opens the file.
+        # The first read passes; then another program opens the file. A test before may have left
+        # no module behind, and a mock needs the command it replaces.
+        Import-Module (Join-Path $script:clone 'src\PortableVM.psm1') -Force -Global
         Mock Import-PvmSetting { @{} }
         $held = [IO.File]::Open((Join-Path $script:target 'LauncherData\settings.psd1'), 'Open', 'Read', 'None')
         try { $message = try { $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings } catch { $_.Exception.Message } }
@@ -731,6 +748,27 @@ Describe 'Rename-DeployItem' {
         $text = Get-DeployCause -ErrorRecord $record
         $text | Should -BeExactly "$Cause (-Verbose shows the details)"
         $text | Should -Not -Match 'Ann'
+    }
+
+    It 'gives the cause from Windows, not a missing item, when Windows cannot read the attributes of the <Kind>' -ForEach @(
+        @{ Kind = 'folder'; Name = 'Launcher' }
+        @{ Kind = 'file'; Name = 'Start VM.cmd.new' }
+    ) {
+        $item = Join-Path $script:folder $Name
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        # Without the item's attributes and the folder's list, Directory.Exists and File.Exists
+        # answer false although the item is there.
+        $null = & icacls.exe $item /deny "*${sid}:(RA)"
+        $null = & icacls.exe $script:folder /deny "*${sid}:(RD)"
+        try {
+            ([IO.Directory]::Exists($item) -or [IO.File]::Exists($item)) | Should -BeFalse
+            $record = try { Rename-DeployItem -Path $item -NewName 'renamed' } catch { $_ }
+        } finally {
+            $null = & icacls.exe $script:folder /reset /Q
+            $null = & icacls.exe $item /reset /Q
+        }
+        Get-DeployCause -ErrorRecord $record | Should -BeExactly 'access is denied (-Verbose shows the details)'
+        Test-Path -LiteralPath $item | Should -BeTrue
     }
 }
 
