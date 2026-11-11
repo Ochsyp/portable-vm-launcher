@@ -28,10 +28,12 @@
 # Launcher.new, "Start VM.cmd.new", LauncherData.new or Launcher.previous is left from an earlier
 # deploy, or when a .cmd at -Target is in the way. A migration also refuses an old settings file
 # without a byte order mark whose values read differently as UTF-8 and as ANSI, and, when it
-# resumes, two settings files that differ. It deletes nothing, changes no VM file and prints no
-# full path, so that no folder name from the stick or above the clone shows: of an error from
-# Windows or PowerShell, which can quote one, it prints only the cause, and -Verbose shows the
-# message and the copies a migration moves. When a step fails it says what is left to fix by hand.
+# resumes, two settings files that differ. It deletes nothing, changes no VM file, and its messages
+# name no full path, so that no folder name from the stick or above the clone shows: of an error
+# from Windows or PowerShell, which can quote one, it prints only the cause, and -Verbose shows the
+# message and the copies a migration moves. PowerShell's own errors about the command line, such as
+# an unknown parameter, come before the script runs and name its path. When a step fails it says
+# what is left to fix by hand.
 # -WhatIf runs the checks and prints the plan only. Exits 0 when done, 1 when it refused or failed.
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -126,11 +128,11 @@ function Copy-DeployFile {
     $hash
 }
 
-# Rename the folder or file $Path to $NewName in the same folder. It renames with .NET, whose
-# errors keep the code from Windows that Get-PvmErrorCause turns into a cause: Rename-Item reports
-# a folder that holds an open file as an IOException without one. A virus scanner often holds a
-# fresh file for a moment, so a failed rename is tried twice more, half a second apart, before it
-# throws.
+# Rename the folder or file $Path to $NewName in the same folder. It renames with .NET's
+# Directory.Move, which moves a file too and whose errors keep the code from Windows that
+# Get-PvmErrorCause turns into a cause: Rename-Item reports a folder that holds an open file as an
+# IOException without one. A virus scanner often holds a fresh file for a moment, so a failed
+# rename is tried twice more, half a second apart, before it throws.
 function Rename-DeployItem {
     [CmdletBinding()]
     param(
@@ -142,8 +144,7 @@ function Rename-DeployItem {
     $destination = Join-Path ([IO.Path]::GetDirectoryName($full)) $NewName
     for ($attempt = 1; ; $attempt++) {
         try {
-            if ([IO.Directory]::Exists($full)) { [IO.Directory]::Move($full, $destination) }
-            else { [IO.File]::Move($full, $destination) }
+            [IO.Directory]::Move($full, $destination)
             return
         } catch {
             if ($attempt -ge 3) { throw }
@@ -159,10 +160,22 @@ function Import-DeployModule {
     param([Parameter(Mandatory)][string]$RepositoryPath)
     try { Import-Module -Name (Join-Path $RepositoryPath 'src\PortableVM.psm1') -Force -Global -ErrorAction Stop }
     catch {
-        # The message can quote the clone's full path. Get-PvmErrorCause is in the module that did
-        # not load, so the cause is the type of the error.
+        # The message can quote the clone's full path, so it goes to -Verbose. Get-PvmErrorCause is
+        # in the module that did not load, so the likely causes are told apart here: PowerShell
+        # wraps a parse error, and a file it cannot read, in errors of its own.
         Write-Verbose $_.Exception.Message
-        throw "The clone's src\PortableVM.psm1 cannot be loaded, so the settings cannot be checked. Cause: an error of type $($_.Exception.GetType().Name) (-Verbose shows the details)."
+        $record = $_
+        if ($record.Exception -is [System.Management.Automation.ActionPreferenceStopException] -and $null -ne $record.Exception.ErrorRecord) {
+            $record = $record.Exception.ErrorRecord
+        }
+        $exception = $record.Exception
+        while ($null -ne $exception.InnerException) { $exception = $exception.InnerException }
+        $code = if (($exception.HResult -band 0xFFFF0000) -eq 0x80070000) { $exception.HResult -band 0xFFFF } else { 0 }
+        $cause = if ($record.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ParserError) { 'it does not parse' }
+        elseif ($code -eq 32 -or $code -eq 33) { 'it is open in another program' }
+        elseif ($exception -is [UnauthorizedAccessException] -or $code -eq 5) { 'access is denied' }
+        $because = if ($cause) { ". Cause: $cause" } else { '' }
+        throw "The clone's src\PortableVM.psm1 cannot be loaded, so the settings cannot be checked$because (-Verbose shows the details)."
     }
 }
 
@@ -459,7 +472,8 @@ function Get-DeployMigrationPlan {
             if ($null -eq $stop) { throw }
             throw "LauncherData\settings.psd1 is there from a migration that stopped, and this run keeps it, but it must pass the checks first, so nothing was changed. $(Get-DeployOwnMessage -ErrorRecord $_ -Message $stop)"
         }
-        $values = Import-PvmDataFile -Path $settings
+        try { $values = Import-PvmDataFile -Path $settings }
+        catch { throw "LauncherData\settings.psd1 cannot be read, so nothing was changed: $((Get-DeployCause -ErrorRecord $_).TrimEnd('.'))." }
         foreach ($name in 'VmDisplayName', 'GuestName') {
             $given = if ($name -eq 'VmDisplayName') { $VmDisplayName } else { $GuestName }
             if ($given -and "$(Get-DeployValue -Values $values -Key $name)" -cne $given) {

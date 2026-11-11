@@ -265,11 +265,24 @@ Describe 'Deploy-PortableVM' {
             Should -Not -BeNullOrEmpty
     }
 
-    It 'names only the type of the error when the clone''s module cannot be loaded, not its path' {
-        Write-TestFile -Path (Join-Path $script:clone 'src\PortableVM.psm1') -Text "function {`r`n"
-        $message = try { $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } catch { $_.Exception.Message }
-        $message | Should -BeLike "The clone's src\PortableVM.psm1 cannot be loaded, so the settings cannot be checked. Cause: an error of type * (-Verbose shows the details)."
-        $message.IndexOf($script:clone, [StringComparison]::OrdinalIgnoreCase) | Should -Be -1
+    It 'names the cause but no path when the clone''s module <Case>, and shows the message with -Verbose' -ForEach @(
+        @{ Case = 'does not parse'; Held = $false; Cause = 'it does not parse' }
+        @{ Case = 'is open in another program'; Held = $true; Cause = 'it is open in another program' }
+    ) {
+        $module = Join-Path $script:clone 'src\PortableVM.psm1'
+        if (-not $Held) { Write-TestFile -Path $module -Text "function {`r`n" }
+        $script:failure = $null
+        $held = if ($Held) { [IO.File]::Open($module, 'Open', 'Read', 'None') }
+        try {
+            # The message PowerShell gives for the same import, which -Verbose must show.
+            $expected = try { Import-Module -Name $module -Force -Global -ErrorAction Stop } catch { $_.Exception.Message }
+            $verbose = @(& { try { $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -Verbose } catch { $script:failure = $_ } } 4>&1)
+        } finally {
+            if ($held) { $held.Dispose() }
+        }
+        $script:failure.Exception.Message | Should -BeExactly "The clone's src\PortableVM.psm1 cannot be loaded, so the settings cannot be checked. Cause: $Cause (-Verbose shows the details)."
+        $expected | Should -Not -BeNullOrEmpty
+        @($verbose | Where-Object { $_ -is [Management.Automation.VerboseRecord] -and $_.Message -eq $expected }) | Should -Not -BeNullOrEmpty
     }
 
     It 'only runs the checks under -WhatIf' {
@@ -425,6 +438,17 @@ Describe 'Deploy-PortableVM -MigrateSettings' {
         $exitCode | Should -Be 1
         $output | Should -Contain 'Deploy-PortableVM: the deploy stopped: it is open in another program (-Verbose shows the details).'
         ($output -join "`n").IndexOf($script:target, [StringComparison]::OrdinalIgnoreCase) | Should -Be -1
+    }
+
+    It 'says which file it is when the settings a resume keeps cannot be read a second time' {
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        # The first read passes; then another program opens the file.
+        Mock Import-PvmSetting { @{} }
+        $held = [IO.File]::Open((Join-Path $script:target 'LauncherData\settings.psd1'), 'Open', 'Read', 'None')
+        try { $message = try { $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings } catch { $_.Exception.Message } }
+        finally { $held.Dispose() }
+        $message | Should -BeExactly 'LauncherData\settings.psd1 cannot be read, so nothing was changed: it is open in another program (-Verbose shows the details).'
+        Should -Invoke Import-PvmSetting -Times 1 -Exactly
     }
 
     It 'names the cause of <Case> that it cannot open, and shows the message from Windows with -Verbose' -ForEach @(
@@ -683,6 +707,7 @@ Describe 'Rename-DeployItem' {
 
     It 'fails with an error whose cause Get-DeployCause names, without the path, when <Case>' -ForEach @(
         @{ Case = 'a program holds a file in the folder'; Cause = 'access is denied' }
+        @{ Case = 'a program holds the file'; Cause = 'it is open in another program' }
         @{ Case = 'the item is missing'; Cause = 'it is missing' }
         @{ Case = 'the new name is taken'; Cause = 'an item of that name exists already' }
     ) {
@@ -691,6 +716,11 @@ Describe 'Rename-DeployItem' {
             'a program holds a file in the folder' {
                 $held = [IO.File]::Open((Join-Path $launcher 'a.ps1'), 'Open', 'Read', 'Read')
                 try { try { Rename-DeployItem -Path $launcher -NewName 'Launcher.previous' } catch { $_ } } finally { $held.Dispose() }
+            }
+            'a program holds the file' {
+                $file = Join-Path $script:folder 'Start VM.cmd.new'
+                $held = [IO.File]::Open($file, 'Open', 'Read', 'None')
+                try { try { Rename-DeployItem -Path $file -NewName 'Start VM.cmd' } catch { $_ } } finally { $held.Dispose() }
             }
             'the item is missing' { try { Rename-DeployItem -Path (Join-Path $script:folder 'none') -NewName 'Launcher.previous' } catch { $_ } }
             'the new name is taken' {
