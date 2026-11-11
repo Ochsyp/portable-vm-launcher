@@ -165,7 +165,7 @@ function Import-DeployModule {
         # in the module that did not load, so the likely causes are told apart here; PowerShell
         # wraps each in an error of its own. A refusal of the execution policy wraps an access
         # error, and content that antivirus software blocks comes as a parse error, so a parse
-        # error counts only when the file itself does not parse.
+        # error counts only when the file itself does not parse either.
         Write-Verbose $_.Exception.Message
         $record = $_
         if ($record.Exception -is [System.Management.Automation.ActionPreferenceStopException] -and $null -ne $record.Exception.ErrorRecord) {
@@ -174,10 +174,11 @@ function Import-DeployModule {
         $exception = $record.Exception
         while ($null -ne $exception.InnerException) { $exception = $exception.InnerException }
         $code = if (($exception.HResult -band 0xFFFF0000) -eq 0x80070000) { $exception.HResult -band 0xFFFF } else { 0 }
-        # ParseFile would report a file it cannot read as a parse error, so the text is read first.
+        # ParseFile would report a file it cannot read as a parse error, so the text is read first,
+        # decoded as Windows PowerShell 5.1 decodes a script: by its byte order mark, else as ANSI.
         $parseErrors = @()
         try {
-            $text = [IO.File]::ReadAllText($module)
+            $text = [IO.File]::ReadAllText($module, [Text.Encoding]::Default)
             $errors = $null
             $null = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$errors)
             $parseErrors = @($errors)
@@ -185,7 +186,7 @@ function Import-DeployModule {
             Write-Verbose "The module cannot be read to parse it: $($_.Exception.Message)"
         }
         $cause = if ($record.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::SecurityError) { "PowerShell's execution policy blocks it" }
-        elseif ($parseErrors.Count -gt 0) { 'it does not parse' }
+        elseif ($record.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ParserError -and $parseErrors.Count -gt 0) { 'it does not parse' }
         elseif ($code -eq 32 -or $code -eq 33) { 'it is open in another program' }
         elseif ($exception -is [UnauthorizedAccessException] -or $code -eq 5) { 'access is denied' }
         $because = if ($cause) { ". Cause: $cause" } else { '' }

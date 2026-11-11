@@ -266,25 +266,40 @@ Describe 'Deploy-PortableVM' {
     }
 
     It 'names the cause but no path when the clone''s module <Case>, and shows the message with -Verbose' -ForEach @(
-        @{ Case = 'does not parse'; Kind = 'parse'; Cause = '. Cause: it does not parse' }
-        @{ Case = 'is open in another program'; Kind = 'held'; Cause = '. Cause: it is open in another program' }
-        # Errors in the shape PowerShell gives for causes a test cannot make on its own.
-        @{ Case = 'may not be read'; Kind = 'mock'; Cause = '. Cause: access is denied'
+        @{ Case = 'does not parse'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $false; Failure = $null
+            Bytes = { [Text.Encoding]::ASCII.GetBytes("function {`r`n") } }
+        # Windows PowerShell 5.1 reads a script without a byte order mark as ANSI: there a dash in
+        # UTF-8 ends a string early, and the curly quotes of Windows-1252 make one.
+        @{ Case = 'does not parse as ANSI, although it parses as UTF-8'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $true; Failure = $null
+            Bytes = { (New-Object System.Text.UTF8Encoding $false).GetBytes("`$dash = `"a $([char]0x2014) b`"`r`n") } }
+        @{ Case = 'stops while it loads, although it does not parse as UTF-8'; Cause = ''; Held = $false; Ansi = $true; Failure = $null
+            Bytes = { [byte[]]([Text.Encoding]::ASCII.GetBytes('$m = ') + 0x93 + [Text.Encoding]::ASCII.GetBytes('a (b') + 0x94 + [Text.Encoding]::ASCII.GetBytes("`r`nthrow 'stopped while it loads'`r`n")) } }
+        @{ Case = 'is open in another program'; Cause = '. Cause: it is open in another program'; Held = $true; Ansi = $false; Failure = $null; Bytes = $null }
+        # Errors in the shape PowerShell gives, so that no test changes an ACL of the clone or the
+        # execution policy, or sets off antivirus software.
+        @{ Case = 'may not be read'; Cause = '. Cause: access is denied'; Held = $false; Ansi = $false; Bytes = $null
             Failure = { [Management.Automation.CommandNotFoundException]::new('X:\clone\src\PortableVM.psm1 may not be read.', [UnauthorizedAccessException]::new('Access is denied.')) } }
-        @{ Case = 'is refused by the execution policy'; Kind = 'mock'; Cause = '. Cause: PowerShell''s execution policy blocks it'
+        @{ Case = 'is refused by the execution policy'; Cause = '. Cause: PowerShell''s execution policy blocks it'; Held = $false; Ansi = $false; Bytes = $null
             Failure = { [Management.Automation.PSSecurityException]::new('X:\clone\src\PortableVM.psm1 is not signed.', [UnauthorizedAccessException]::new('Access is denied.')) } }
-        @{ Case = 'fails with a parse error although it parses'; Kind = 'mock'; Cause = ''
+        @{ Case = 'is refused by the execution policy and does not parse either'; Cause = '. Cause: PowerShell''s execution policy blocks it'; Held = $false; Ansi = $false
+            Bytes = { [Text.Encoding]::ASCII.GetBytes("function {`r`n") }
+            Failure = { [Management.Automation.PSSecurityException]::new('X:\clone\src\PortableVM.psm1 is not signed.', [UnauthorizedAccessException]::new('Access is denied.')) } }
+        @{ Case = 'fails with a parse error although it parses'; Cause = ''; Held = $false; Ansi = $false; Bytes = $null
             Failure = {
                 $extent = [Management.Automation.Language.Parser]::ParseInput('x', [ref]$null, [ref]$null).Extent
                 [Management.Automation.ParseException]::new([Management.Automation.Language.ParseError[]]@([Management.Automation.Language.ParseError]::new($extent, 'ContentBlocked', 'X:\clone\src\PortableVM.psm1 is blocked.')))
             } }
     ) {
+        if ($Ansi -and [Text.Encoding]::Default.CodePage -ne 1252) {
+            Set-ItResult -Skipped -Because 'the case needs Windows-1252 as the ANSI code page'
+            return
+        }
         $module = Join-Path $script:clone 'src\PortableVM.psm1'
         $script:failure = $null
         $holder = $null
-        if ($Kind -eq 'parse') { Write-TestFile -Path $module -Text "function {`r`n" }
-        if ($Kind -eq 'held') { $holder = [IO.File]::Open($module, 'Open', 'Read', 'None') }
-        if ($Kind -eq 'mock') {
+        if ($Bytes) { [IO.File]::WriteAllBytes($module, [byte[]](& $Bytes)) }
+        if ($Held) { $holder = [IO.File]::Open($module, 'Open', 'Read', 'None') }
+        if ($Failure) {
             $script:loadFailure = & $Failure
             Mock Import-Module { throw $script:loadFailure }
         }
