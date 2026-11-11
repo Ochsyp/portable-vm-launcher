@@ -359,7 +359,7 @@ Describe 'Deploy-PortableVM -MigrateSettings' {
         Get-TestTree -Root $script:target | Should -BeExactly $before
     }
 
-    It 'runs as a script and leaves out a path below -Target that an error quotes' {
+    It 'runs as a script and prints the cause of an error from Windows, not its path' {
         $tool = Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1'
         $held = [IO.File]::Open((Join-Path $script:target 'Launcher\settings.psd1'), 'Open', 'Read', 'None')
         try { $output = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $tool -Target $script:target -MigrateSettings 2>&1 | ForEach-Object { "$_" }) }
@@ -370,9 +370,15 @@ Describe 'Deploy-PortableVM -MigrateSettings' {
             return
         }
         $exitCode | Should -Be 1
-        $text = $output -join "`n"
-        $text | Should -Match 'Deploy-PortableVM: Launcher\\settings\.psd1 cannot be read: .*<a path below -Target, which -Verbose shows>'
-        $text.IndexOf($script:target, [StringComparison]::OrdinalIgnoreCase) | Should -Be -1
+        $output | Should -Contain 'Deploy-PortableVM: Launcher\settings.psd1 cannot be read: it cannot be opened, because it is open in another program.'
+        ($output -join "`n").IndexOf($script:target, [StringComparison]::OrdinalIgnoreCase) | Should -Be -1
+    }
+
+    It 'runs as a script and says so when the -Target folder does not exist, also when its name holds brackets' {
+        $tool = Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1'
+        $output = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $tool -Target (Join-Path $TestDrive 'no stick [1]') 2>&1 | ForEach-Object { "$_" })
+        $LASTEXITCODE | Should -Be 1
+        $output | Should -Contain 'Deploy-PortableVM: The -Target folder does not exist. Give the folder on the stick that holds the Launcher and LauncherData folders.'
     }
 
     It 'refuses <Case>, changing nothing' -ForEach @(
@@ -523,20 +529,40 @@ Describe 'Get-DeployVmProcess' {
     }
 }
 
-Describe 'Hide-DeployTargetPath' {
-    It 'leaves out a quoted path below -Target <Target> and keeps every other word: <Case>' -ForEach @(
-        @{ Case = 'a settings problem'; Target = 'X:\'; Message = "LauncherData\settings.psd1 has 1 problem:`n- VMwareVmx: must name a .vmx file below the folder that holds Launcher and LauncherData, without a drive, '.' or '..'"; Expected = $null }
-        @{ Case = 'a name problem'; Target = 'E:\'; Message = "- GuestName: must be 1 to 40 characters of text that shows"; Expected = $null }
-        @{ Case = 'a path in a .NET error'; Target = 'X:\'; Message = "Access to the path 'X:\VMware\a.vmdk.orig' is denied."; Expected = "Access to the path '<a path below -Target, which -Verbose shows>' is denied." }
-        @{ Case = 'a path in another case'; Target = 'X:\Stick'; Message = "Cannot rename because item at 'x:\stick\Launcher' does not exist."; Expected = "Cannot rename because item at '<a path below -Target, which -Verbose shows>' does not exist." }
-        @{ Case = 'an apostrophe in a name'; Target = 'X:\Stick'; Message = "The process cannot access the file 'X:\Stick\VMware\Ann's VM\a.vmdk' because it is being used by another process."; Expected = "The process cannot access the file '<a path below -Target, which -Verbose shows>' because it is being used by another process." }
-        @{ Case = 'a path in nested quotes'; Target = 'X:\Stick'; Message = 'Exception calling "ReadAllText" with "1" argument(s): "Could not find file ''X:\Stick\Start Old.cmd''."'; Expected = 'Exception calling "ReadAllText" with "1" argument(s): "Could not find file ''<a path below -Target, which -Verbose shows>''."' }
-        @{ Case = 'the folder itself'; Target = 'X:\Stick'; Message = "Cannot find path 'X:\Stick' because it does not exist."; Expected = "Cannot find path '<a path below -Target, which -Verbose shows>' because it does not exist." }
-        @{ Case = 'a folder beside it'; Target = 'X:\Stick'; Message = "Access to the path 'X:\Sticky\a' is denied."; Expected = $null }
-        @{ Case = 'a -Target with regex characters'; Target = 'Q:\st.ck [1] (a+b) $x'; Message = "Access to the path 'Q:\st.ck [1] (a+b) `$x\Launcher' is denied. Not 'Q:\stack [1] (a+b) `$x\Launcher'."; Expected = "Access to the path '<a path below -Target, which -Verbose shows>' is denied. Not 'Q:\stack [1] (a+b) `$x\Launcher'." }
+Describe 'Get-DeployCause' {
+    BeforeAll {
+        # Get-DeployCause asks the launcher's module for the cause of an error from Windows.
+        Import-Module (Join-Path $script:repoRoot 'src\PortableVM.psm1') -Force -Global
+        $script:cause = Join-Path $TestDrive "cause\Ann's VM (old)"
+        $null = New-Item -ItemType Directory -Path $script:cause -Force
+    }
+
+    It 'passes on a message this tool wrote' {
+        $record = try { throw 'The copy of PortableVM.psm1 does not match the clone.' } catch { $_ }
+        Get-DeployCause -ErrorRecord $record | Should -BeExactly 'The copy of PortableVM.psm1 does not match the clone.'
+    }
+
+    It 'gives the cause of an error from Windows without its path: <Case>' -ForEach @(
+        @{ Case = 'a file open in another program'; Cause = 'it is open in another program' }
+        @{ Case = 'a missing file'; Cause = 'it is missing' }
+        @{ Case = 'a move onto an existing file'; Cause = 'an item of that name exists already' }
     ) {
-        $want = if ($null -eq $Expected) { $Message } else { $Expected }
-        Hide-DeployTargetPath -Message $Message -Target $Target | Should -BeExactly $want
+        $file = Join-Path $script:cause 'stick.vmdk.orig'
+        Set-Content -LiteralPath $file -Value 'x'
+        $record = switch ($Case) {
+            'a file open in another program' {
+                $held = [IO.File]::Open($file, 'Open', 'Read', 'None')
+                try { try { $null = [IO.File]::ReadAllBytes($file) } catch { $_ } } finally { $held.Dispose() }
+            }
+            'a missing file' { try { $null = [IO.File]::ReadAllBytes((Join-Path $script:cause 'none.vmdk')) } catch { $_ } }
+            'a move onto an existing file' {
+                Set-Content -LiteralPath "$file.2" -Value 'y'
+                try { Move-Item -LiteralPath "$file.2" -Destination $file -ErrorAction Stop } catch { $_ }
+            }
+        }
+        $text = Get-DeployCause -ErrorRecord $record
+        $text | Should -BeExactly "$Cause (-Verbose shows the details)"
+        $text | Should -Not -Match 'Ann'
     }
 }
 

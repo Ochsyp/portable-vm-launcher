@@ -320,6 +320,14 @@ Describe 'Importing the settings' {
         $lines.Count | Should -Be 12
     }
 
+    It 'stops when the file is open in another program, naming the cause but no path' {
+        $path = Write-TestByte -Name 'held.psd1' -Bytes ([Text.Encoding]::ASCII.GetBytes('@{ SchemaVersion = 2 }'))
+        $held = [IO.File]::Open($path, 'Open', 'Read', 'None')
+        try { $message = try { $null = Import-PvmSetting -Path $path } catch { Get-PvmStopMessage -ErrorRecord $_ } }
+        finally { $held.Dispose() }
+        $message | Should -BeExactly 'LauncherData\settings.psd1 cannot be read: it cannot be opened, because it is open in another program.'
+    }
+
     It 'stops when the file is missing or cannot be read' {
         $message = try { $null = Import-PvmSetting -Path (Join-Path $TestDrive 'none.psd1') } catch { Get-PvmStopMessage -ErrorRecord $_ }
         $message | Should -BeExactly 'LauncherData\settings.psd1 is missing. Copy examples\settings.example.psd1 there and fill it in.'
@@ -336,6 +344,45 @@ Describe 'Importing the settings' {
         $settings = Import-PvmSetting -Path $path
         $settings['SavedStatePolicy'] | Should -BeExactly 'Ask'
         $settings['VmSectors'] | Should -BeOfType [long]
+    }
+}
+
+Describe 'Causes of errors from Windows' {
+    # Each message names a path the way a stick names its VM, so a cause that quoted it would show.
+    It 'names the cause of <Case> without the path' -ForEach @(
+        @{ Case = 'a file open in another program'; HResult = 0x80070020; Cause = 'it is open in another program' }
+        @{ Case = 'a locked part of a file'; HResult = 0x80070021; Cause = 'it is open in another program' }
+        @{ Case = 'a denied access'; HResult = 0x80070005; Cause = 'access is denied' }
+        @{ Case = 'a missing file'; HResult = 0x80070002; Cause = 'it is missing' }
+        @{ Case = 'a missing folder'; HResult = 0x80070003; Cause = 'it is missing' }
+        @{ Case = 'an existing file'; HResult = 0x80070050; Cause = 'an item of that name exists already' }
+        @{ Case = 'an existing folder'; HResult = 0x800700B7; Cause = 'an item of that name exists already' }
+        @{ Case = 'a full disk'; HResult = 0x80070070; Cause = 'the disk is full' }
+        @{ Case = 'a disk without space'; HResult = 0x80070027; Cause = 'the disk is full' }
+        @{ Case = 'a path that is too long'; HResult = 0x800700CE; Cause = 'a path is too long' }
+    ) {
+        $exception = [IO.IOException]::new("The file 'X:\Ann's VM\stick.vmdk' failed.", [int]$HResult)
+        $record = [Management.Automation.ErrorRecord]::new($exception, 'Test', 'NotSpecified', $null)
+        Get-PvmErrorCause -ErrorRecord $record | Should -BeExactly $Cause
+    }
+
+    It 'names the cause by the type of the error: <Type>' -ForEach @(
+        @{ Type = 'UnauthorizedAccessException'; Cause = 'access is denied' }
+        @{ Type = 'IO.FileNotFoundException'; Cause = 'it is missing' }
+        @{ Type = 'IO.DirectoryNotFoundException'; Cause = 'it is missing' }
+        @{ Type = 'Management.Automation.ItemNotFoundException'; Cause = 'it is missing' }
+        @{ Type = 'IO.PathTooLongException'; Cause = 'a path is too long' }
+        @{ Type = 'InvalidOperationException'; Cause = 'an error of type InvalidOperationException' }
+    ) {
+        $exception = New-Object -TypeName $Type -ArgumentList "The path 'X:\Ann's VM' failed."
+        $record = [Management.Automation.ErrorRecord]::new($exception, 'Test', 'NotSpecified', $null)
+        Get-PvmErrorCause -ErrorRecord $record | Should -BeExactly $Cause
+    }
+
+    It 'looks through the wrapper that PowerShell puts around an error of a .NET method' {
+        $record = try { $null = [IO.File]::ReadAllBytes((Join-Path $TestDrive "Ann's VM [1]\none.psd1")) } catch { $_ }
+        $record.Exception | Should -BeOfType ([Management.Automation.MethodInvocationException])
+        Get-PvmErrorCause -ErrorRecord $record | Should -BeExactly 'it is missing'
     }
 }
 

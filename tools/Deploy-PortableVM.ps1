@@ -29,8 +29,9 @@
 # deploy, or when a .cmd at -Target is in the way. A migration also refuses an old settings file
 # without a byte order mark whose values read differently as UTF-8 and as ANSI, and, when it
 # resumes, two settings files that differ. It deletes nothing, changes no VM file and names no file
-# from the stick in its output: a path below -Target in an error is left out, and -Verbose shows
-# it and the copies a migration moves. When a step fails it says what is left to fix by hand.
+# from the stick in its output: of an error from Windows or PowerShell, which can quote a path, it
+# prints only the cause, and -Verbose shows the message and the copies a migration moves. When a
+# step fails it says what is left to fix by hand.
 # -WhatIf runs the checks and prints the plan only. Exits 0 when done, 1 when it refused or failed.
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -151,6 +152,28 @@ function Import-DeployModule {
     param([Parameter(Mandatory)][string]$RepositoryPath)
     try { Import-Module -Name (Join-Path $RepositoryPath 'src\PortableVM.psm1') -Force -Global -ErrorAction Stop }
     catch { throw "The clone's src\PortableVM.psm1 cannot be loaded, so the settings cannot be checked: $($_.Exception.Message)" }
+}
+
+# Return whether the error $ErrorRecord carries a message this tool or the launcher's module wrote,
+# which names no file on the stick, rather than one from Windows or PowerShell, which can.
+function Test-DeployOwnMessage {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+    $exception = $ErrorRecord.Exception
+    $exception.GetType() -eq [System.Management.Automation.RuntimeException] -and $null -eq $exception.InnerException
+}
+
+# Return the reason for the error $ErrorRecord that a message of this tool can quote: its own text
+# when this tool or the module wrote it, else the cause without any path (Get-PvmErrorCause), since
+# the stick's folder and file names can be private. The full message goes to -Verbose.
+function Get-DeployCause {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+    Write-Verbose $ErrorRecord.Exception.Message
+    if (Test-DeployOwnMessage -ErrorRecord $ErrorRecord) { return $ErrorRecord.Exception.Message }
+    "$(Get-PvmErrorCause -ErrorRecord $ErrorRecord) (-Verbose shows the details)"
 }
 
 # Return whether the hashtables $Left and $Right hold the same keys, compared without case, with
@@ -377,7 +400,7 @@ function Get-DeployMigrationPlan {
         $text = Get-DeployLegacyText -Bytes ([IO.File]::ReadAllBytes($oldSettings))
         $old = (Get-PvmDataFileHashtable -Text $text).SafeGetValue()
     } catch {
-        $reason = $_.Exception.Message
+        $reason = Get-DeployCause -ErrorRecord $_
         if ($reason -like 'Launcher\settings.psd1 has no byte order mark*') { throw }
         throw "Launcher\settings.psd1 cannot be read, so nothing was changed: $reason."
     }
@@ -408,7 +431,7 @@ function Get-DeployMigrationPlan {
         }
     } else {
         try { $new = ConvertTo-PvmSchema2Text -Text $text -VmDisplayName $VmDisplayName -GuestName $GuestName }
-        catch { throw "Launcher\settings.psd1 cannot be turned into schema 2, so nothing was changed: $($_.Exception.Message)." }
+        catch { throw "Launcher\settings.psd1 cannot be turned into schema 2, so nothing was changed: $(Get-DeployCause -ErrorRecord $_)." }
         $bytes = if ($new -match '[^\x00-\x7F]') {
             [byte[]]((New-Object System.Text.UTF8Encoding $true).GetPreamble() + (New-Object System.Text.UTF8Encoding $false).GetBytes($new))
         } else {
@@ -538,7 +561,7 @@ function Invoke-PvmDeploy {
         $mode = 'Install'
     } elseif ($hasOldSettings) {
         try { $oldValues = Import-PvmDataFile -Path $oldSettings -Legacy }
-        catch { throw "Launcher\settings.psd1 cannot be read: $($_.Exception.Message)." }
+        catch { throw "Launcher\settings.psd1 cannot be read: $(Get-DeployCause -ErrorRecord $_)." }
         if (@($oldValues.Keys | Where-Object { "$_" -eq 'SchemaVersion' }).Count -gt 0) {
             throw 'Launcher\settings.psd1 holds schema 2 settings, but the launcher reads them from LauncherData\settings.psd1. Move the file there, then deploy again.'
         }
@@ -564,7 +587,7 @@ function Invoke-PvmDeploy {
 
     # The .cmd files are checked now, so that nothing they hold can stop the last step after the swap.
     try { $oldCmds = @(Find-DeployLauncherCmd -Folder $Target) }
-    catch { throw "A .cmd file at the target cannot be read, so the old launcher .cmd cannot be found: $($_.Exception.Message)" }
+    catch { throw "A .cmd file at the target cannot be read, so the old launcher .cmd cannot be found: $(Get-DeployCause -ErrorRecord $_)" }
     if ($mode -eq 'Install' -and $oldCmds.Count -gt 0) {
         throw 'A launcher .cmd is at the target, but there is no Launcher folder to keep it in. Move the .cmd files that start a launcher away first.'
     }
@@ -619,18 +642,18 @@ function Invoke-PvmDeploy {
         }
     } catch {
         $remove = if ($mode -eq 'Migrate') { "LauncherData.new, $leftovers" } else { $leftovers }
-        throw "Staging failed and nothing the launcher uses was changed. Remove $remove, then run the same command again: $($_.Exception.Message)"
+        throw "Staging failed and nothing the launcher uses was changed. Remove $remove, then run the same command again: $(Get-DeployCause -ErrorRecord $_)"
     }
 
     # The data first: until the code swap, the old launcher in Launcher keeps working with
     # Launcher\settings.psd1, which stays there.
     if ($mode -eq 'Migrate') {
         try { Rename-DeployItem -Path $dataStaged -NewName 'LauncherData' }
-        catch { throw "LauncherData.new could not become LauncherData, and nothing the launcher uses was changed. Remove LauncherData.new, $leftovers, then run the same command again: $($_.Exception.Message)" }
+        catch { throw "LauncherData.new could not become LauncherData, and nothing the launcher uses was changed. Remove LauncherData.new, $leftovers, then run the same command again: $(Get-DeployCause -ErrorRecord $_)" }
     }
     if ($plan) {
         try { Move-DeployLegacyData -Target $Target -Plan $plan }
-        catch { throw "The migration stopped part way, but the launcher in Launcher still works with Launcher\settings.psd1. Run the same command again to finish it: $($_.Exception.Message)" }
+        catch { throw "The migration stopped part way, but the launcher in Launcher still works with Launcher\settings.psd1. Run the same command again to finish it: $(Get-DeployCause -ErrorRecord $_)" }
     }
 
     if ($mode -eq 'Install') {
@@ -638,7 +661,7 @@ function Invoke-PvmDeploy {
             Rename-DeployItem -Path $staged -NewName 'Launcher'
             Rename-DeployItem -Path $cmdStaged -NewName $CmdName
         } catch {
-            throw "The launcher could not be put in place. Rename Launcher.new to Launcher and '$CmdName.new' to '$CmdName' if they are still there. $($_.Exception.Message)"
+            throw "The launcher could not be put in place. Rename Launcher.new to Launcher and '$CmdName.new' to '$CmdName' if they are still there. $(Get-DeployCause -ErrorRecord $_)"
         }
         $result.Applied = $true
         return $result
@@ -646,12 +669,12 @@ function Invoke-PvmDeploy {
     try {
         Rename-DeployItem -Path $launcher -NewName 'Launcher.previous'
     } catch {
-        throw "Launcher could not be renamed, so the stick's launcher is unchanged. A window, console or program probably has the Launcher folder or a file in it open: close it, remove $leftovers, then deploy again. $($_.Exception.Message)"
+        throw "Launcher could not be renamed, so the stick's launcher is unchanged. A window, console or program probably has the Launcher folder or a file in it open: close it, remove $leftovers, then deploy again. $(Get-DeployCause -ErrorRecord $_)"
     }
     try {
         Rename-DeployItem -Path $staged -NewName 'Launcher'
     } catch {
-        $reason = $_.Exception.Message
+        $reason = Get-DeployCause -ErrorRecord $_
         try {
             Rename-DeployItem -Path $previous -NewName 'Launcher'
         } catch {
@@ -663,27 +686,12 @@ function Invoke-PvmDeploy {
         foreach ($old in $oldCmds) { Move-Item -LiteralPath $old.FullName -Destination (Join-Path $previous $old.Name) }
         Rename-DeployItem -Path $cmdStaged -NewName $CmdName
     } catch {
-        throw "The new launcher is in Launcher, but its .cmd is not in place yet. Move the old launcher .cmd files at the stick's root into Launcher.previous, then rename '$CmdName.new' to '$CmdName'. $($_.Exception.Message)"
+        throw "The new launcher is in Launcher, but its .cmd is not in place yet. Move the old launcher .cmd files at the stick's root into Launcher.previous, then rename '$CmdName.new' to '$CmdName'. $(Get-DeployCause -ErrorRecord $_)"
     }
     $result.Applied = $true
     $result
 }
 
-# Return the error message $Message with every quoted path below the full path $Target, or $Target
-# itself, replaced by a placeholder, since the stick's folder and file names can be private. The
-# path ends at the quote that closes it: one followed by a blank, a punctuation mark or the end, so
-# an apostrophe in a name does not end it early. Text outside quotes stays as it is.
-function Hide-DeployTargetPath {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [Parameter(Mandatory)][AllowEmptyString()][string]$Message,
-        [Parameter(Mandatory)][string]$Target
-    )
-    $base = [regex]::Escape($Target.TrimEnd('\', '/'))
-    $pattern = "(?<=['""])$base(?:[\\/][^\r\n]*?)?(?=['""](?:[\s.,;:!?)]|$))"
-    [regex]::Replace($Message, $pattern, '<a path below -Target, which -Verbose shows>', 'IgnoreCase')
-}
 
 # Return the report lines for the deploy result $Result (Invoke-PvmDeploy): what was deployed, or
 # would be under -WhatIf, and what a migration moved. They name no file from the stick.
@@ -713,7 +721,9 @@ function Format-DeployReport {
 if ($MyInvocation.InvocationName -ne '.') {
     try {
         if (-not $Target) { throw 'Give -Target, the folder on the stick that holds the Launcher and LauncherData folders.' }
-        # A full path, so that every path an error quotes starts with it (Hide-DeployTargetPath).
+        # Convert-Path returns nothing for a missing folder whose name holds [ or ], so the folder
+        # is checked first.
+        if (-not (Test-Path -LiteralPath $Target -PathType Container)) { throw 'The -Target folder does not exist. Give the folder on the stick that holds the Launcher and LauncherData folders.' }
         $Target = Convert-Path -LiteralPath $Target
         # -WhatIf and -Confirm go to Invoke-PvmDeploy alone: left in effect for the whole script,
         # they also reach the modules PowerShell loads on the way, which then skip or ask about
@@ -729,11 +739,14 @@ if ($MyInvocation.InvocationName -ne '.') {
         foreach ($line in Format-DeployReport -Result $done) { Write-Output "Deploy-PortableVM: $line" }
         exit 0
     } catch {
+        # A message from Windows or PowerShell can quote a path on the stick, whose folder and file
+        # names can be private, so only its cause is printed; -Verbose shows the message.
         $message = $_.Exception.Message
-        Write-Verbose $message
-        # The stick's folder and file names can be private, so a path below -Target that an error
-        # quotes is left out; -Verbose above shows it.
-        if ($Target) { $message = Hide-DeployTargetPath -Message $message -Target $Target }
+        if (-not (Test-DeployOwnMessage -ErrorRecord $_)) {
+            Write-Verbose $message
+            $cause = if (Get-Command -Name Get-PvmErrorCause -ErrorAction SilentlyContinue) { Get-PvmErrorCause -ErrorRecord $_ } else { "an error of type $($_.Exception.GetType().Name)" }
+            $message = "the deploy stopped: $cause (-Verbose shows the details)."
+        }
         Write-Output "Deploy-PortableVM: $message"
         exit 1
     }

@@ -64,6 +64,31 @@ function Write-PvmLog {
     Add-Content -LiteralPath $Path -Value $line -WhatIf:$false -Confirm:$false
 }
 
+# Return a short cause for the error $ErrorRecord that quotes no path, for a message that must not
+# name a file on the stick: it is open in another program, access is denied, it is missing, an item
+# of that name exists already, the disk is full, a path is too long, else the type of the error.
+function Get-PvmErrorCause {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+    $exception = $ErrorRecord.Exception
+    if ($exception -is [System.Management.Automation.ActionPreferenceStopException] -and $null -ne $exception.ErrorRecord) { $exception = $exception.ErrorRecord.Exception }
+    while (($exception -is [System.Management.Automation.MethodInvocationException] -or $exception -is [System.Reflection.TargetInvocationException]) -and
+        $null -ne $exception.InnerException) {
+        $exception = $exception.InnerException
+    }
+    # The low word of the HRESULT is the Windows error code.
+    $code = $exception.HResult -band 0xFFFF
+    if ($code -eq 32 -or $code -eq 33) { return 'it is open in another program' }
+    if ($exception -is [UnauthorizedAccessException] -or $code -eq 5) { return 'access is denied' }
+    if ($exception -is [IO.FileNotFoundException] -or $exception -is [IO.DirectoryNotFoundException] -or
+        $exception -is [System.Management.Automation.ItemNotFoundException] -or $code -eq 2 -or $code -eq 3) { return 'it is missing' }
+    if ($code -eq 80 -or $code -eq 183) { return 'an item of that name exists already' }
+    if ($code -eq 39 -or $code -eq 112) { return 'the disk is full' }
+    if ($exception -is [IO.PathTooLongException] -or $code -eq 206) { return 'a path is too long' }
+    "an error of type $($exception.GetType().Name)"
+}
+
 # In a dry run ($Context.DryRun), log that a real start would stop here with $Message and carry
 # on with the checks; otherwise throw the stop.
 function Invoke-PvmStopUnlessDryRun {
@@ -511,10 +536,7 @@ function Import-PvmDataFile {
         [switch]$Legacy
     )
     try { $bytes = [IO.File]::ReadAllBytes($Path) }
-    catch {
-        $reason = if ($null -ne $_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }
-        throw "it cannot be opened ($reason)"
-    }
+    catch { throw "it cannot be opened, because $(Get-PvmErrorCause -ErrorRecord $_)" }
     $hashtable = Get-PvmDataFileHashtable -Text (ConvertFrom-PvmDataFileByte -Bytes $bytes -Legacy:$Legacy)
     try { $hashtable.SafeGetValue() }
     catch { throw 'a value is an expression; use plain text, numbers, $true, $false or $null' }
