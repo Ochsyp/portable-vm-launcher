@@ -325,12 +325,51 @@ Describe 'Static guards' {
         $parent.Name | Should -BeExactly 'Move-PvmOldLog'
     }
 
-    It 'end in the script''s one trap, with exit code 1, what no step of the script handles' {
+    It 'end in the script''s one trap, logged with its details and shown, with exit code 1, what no step of the script handles' {
         $traps = @((Get-SourceAst -Path $script:launcher).EndBlock.Traps | Where-Object { $_ })
         $traps.Count | Should -Be 1
         $last = $traps[0].Body.Statements[-1]
         $last | Should -BeOfType ([System.Management.Automation.Language.ExitStatementAst])
         $last.Pipeline.Extent.Text | Should -BeExactly '1'
+        $traps[0].Body.Statements[0].Extent.Text | Should -BeExactly '$script:AskingForRights = $false'
+        $commands = @($traps[0].Body.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true))
+        @($commands | Where-Object { $_.Extent.Text -ceq 'Add-StopLine -Message $message -ErrorRecord $_' }).Count | Should -Be 1
+        @($commands | Where-Object { $_.GetCommandName() -eq 'Show-Message' }).Count | Should -Be 1
+    }
+
+    It 'check the lock in the script before its administrator-rights block, and end the script there when another run holds it' {
+        $statements = @((Get-SourceAst -Path $script:launcher).EndBlock.Statements)
+        $texts = @($statements | ForEach-Object { $_.Extent.Text })
+        $request = @(0..($texts.Count - 1) | Where-Object { $texts[$_] -ceq '$busy = Invoke-RightsRequest' })
+        $identity = @(0..($texts.Count - 1) | Where-Object { $texts[$_] -clike '$identity = *' })
+        $request.Count | Should -Be 1
+        $identity.Count | Should -Be 1
+        $request[0] | Should -BeLessThan $identity[0]
+        $check = $statements[$request[0] + 1]
+        $check | Should -BeOfType ([System.Management.Automation.Language.IfStatementAst])
+        $check.Clauses[0].Item1.Extent.Text | Should -BeExactly '$null -ne $busy'
+        $end = $check.Clauses[0].Item2.Statements[-1]
+        $end | Should -BeOfType ([System.Management.Automation.Language.ExitStatementAst])
+        $end.Pipeline.Extent.Text | Should -BeExactly '$busy.ExitCode'
+    }
+
+    It 'append a log text in one write that other launcher processes cannot break up: <Function>' -ForEach @(
+        @{ File = 'src\PortableVM.psm1'; Function = 'Write-PvmLog' }
+        @{ File = 'src\Start-PortableVM.ps1'; Function = 'Add-LogLine' }
+    ) {
+        $name = $Function
+        $definition = (Get-SourceAst -Path (Join-Path $script:repoRoot $File)).Find({
+                $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq $name
+            }, $true)
+        $definition | Should -Not -BeNullOrEmpty
+        $members = @($definition.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
+        $opens = @($members | Where-Object { $_.Member.Extent.Text -eq 'new' -and $_.Expression.TypeName.FullName -eq 'IO.FileStream' })
+        $opens.Count | Should -Be 1
+        $opens[0].Arguments[1].Extent.Text | Should -BeExactly '[IO.FileMode]::Append'
+        $opens[0].Arguments[2].Extent.Text | Should -BeExactly '[Security.AccessControl.FileSystemRights]::AppendData'
+        $writes = @($members | Where-Object { $_.Member.Extent.Text -match '^(Write|WriteByte|BeginWrite|WriteAsync|Flush|(Append|Write)All(Text|Lines|Bytes))$' })
+        @($writes | ForEach-Object { $_.Extent.Text }) | Should -BeExactly @('$stream.Write($bytes, 0, $bytes.Length)')
+        Get-SourceCommand -Ast $definition | Where-Object { $_.Name -in 'Add-Content', 'Set-Content', 'Out-File', 'Tee-Object' } | Should -BeNullOrEmpty
     }
 
     It 'remove PVM_TEST in the script only at its top level, so that a test that calls one of its functions keeps it' {

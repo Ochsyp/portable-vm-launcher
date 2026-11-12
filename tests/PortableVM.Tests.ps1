@@ -1437,6 +1437,18 @@ Describe 'Single instance' {
         $script:releases[0] | Should -BeLike '----- End*: exit code ? -----'
     }
 
+    It 'notes after the End line when it cannot release the lock, and keeps the result' {
+        Mock -ModuleName PortableVM Invoke-PvmExitLock { throw 'no release' }
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+        $result.ExitCode | Should -Be 0
+        $result.Message | Should -BeExactly ''
+        $result.Icon | Should -BeExactly ''
+        $log = Get-TestLog -Path $script:stick.Log
+        $log[-2] | Should -BeExactly '----- End: exit code 0 -----'
+        $log[-1] | Should -BeExactly 'Note: the launcher could not release its lock (no release); Windows releases it when this process ends.'
+        Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
+    }
+
     It 'keeps the lock while it asks whether to resume' {
         Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"')
         $script:released = $false
@@ -1571,6 +1583,23 @@ Describe 'The lock''s mutex' {
         }
     }
 
+    It 'is busy when this process may not open it, as when an elevated run holds it' {
+        # A security descriptor that denies this user every right to the mutex, after its creation.
+        $security = [System.Security.AccessControl.MutexSecurity]::new()
+        $security.AddAccessRule([System.Security.AccessControl.MutexAccessRule]::new([System.Security.Principal.WindowsIdentity]::GetCurrent().User,
+                [System.Security.AccessControl.MutexRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Deny))
+        $created = $false
+        $holder = [System.Threading.Mutex]::new($false, $script:name, [ref]$created, $security)
+        try {
+            $created | Should -BeTrue
+            $lock = Enter-PvmMutex -Name $script:name
+            $lock.State | Should -BeExactly 'Busy'
+            $lock.Mutex | Should -BeNullOrEmpty
+        } finally {
+            $holder.Dispose()
+        }
+    }
+
     It 'is taken over when its holder ended without releasing it' {
         # The test's own handle keeps the mutex, which Windows then marks abandoned.
         $keep = [System.Threading.Mutex]::new($false, $script:name)
@@ -1601,6 +1630,13 @@ Describe 'Unexpected errors' {
         @{ Text = 'starting the launcher'; Releases = 0; Setup = { Mock -ModuleName PortableVM Invoke-PvmEnterLock { throw 'boom' } } }
         @{ Text = 'reading the settings'; Releases = 1; Setup = { Mock -ModuleName PortableVM Import-PvmSetting { throw 'boom' } } }
         @{ Text = 'finding the stick'; Releases = 1; Setup = { Mock -ModuleName PortableVM Invoke-PvmGetDisk { throw 'boom' } -ParameterFilter { $Number -eq 3 } } }
+        # Only the error of a missing drive letter becomes a stop; another error of Get-Partition does not.
+        @{ Text = 'finding the stick'; Releases = 1; Setup = {
+                Mock -ModuleName PortableVM Invoke-PvmGetPartition {
+                    throw ([System.Management.Automation.ErrorRecord]::new([Exception]::new('boom'), 'CmdletizationQuery_NotFound_DiskNumber,Get-Partition', 'ObjectNotFound', $null))
+                } -ParameterFilter { $DriveLetter -ceq $script:stick.Letter }
+            }
+        }
         @{ Text = 'checking this PC and the saved states'; Releases = 1; Setup = { Mock -ModuleName PortableVM Invoke-PvmGetDeviceGuard { throw 'boom' } } }
         @{ Text = 'checking for running VMs'; Releases = 1; Setup = { Mock -ModuleName PortableVM Invoke-PvmGetProcess { throw 'boom' } } }
         @{ Text = 'asking whether to resume the saved state'; Releases = 1; Setup = {
@@ -1631,7 +1667,7 @@ Describe 'Unexpected errors' {
         $log | Should -Contain "STOPPED: Unexpected error while ${Text}: boom"
         $detail = @($log | Where-Object { $_.StartsWith('Error detail: ') })
         $detail.Count | Should -BeGreaterOrEqual 1
-        @($detail | Where-Object { $_.EndsWith('RuntimeException: boom') }).Count | Should -BeGreaterOrEqual 1
+        @($detail | Where-Object { $_.EndsWith('Exception: boom') }).Count | Should -BeGreaterOrEqual 1
         @($log | Where-Object { $_.StartsWith('Error ID: ') }).Count | Should -Be 1
         $traces = @($log | Where-Object { $_.StartsWith('Error trace: ') }).Count
         $traces | Should -BeGreaterOrEqual 1
@@ -1753,6 +1789,12 @@ Describe 'Dry-run parity' {
             }
         }
         @{ Case = 'VMware .vmx without suspend.disabled'; Installed = @('VMware'); Change = @{}; Setup = { Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without 'suspend.disabled') } }
+        # A dry run carries on past its first stop, here to a later one; it returns the first.
+        @{ Case = 'VMware .vmx without suspend.disabled, and a descriptor without an extent'; Installed = @('VMware'); Change = @{}; Setup = {
+                Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without 'suspend.disabled')
+                Write-TestFile -Path $script:stick.VMwareDisk -Text 'createType="fullDevice"'
+            }
+        }
         @{ Case = 'VMware suspend answered Yes'; Installed = @('VMware'); Change = @{}; Setup = { Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"') } }
         @{ Case = 'VMware suspend with SavedStatePolicy Refuse'; Installed = @('VMware'); Change = @{ SavedStatePolicy = 'Refuse' }; Setup = { Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"') } }
         @{ Case = 'VirtualBox save answered Yes'; Installed = @('VirtualBox'); Change = @{}; Setup = {
@@ -1763,6 +1805,13 @@ Describe 'Dry-run parity' {
         @{ Case = 'VirtualBox while the VM is suspended in VMware'; Installed = @('VirtualBox'); Change = @{}; Setup = { Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"') } }
         @{ Case = 'VirtualBox open with another VM'; Installed = @('VirtualBox'); Change = @{}; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'VirtualBox.exe'; CommandLine = $null }) } }
         @{ Case = 'VirtualBox open and the VM running'; Installed = @('VirtualBox'); Change = @{}; Setup = {
+                $script:testProcesses = @([pscustomobject]@{ Name = 'VirtualBox.exe'; CommandLine = $null })
+                Mock -ModuleName PortableVM Invoke-PvmNative { [pscustomobject]@{ ExitCode = 0; Output = 'VMState="running"' } } -ParameterFilter { $ArgumentList[0] -eq 'showvminfo' }
+            }
+        }
+        # A dry run carries on past its first stop, here to a VM that runs already; it returns the stop.
+        @{ Case = 'VirtualBox while the VM is suspended in VMware, and VirtualBox open with the VM running'; Installed = @('VirtualBox'); Change = @{}; Setup = {
+                Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"')
                 $script:testProcesses = @([pscustomobject]@{ Name = 'VirtualBox.exe'; CommandLine = $null })
                 Mock -ModuleName PortableVM Invoke-PvmNative { [pscustomobject]@{ ExitCode = 0; Output = 'VMState="running"' } } -ParameterFilter { $ArgumentList[0] -eq 'showvminfo' }
             }

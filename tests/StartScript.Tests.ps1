@@ -54,10 +54,54 @@ Describe 'The script''s log lines' {
         }
     }
 
-    It 'are not written without LauncherData, and nothing is created' {
+    It 'are made as the module makes them under a culture with another time separator too' {
+        $culture = [Threading.Thread]::CurrentThread.CurrentCulture
+        try {
+            [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::new('fi-FI')
+            $time = [DateTimeOffset]::new(2026, 11, 12, 10, 15, 30, 123, [TimeSpan]::FromHours(1))
+            $time.ToString('HH:mm:ss') | Should -BeExactly '10.15.30'
+            Format-LogText -Time $time -ProcessId 4242 -Message 'x' | Should -BeExactly '2026-11-12T10:15:30.123+01:00 [4242]  x'
+        } finally {
+            [Threading.Thread]::CurrentThread.CurrentCulture = $culture
+        }
+    }
+
+    It 'are shown on the console but not written without LauncherData, and nothing is created' {
         Remove-Item -LiteralPath (Join-Path $script:stickRoot 'LauncherData') -Recurse
         Add-LogLine -Message 'x' | Should -BeExactly ''
         Join-Path $script:stickRoot 'LauncherData' | Should -Not -Exist
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { "$Object" -like '*  x' }
+    }
+
+    It 'are written in ANSI, as the module writes them' {
+        Add-LogLine -Message "caf$([char]0xE9)" | Should -BeExactly ''
+        $bytes = [IO.File]::ReadAllBytes($script:log)
+        $expected = [Text.Encoding]::Default.GetBytes("caf$([char]0xE9)`r`n")
+        [Convert]::ToBase64String($bytes, $bytes.Length - $expected.Length, $expected.Length) | Should -BeExactly ([Convert]::ToBase64String($expected))
+    }
+
+    It 'name the cause of a failed write as the module does: <Case>' -ForEach @(
+        @{ Case = 'open in another program'; HResult = 0x80070020 }
+        @{ Case = 'locked'; HResult = 0x80070021 }
+        @{ Case = 'denied'; HResult = 0x80070005 }
+        @{ Case = 'missing file'; HResult = 0x80070002 }
+        @{ Case = 'missing folder'; HResult = 0x80070003 }
+        @{ Case = 'existing file'; HResult = 0x80070050 }
+        @{ Case = 'existing item'; HResult = 0x800700B7 }
+        @{ Case = 'full disk'; HResult = 0x80070070 }
+        @{ Case = 'disk without space'; HResult = 0x80070027 }
+        @{ Case = 'path too long'; HResult = 0x800700CE }
+        @{ Case = 'write-protected'; HResult = 0x80070013 }
+        @{ Case = 'not ready'; HResult = 0x80070015 }
+        @{ Case = 'not connected'; HResult = 0x8007048F }
+        @{ Case = 'CRC error'; HResult = 0x80070017 }
+        @{ Case = 'device error'; HResult = 0x8007045D }
+        @{ Case = 'no access for the system'; HResult = 0x80070780 }
+        @{ Case = 'not from Windows'; HResult = 0x80131620 }
+    ) {
+        $exception = [IO.IOException]::new("The file 'X:\Ann's VM\launcher.log' failed.", [int]$HResult)
+        $record = [System.Management.Automation.ErrorRecord]::new($exception, 'Test', 'NotSpecified', $null)
+        Get-ErrorCause -Exception $exception | Should -BeExactly (Get-PvmErrorCause -ErrorRecord $record)
     }
 
     It 'are appended with the prefix and this process''s ID, one per line of the message, creating the logs folder' {
@@ -68,12 +112,12 @@ Describe 'The script''s log lines' {
         $lines[1] | Should -Match ('\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d \[' + $PID + '\]  b\z')
     }
 
-    It 'return why they could not be written, without throwing' {
+    It 'return the cause, without a path, of why they could not be written, without throwing' {
         $null = Add-LogLine -Message 'first'
         $holder = [IO.File]::Open($script:log, 'Open', 'Read', 'Read')
         try { $reason = Add-LogLine -Message 'second' }
         finally { $holder.Dispose() }
-        $reason | Should -Not -BeNullOrEmpty
+        $reason | Should -BeExactly 'it is open in another program'
         @(Get-TestLog) | Should -BeExactly @('first')
     }
 
@@ -118,7 +162,7 @@ Describe 'The warning of the rights request' {
             $holder.Dispose()
         }
         Should -Invoke Show-Dialog -Times 1 -Exactly -ParameterFilter {
-            $Message -like "$script:warning`n`nThe launcher could not write this message to its log, LauncherData\logs\launcher.log: *"
+            $Message -ceq "$script:warning`n`nThe launcher could not write this message to its log, LauncherData\logs\launcher.log, because it is open in another program."
         }
     }
 
@@ -185,9 +229,27 @@ Describe 'The lock check before the prompt' {
         # Only a unique Local\ name, never the launcher's own lock.
         $name = "Local\PortableVM-Test-$([guid]::NewGuid())"
         Test-LockHeld -Name $name | Should -BeFalse
+        # The check created no mutex of that name.
+        $none = $null
+        [System.Threading.Mutex]::TryOpenExisting($name, [ref]$none) | Should -BeFalse
         $mutex = [System.Threading.Mutex]::new($false, $name)
         try { Test-LockHeld -Name $name | Should -BeTrue }
         finally { $mutex.Dispose() }
+    }
+
+    It 'finds a lock that this process may not open, as when an elevated run holds it' {
+        $name = "Local\PortableVM-Test-$([guid]::NewGuid())"
+        $security = [System.Security.AccessControl.MutexSecurity]::new()
+        $security.AddAccessRule([System.Security.AccessControl.MutexAccessRule]::new([System.Security.Principal.WindowsIdentity]::GetCurrent().User,
+                [System.Security.AccessControl.MutexRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Deny))
+        $created = $false
+        $mutex = [System.Threading.Mutex]::new($false, $name, [ref]$created, $security)
+        try {
+            $created | Should -BeTrue
+            Test-LockHeld -Name $name | Should -BeTrue
+        } finally {
+            $mutex.Dispose()
+        }
     }
 }
 
@@ -250,7 +312,7 @@ Describe 'The launcher run' {
         $holder = [IO.File]::Open($script:log, 'Open', 'Read', 'Read')
         try { $result = Invoke-Launcher }
         finally { $holder.Dispose() }
-        $result.Message | Should -BeLike "Unexpected error while loading PortableVM.psm1: no module`n`nThe launcher could not write this message to its log, LauncherData\logs\launcher.log: *"
+        $result.Message | Should -BeExactly "Unexpected error while loading PortableVM.psm1: no module`n`nThe launcher could not write this message to its log, LauncherData\logs\launcher.log, because it is open in another program."
     }
 
     It 'names the step when the launcher fails' {

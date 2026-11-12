@@ -6,8 +6,8 @@ portable-vm-launcher has a single maintainer.
 
 Report a vulnerability privately through the repository's Security tab (*Report a
 vulnerability*). Do not open a public issue for it. Never paste a real `settings.psd1`,
-`launcher.log`, `.vmx`, `.vbox` or `VirtualBox.xml` into issues, pull requests or commits:
-they identify one stick and the PCs it was used on.
+`launcher.log`, `launcher-*.log`, `.vmx`, `.vbox` or `VirtualBox.xml` into issues, pull requests
+or commits: they identify one stick and the PCs it was used on.
 
 ## Trust model
 

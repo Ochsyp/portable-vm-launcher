@@ -17,8 +17,9 @@
   The checks and start steps are in PortableVM.psm1 next to this script.
   Settings: ..\LauncherData\settings.psd1. Log: ..\LauncherData\logs\launcher.log, as the
   README's Log section describes it.
-  -DryRun takes a real start's decisions and logs what would change, without changing or
-  starting anything. It needs administrator rights, as a real start has them.
+  -DryRun takes a real start's decisions and logs what would change, without changing a VM file
+  or starting anything; it adds to the log and may move a full or old-format log aside. It needs
+  administrator rights, as a real start has them.
 #>
 # Show-Dialog and Show-Question load System.Windows.Forms with Add-Type before they use the
 # types, which the analyzer's compatibility profile cannot see: it lists only the assemblies that
@@ -42,15 +43,40 @@ function Format-LogText([DateTimeOffset]$Time, [int]$ProcessId, [string]$Message
     (@($Message -split '\r\n|\r|\n') | ForEach-Object { $prefix + $_ }) -join "`r`n"
 }
 
-# Append $Message in the log's format to LauncherData\logs\launcher.log beside the Launcher
-# folder, in one write as Write-PvmLog does, creating the logs folder, and show it on the console.
-# Returns '' when the text is written, or when there is no LauncherData and so no log; else the
-# reason it could not be written. It never throws.
+# Return the cause of the error $Exception without its path, in the words of Get-PvmErrorCause in
+# the module, which is not loaded when the script logs before it asks for administrator rights.
+function Get-ErrorCause([Exception]$Exception) {
+    $code = if (($Exception.HResult -band 0xFFFF0000) -eq 0x80070000) { $Exception.HResult -band 0xFFFF } else { 0 }
+    if ($code -eq 32 -or $code -eq 33) { return 'it is open in another program' }
+    if ($Exception -is [UnauthorizedAccessException] -or $code -eq 5) { return 'access is denied' }
+    if ($Exception -is [IO.FileNotFoundException] -or $Exception -is [IO.DirectoryNotFoundException] -or $code -eq 2 -or $code -eq 3) { return 'it is missing' }
+    if ($code -eq 80 -or $code -eq 183) { return 'an item of that name exists already' }
+    if ($code -eq 39 -or $code -eq 112) { return 'the disk is full' }
+    if ($Exception -is [IO.PathTooLongException] -or $code -eq 206) { return 'a path is too long' }
+    if ($code -eq 19) { return 'the drive is write-protected' }
+    if ($code -eq 21) { return 'the drive is not ready' }
+    if ($code -eq 1167) { return 'the drive is not connected' }
+    if (@(23, 31, 121, 483, 1117, 1392) -contains $code) { return 'the drive reported a read or write error' }
+    if ($code -eq 1920) { return 'Windows cannot access it' }
+    "an error of type $($Exception.GetType().Name)"
+}
+
+# Return $Message, followed after a blank line by the note that it could not be logged when
+# $Problem gives the cause.
+function Add-LogNote([string]$Message, [string]$Problem) {
+    if (-not $Problem) { return $Message }
+    "$Message`n`nThe launcher could not write this message to its log, LauncherData\logs\launcher.log, because $Problem."
+}
+
+# Show $Message in the log's format on the console and append it to
+# LauncherData\logs\launcher.log beside the Launcher folder, in one write as Write-PvmLog does,
+# creating the logs folder. Returns '' when the text is written, or when there is no LauncherData
+# and so no log; else the cause, without a path, of why it could not be written. It never throws.
 function Add-LogLine([string]$Message) {
-    $data = Join-Path (Split-Path $Here) 'LauncherData'
-    if (-not (Test-Path -LiteralPath $data -PathType Container)) { return '' }
     $text = Format-LogText -Time ([DateTimeOffset]::Now) -ProcessId $PID -Message $Message
     Write-Host $text
+    $data = Join-Path (Split-Path $Here) 'LauncherData'
+    if (-not (Test-Path -LiteralPath $data -PathType Container)) { return '' }
     try {
         $logs = Join-Path $data 'logs'
         $null = [IO.Directory]::CreateDirectory($logs)
@@ -64,7 +90,7 @@ function Add-LogLine([string]$Message) {
         $exception = $_.Exception
         while ($exception -is [System.Management.Automation.MethodInvocationException] -and $null -ne $exception.InnerException) { $exception = $exception.InnerException }
         Write-Host "launcher.log could not be written: $($exception.Message)"
-        $exception.Message
+        Get-ErrorCause -Exception $exception
     }
 }
 
@@ -109,8 +135,7 @@ function Show-Message([string]$Message, [string]$Icon, [string]$Caption) {
     if ($script:AskingForRights) {
         $script:AskingForRights = $false
         $record = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_ } else { $null }
-        $problem = Add-StopLine -Message $Message -ErrorRecord $record
-        if ($problem) { $Message += "`n`nThe launcher could not write this message to its log, LauncherData\logs\launcher.log: $problem" }
+        $Message = Add-LogNote -Message $Message -Problem (Add-StopLine -Message $Message -ErrorRecord $record)
     }
     if ($DryRun) { return }
     Show-Dialog -Message $Message -Icon $Icon -Caption $Caption
@@ -156,8 +181,7 @@ function Invoke-RightsRequest {
     if ($DryRun -or (Test-Administrator)) { return }
     if (Test-LockHeld -Name 'Global\PortableVM-Launcher') {
         $message = 'Another run of the launcher is in progress on this PC: a start of the VM or a dry run. Wait until it has finished, then start the VM again if it is not running. Nothing was started.'
-        $problem = Add-StopLine -Message $message
-        if ($problem) { $message += "`n`nThe launcher could not write this message to its log, LauncherData\logs\launcher.log: $problem" }
+        $message = Add-LogNote -Message $message -Problem (Add-StopLine -Message $message)
         return [pscustomobject]@{ ExitCode = 1; Message = $message; Icon = 'Error'; Caption = 'Portable VM' }
     }
     $null = Add-LogLine -Message 'Asking for administrator rights'
@@ -169,8 +193,7 @@ function Invoke-RightsRequest {
 trap {
     $script:AskingForRights = $false
     $message = "Unexpected error in Start-PortableVM.ps1: $($_.Exception.Message)"
-    $problem = Add-StopLine -Message $message -ErrorRecord $_
-    if ($problem) { $message += "`n`nThe launcher could not write this message to its log, LauncherData\logs\launcher.log: $problem" }
+    $message = Add-LogNote -Message $message -Problem (Add-StopLine -Message $message -ErrorRecord $_)
     try { Show-Message -Message $message -Icon 'Error' -Caption '' }
     catch { Write-Host "The message could not be shown: $($_.Exception.Message)" }
     exit 1
@@ -217,8 +240,7 @@ function Show-Question([string]$Message, [string]$Caption) {
 # logging it with its details: exit code 1 and "Unexpected error while <Step>: <message>".
 function Get-UnexpectedResult([string]$Step, [System.Management.Automation.ErrorRecord]$ErrorRecord) {
     $message = "Unexpected error while ${Step}: $($ErrorRecord.Exception.Message)"
-    $problem = Add-StopLine -Message $message -ErrorRecord $ErrorRecord
-    if ($problem) { $message += "`n`nThe launcher could not write this message to its log, LauncherData\logs\launcher.log: $problem" }
+    $message = Add-LogNote -Message $message -Problem (Add-StopLine -Message $message -ErrorRecord $ErrorRecord)
     [pscustomobject]@{ ExitCode = 1; Message = $message; Icon = 'Error'; Caption = 'Portable VM' }
 }
 

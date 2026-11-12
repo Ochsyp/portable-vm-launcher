@@ -100,12 +100,22 @@ A. On a scratch copy on the PC, never the stick: copy `src\Start-PortableVM.ps1`
    3. Hold `Global\PortableVM-Launcher` in an elevated PowerShell
       (`$m = [System.Threading.Mutex]::new($false, 'Global\PortableVM-Launcher'); $m.WaitOne(0)`).
       Then the scratch script from a normal PowerShell shows the busy message without a UAC
-      prompt and exits with 1, and an elevated scratch dry run stops as busy. After
-      `$m.ReleaseMutex(); $m.Dispose()` the dry run stops at the missing settings again.
+      prompt and exits with 1, and an elevated scratch dry run stops as busy. Start that dry run
+      as a new process (`powershell -NoProfile -ExecutionPolicy Bypass -File ... -DryRun`), never
+      in the PowerShell that holds the mutex: a thread may take a mutex it holds again, so there
+      the dry run would not be busy. After `$m.ReleaseMutex(); $m.Dispose()` the dry run stops at
+      the missing settings again.
    4. A scratch dry run from a normal PowerShell stops with "A dry run needs administrator
       rights" and exit code 1, without a UAC prompt.
    5. With the scratch `launcher.log` set read-only, an elevated scratch dry run stops with "The
       launcher cannot write its log ..." and exit code 1, and the file stays unchanged.
+   6. In an elevated PowerShell, keep a handle to the lock without taking it
+      (`$k = [System.Threading.Mutex]::new($false, 'Global\PortableVM-Launcher')`), and let a new
+      process take it and end without releasing it
+      (`powershell -NoProfile -Command "$m = [System.Threading.Mutex]::new($false, 'Global\PortableVM-Launcher'); $null = $m.WaitOne(0)"`).
+      The next elevated scratch dry run, as a new process, logs that an earlier run ended without
+      releasing the lock and that it took the lock over, then stops at the missing settings.
+      `$k.Dispose()` ends the check.
 B. On the stick, from an elevated PowerShell, with VirtualBox closed for a minute before:
    1. With the phase 3 launcher still on the stick, copy the config text files outside the
       repository, run the inventory, run a dry run in each hypervisor (set `Hypervisor` for the
@@ -117,8 +127,8 @@ B. On the stick, from an elevated PowerShell, with VirtualBox closed for a minut
       Every line of the new log has the new prefix, with one process ID per run. After dropping
       the prefixes and the `Timings:` lines, each run's lines equal those of step 1 apart from the
       version line, that note, the End line and a wait line, if VirtualBox's background service
-      ran. The exit code is 0, or 1 exactly when a "would stop here" line is there. `Launcher`
-      matches its `SHA256SUMS`, and no VM config file changed.
+      ran. The exit code is 1 exactly when a "would stop here" or `STOPPED:` line is there, else
+      0. `Launcher` matches its `SHA256SUMS`, and no VM config file changed.
    4. A dry run from a normal PowerShell logs only its start and version lines, the stop for
       missing administrator rights, `Timings:` and the End line with exit code 1.
    5. Run the inventory again: every answer as in step 1.

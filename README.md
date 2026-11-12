@@ -52,16 +52,20 @@ launcher rewrites a VM file for the first time, it keeps that first version belo
 opening it by mistake reaches no disk.
 
 `-DryRun` takes the decisions of a real start and logs what would change, without changing a VM
-file or starting anything. It still adds its lines to the log and may move a full log aside. It
-needs administrator rights, as a real start has them, and stops without them, so run it from an
-elevated PowerShell, with `X:` as the stick's Data partition:
+file or starting anything. It still adds its lines to the log and may move a full or old-format
+log aside (see [Log](#log)). It needs administrator rights, as a real start has them, and stops
+without them, so run it from an elevated PowerShell, with `X:` as the stick's Data partition:
 
 ```text
 powershell -NoProfile -ExecutionPolicy Bypass -File X:\Launcher\Start-PortableVM.ps1 -DryRun
 ```
 
 Where a real start would stop, a dry run logs `DRY RUN - a real start would stop here: ...`,
-carries on with the other checks, and exits with 1 and the first such message. It does not ask
+carries on with the other checks, and exits with 1 and the first such message. A stop that
+leaves nothing to check after it, such as settings with problems, another disk at the drive
+letter, a missing hypervisor or another run in progress, ends a dry run with a `STOPPED:` line as
+it ends a real start; after an earlier would-stop line, the dry run still exits with that line's
+message. A dry run exits with 1 exactly when its log has such a line. It does not ask
 whether to resume a saved state; it logs that a real start would ask. It does not ask VBoxManage
 for the VM list or the VM's state after it has checked the files, since that would start
 VirtualBox's background service with the stick's files. While that service runs, it waits for it
@@ -114,12 +118,14 @@ wrote it:
   has the prefix.
 - A run starts with `----- Start VM -----`, or `----- Start VM (dry run) -----`, and ends with a
   `Timings:` line, which gives each step's duration in milliseconds, and `----- End: exit code N
-  -----`. A run without its End line was ended before it finished. Lines in which a dry run
-  differs begin with `DRY RUN - `.
+  -----`, or `----- End (dry run): exit code N -----`. A run without its End line was ended
+  before it finished. Lines in which a dry run differs begin with `DRY RUN - `.
 - Before Windows asks for administrator rights, the launcher logs `Asking for administrator
   rights`; the elevated run follows under another process ID. A declined or failed request logs a
-  `STOPPED:` line with `Error detail:` lines. When the request line is the last line, the elevated
-  launcher did not run, and an elevated dry run shows why.
+  `STOPPED:` line with `Error detail:` lines. When the request line is the last line of
+  `launcher.log`, the elevated launcher did not run, and an elevated dry run shows why. A log
+  that was moved aside can end with the request line of the run that moved it; that run's lines
+  start the new `launcher.log`.
 - An unexpected error adds `Error detail:`, `Error ID:` and `Error trace:` lines, which can name
   paths on the stick.
 - When `launcher.log` holds 1 MiB or more, or its first line is in the format of a launcher before
@@ -192,8 +198,8 @@ still holds the old settings file, so the old launcher finds it; `Start VM.cmd` 
 What a stick, a script or a user may rely on between versions:
 
 - `Start VM.cmd` at the stick folder starts the launcher; `Launcher\Start-PortableVM.ps1
-  -DryRun` takes a real start's decisions without changing or starting anything, and needs
-  administrator rights.
+  -DryRun` takes a real start's decisions without changing a VM file or starting anything,
+  writing only its log, and needs administrator rights.
 - While a start or a dry run runs, the launcher holds the named mutex
   `Global\PortableVM-Launcher`.
 - Log lines start with the prefix that *Log* describes; the message follows the first two

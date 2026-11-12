@@ -90,8 +90,9 @@ All notable changes to this project are listed here. The format follows
 - `tests\StartScript.Tests.ps1` for the script's own functions; a dry-run parity table that runs
   each case as a real start and as a dry run and compares their decisions; Repo checks that the
   module branches on `-DryRun` only where it must, keeps the mutex and the rights check in their
-  helpers, deletes nothing and moves only the log, and that the script ends unhandled errors in a
-  trap.
+  helpers, deletes nothing and moves only the log, that the module and the script append each log
+  text in one write, and that the script checks the lock before its administrator-rights block
+  and ends unhandled errors in a trap that logs and shows them.
 
 ### Changed
 
