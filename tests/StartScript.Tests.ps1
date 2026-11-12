@@ -48,7 +48,7 @@ Describe 'The script''s log lines' {
     It 'are made as the module makes them' {
         foreach ($offset in 1, -5) {
             $time = [DateTimeOffset]::new(2026, 11, 12, 10, 15, 30, 123, [TimeSpan]::FromHours($offset))
-            foreach ($message in 'one', "one`ntwo", '') {
+            foreach ($message in 'one', "one`ntwo", "a`r`nb`rc", '') {
                 Format-LogText -Time $time -ProcessId 4242 -Message $message | Should -BeExactly (Format-PvmLogText -Time $time -ProcessId 4242 -Message $message)
             }
         }
@@ -112,6 +112,19 @@ Describe 'The script''s log lines' {
         $lines[1] | Should -Match ('\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d \[' + $PID + '\]  b\z')
     }
 
+    It 'name a missing part of a long path as the module does: <Case>' -ForEach @(
+        @{ Case = 'a file of 260 characters'; Length = 260; Limit = 260; HResult = 0x80070003; Cause = 'a path is too long' }
+        @{ Case = 'a file of 259 characters'; Length = 259; Limit = 260; HResult = 0x80070003; Cause = 'it is missing' }
+        @{ Case = 'a folder of 248 characters'; Length = 248; Limit = 248; HResult = 0x80070003; Cause = 'a path is too long' }
+        @{ Case = 'a long file held by another program'; Length = 300; Limit = 260; HResult = 0x80070020; Cause = 'it is open in another program' }
+    ) {
+        $exception = [IO.IOException]::new('x', [int]$HResult)
+        $record = [System.Management.Automation.ErrorRecord]::new($exception, 'Test', 'NotSpecified', $null)
+        $path = 'X:\' + 'a' * ($Length - 3)
+        Get-PathCause -Exception $exception -Path $path -Limit $Limit | Should -BeExactly $Cause
+        Get-PvmPathCause -Path $path -Limit $Limit -ErrorRecord $record | Should -BeExactly $Cause
+    }
+
     It 'are appended with their lines together while another writer holds the log open, as the module''s are' {
         $null = [IO.Directory]::CreateDirectory((Split-Path $script:log))
         $other = [IO.FileStream]::new($script:log, [IO.FileMode]::Append, [Security.AccessControl.FileSystemRights]::AppendData,
@@ -142,7 +155,12 @@ Describe 'The script''s log lines' {
     It 'describe an error as the module does' {
         $missing = try { $null = [IO.File]::ReadAllText((Join-Path $TestDrive 'none\x.txt')) } catch { $_ }
         $thrown = try { throw 'boom' } catch { $_ }
-        foreach ($record in $missing, $thrown) {
+        # Five nested exceptions, the outer one with a message on two lines.
+        $exception = [Exception]::new('level 5')
+        foreach ($level in 4, 3, 2) { $exception = [Exception]::new("level $level", $exception) }
+        $exception = [Exception]::new("level 1`r`n  second line", $exception)
+        $nested = [System.Management.Automation.ErrorRecord]::new($exception, 'Test', 'NotSpecified', $null)
+        foreach ($record in $missing, $thrown, $nested) {
             @(Get-ErrorDetail -ErrorRecord $record) | Should -BeExactly @(Format-PvmErrorDetail -ErrorRecord $record)
         }
     }
@@ -295,6 +313,14 @@ Describe 'The result''s message' {
         Should -Invoke Show-Message -Times 1 -Exactly -ParameterFilter { $Message -ceq 'm' -and $Icon -eq 'Information' -and $Caption -ceq 'c' }
     }
 
+    It 'is not shown when the result has none, and nothing is logged' {
+        Mock Show-Message {}
+        $result = Show-Result -Result ([pscustomobject]@{ ExitCode = 0; Message = ''; Icon = ''; Caption = 'Portable VM' })
+        $result.ExitCode | Should -Be 0
+        Should -Invoke Show-Message -Times 0 -Exactly
+        Test-Path -LiteralPath $script:log | Should -BeFalse
+    }
+
     It 'is logged as an unexpected error with exit code 1 when its dialog fails' {
         Mock Show-Message { throw 'no desktop' }
         $result = Show-Result -Result ([pscustomobject]@{ ExitCode = 0; Message = 'm'; Icon = 'Information'; Caption = 'c' })
@@ -329,6 +355,8 @@ Describe 'The launcher run' {
         $result = Invoke-Launcher
         $result.ExitCode | Should -Be 1
         $result.Message | Should -BeLike 'Unexpected error while loading PortableVM.psm1: *'
+        $result.Icon | Should -BeExactly 'Error'
+        $result.Caption | Should -BeExactly 'Portable VM'
         $lines = Get-TestLog
         $lines[0] | Should -BeLike 'STOPPED: Unexpected error while loading PortableVM.psm1: *'
         @($lines | Where-Object { $_ -like 'Error detail: *' }).Count | Should -BeGreaterOrEqual 1

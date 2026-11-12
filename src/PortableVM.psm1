@@ -96,7 +96,7 @@ function Format-PvmLogText {
     (@($Message -split '\r\n|\r|\n') | ForEach-Object { $prefix + $_ }) -join "`r`n"
 }
 
-# Return the cause, in Get-PvmErrorCause's words, of the first log write of this run that failed,
+# Return the cause, in Get-PvmPathCause's words, of the first log write of this run that failed,
 # or '' while every write succeeded. Invoke-PortableVM clears it when a run starts.
 function Get-PvmLogProblem {
     [CmdletBinding()]
@@ -127,7 +127,7 @@ function Write-PvmLog {
         finally { $stream.Dispose() }
     } catch {
         if (-not (Get-PvmLogProblem)) {
-            $script:PvmLogProblem = Get-PvmErrorCause -ErrorRecord $_
+            $script:PvmLogProblem = Get-PvmPathCause -Path $Path -Limit 260 -ErrorRecord $_
             Write-Host "launcher.log could not be written: $script:PvmLogProblem"
         }
     }
@@ -168,6 +168,23 @@ function Get-PvmErrorCause {
     if (@(23, 31, 121, 483, 1117, 1392) -contains $code) { return 'the drive reported a read or write error' }
     if ($code -eq 1920) { return 'Windows cannot access it' }
     "an error of type $($exception.GetType().Name)"
+}
+
+# Return the cause of the error $ErrorRecord of a write to the file or folder $Path, as
+# Get-PvmErrorCause words it, but 'a path is too long' when it says 'it is missing' and $Path has
+# $Limit characters or more: without long-path support, Windows names a missing part of a path of
+# 260 characters or more for a file, and of 248 or more for a folder.
+function Get-PvmPathCause {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][int]$Limit,
+        [Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+    $cause = Get-PvmErrorCause -ErrorRecord $ErrorRecord
+    if ($cause -eq 'it is missing' -and $Path.Length -ge $Limit) { return 'a path is too long' }
+    $cause
 }
 
 # Return the message of the innermost error in $ErrorRecord that PowerShell did not add, below an
@@ -525,7 +542,7 @@ function Test-PvmLogFormat {
 # Move the log file $Path aside in its folder as <name>-<Time as yyyyMMdd-HHmmss><extension> when
 # it holds $MaxBytes or more, or when it starts with a line in another format (Test-PvmLogFormat),
 # as the log of a launcher before phase 4 does. Returns $null when there is nothing to move, else
-# Name, the new file name, or Problem, the cause in Get-PvmErrorCause's words when the move failed.
+# Name, the new file name, or Problem, the cause in Get-PvmPathCause's words when the move failed.
 # It never throws, and it never replaces a file: a move onto a name that exists fails.
 function Move-PvmOldLog {
     [CmdletBinding()]
@@ -535,15 +552,17 @@ function Move-PvmOldLog {
         [Parameter(Mandatory)][DateTimeOffset]$Time,
         [int64]$MaxBytes = 1MB
     )
+    $target = $Path
     try {
         $file = [IO.FileInfo]::new($Path)
         if (-not $file.Exists -or $file.Length -eq 0) { return $null }
         if ($file.Length -lt $MaxBytes -and (Test-PvmLogFormat -Path $Path)) { return $null }
         $name = [IO.Path]::GetFileNameWithoutExtension($Path) + '-' + $Time.ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture) + [IO.Path]::GetExtension($Path)
-        [IO.File]::Move($Path, (Join-Path (Split-Path $Path) $name))
+        $target = Join-Path (Split-Path $Path) $name
+        [IO.File]::Move($Path, $target)
         [pscustomobject]@{ Name = $name; Problem = '' }
     } catch {
-        [pscustomobject]@{ Name = ''; Problem = (Get-PvmErrorCause -ErrorRecord $_) }
+        [pscustomobject]@{ Name = ''; Problem = (Get-PvmPathCause -Path $target -Limit 260 -ErrorRecord $_) }
     }
 }
 
@@ -1809,7 +1828,7 @@ function Invoke-PortableVM {
     try {
         # Every run logs, a dry run too. New-Item -Force would accept a file named logs silently.
         try { $null = [IO.Directory]::CreateDirectory($paths.Logs) }
-        catch { $script:PvmLogProblem = Get-PvmErrorCause -ErrorRecord $_ }
+        catch { $script:PvmLogProblem = Get-PvmPathCause -Path $paths.Logs -Limit 248 -ErrorRecord $_ }
         # An error of the rights check or of the lock ends the run after its start and version
         # lines, as every run begins with them.
         $admin = $false

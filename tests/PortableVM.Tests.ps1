@@ -1238,6 +1238,25 @@ Describe 'The log' {
         [Convert]::ToBase64String($bytes, $bytes.Length - $expected.Length, $expected.Length) | Should -BeExactly ([Convert]::ToBase64String($expected))
     }
 
+    It 'shows each message on the console, in the log''s format, as it writes it' {
+        Mock -ModuleName PortableVM Get-PvmNow { [DateTimeOffset]::new(2026, 11, 12, 10, 15, 30, 123, [TimeSpan]::FromHours(1)) }
+        $script:shown = Format-PvmLogText -Time $script:time -ProcessId $PID -Message "x`ny"
+        Write-PvmLog -Path $script:log -Message "x`ny"
+        Should -Invoke -CommandName Write-Host -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { "$Object" -ceq $script:shown }
+        [IO.File]::ReadAllText($script:log) | Should -BeExactly "$script:shown`r`n"
+    }
+
+    It 'names a missing part of a long path as a path that is too long: <Case>' -ForEach @(
+        @{ Case = 'a file of 260 characters'; Length = 260; Limit = 260; HResult = 0x80070003; Cause = 'a path is too long' }
+        @{ Case = 'a file of 259 characters'; Length = 259; Limit = 260; HResult = 0x80070003; Cause = 'it is missing' }
+        @{ Case = 'a folder of 248 characters'; Length = 248; Limit = 248; HResult = 0x80070003; Cause = 'a path is too long' }
+        @{ Case = 'a folder of 247 characters'; Length = 247; Limit = 248; HResult = 0x80070003; Cause = 'it is missing' }
+        @{ Case = 'a long file held by another program'; Length = 300; Limit = 260; HResult = 0x80070020; Cause = 'it is open in another program' }
+    ) {
+        $record = [System.Management.Automation.ErrorRecord]::new([IO.IOException]::new('x', [int]$HResult), 'Test', 'NotSpecified', $null)
+        Get-PvmPathCause -Path ('X:\' + 'a' * ($Length - 3)) -Limit $Limit -ErrorRecord $record | Should -BeExactly $Cause
+    }
+
     It 'never throws, and says once on the console why the log cannot be written' {
         $null = New-Item -ItemType Directory -Path $script:log
         { foreach ($n in 1..3) { Write-PvmLog -Path $script:log -Message "line $n" } } | Should -Not -Throw
@@ -1263,6 +1282,10 @@ Describe 'Log rotation' {
         [IO.File]::WriteAllText($script:log, '')
         Move-PvmOldLog -Path $script:log -Time $script:time | Should -BeNullOrEmpty
         [IO.File]::WriteAllText($script:log, (Format-PvmLogText -Time $script:time -ProcessId 1 -Message 'line') + "`r`n")
+        Move-PvmOldLog -Path $script:log -Time $script:time | Should -BeNullOrEmpty
+        # A time west of UTC and the longest process ID give the longest prefix, 44 characters.
+        $west = [DateTimeOffset]::new(2026, 11, 12, 10, 15, 30, 123, [TimeSpan]::FromHours(-5))
+        [IO.File]::WriteAllText($script:log, (Format-PvmLogText -Time $west -ProcessId ([int]::MaxValue) -Message 'line') + "`r`n")
         Move-PvmOldLog -Path $script:log -Time $script:time | Should -BeNullOrEmpty
         @(Get-ChildItem -LiteralPath $script:logFolder -Name) | Should -BeExactly @('launcher.log')
     }
@@ -1406,6 +1429,7 @@ Describe 'Log failures' {
         $result.ExitCode | Should -Be 1
         $result.Message | Should -BeExactly ("This is not the expected USB stick (disk ID 5CA1AB1F, expected 5CA1AB1E). Nothing was started.`n`n" +
             'The launcher could not write all of this run to its log, LauncherData\logs\launcher.log, because it is open in another program.')
+        $result.Icon | Should -BeExactly 'Error'
     }
 
     It 'starts, and warns that the log is incomplete, when the log fails later' {
@@ -1618,6 +1642,20 @@ Describe 'The lock''s mutex' {
         }
     }
 
+    It 'fails, rather than report busy, when an object of another kind holds its name' {
+        $squatter = [System.Threading.EventWaitHandle]::new($false, [System.Threading.EventResetMode]::ManualReset, $script:name)
+        try {
+            $thrown = $null
+            try { $null = Enter-PvmMutex -Name $script:name } catch { $thrown = $_ }
+            $thrown | Should -Not -BeNullOrEmpty
+            $exception = $thrown.Exception
+            while ($exception -is [System.Management.Automation.MethodInvocationException] -and $null -ne $exception.InnerException) { $exception = $exception.InnerException }
+            $exception | Should -BeOfType ([System.Threading.WaitHandleCannotBeOpenedException])
+        } finally {
+            $squatter.Dispose()
+        }
+    }
+
     It 'is taken over when its holder ended without releasing it' {
         # The test's own handle keeps the mutex, which Windows then marks abandoned.
         $keep = [System.Threading.Mutex]::new($false, $script:name)
@@ -1627,7 +1665,13 @@ Describe 'The lock''s mutex' {
                 $mutex = [System.Threading.Mutex]::new($false, $Name)
                 $null = $mutex.WaitOne()
             }
-            $lock = Enter-PvmMutex -Name $script:name
+            # Windows marks the mutex abandoned once the holder's thread has ended, which can come
+            # a moment after the runspace is gone on a busy PC.
+            $deadline = [DateTime]::UtcNow.AddSeconds(10)
+            do {
+                $lock = Enter-PvmMutex -Name $script:name
+                if ($lock.State -eq 'Busy') { Start-Sleep -Milliseconds 20 }
+            } while ($lock.State -eq 'Busy' -and [DateTime]::UtcNow -lt $deadline)
             $lock.State | Should -BeExactly 'Abandoned'
             { Exit-PvmMutex -Lock $lock } | Should -Not -Throw
         } finally {
@@ -1698,6 +1742,16 @@ Describe 'Unexpected errors' {
         Should -Invoke -CommandName Invoke-PvmExitLock -ModuleName PortableVM -Times $Releases -Exactly
     }
 
+    It 'are described by at most four of their exceptions, each on one line' {
+        $exception = [Exception]::new('level 5')
+        foreach ($level in 4, 3, 2) { $exception = [Exception]::new("level $level", $exception) }
+        $exception = [Exception]::new("level 1`r`n  second line", $exception)
+        $record = [System.Management.Automation.ErrorRecord]::new($exception, 'Test', 'NotSpecified', $null)
+        @(Format-PvmErrorDetail -ErrorRecord $record) | Should -BeExactly @(
+            'Error detail: System.Exception: level 1 second line', 'Error detail: System.Exception: level 2',
+            'Error detail: System.Exception: level 3', 'Error detail: System.Exception: level 4', 'Error ID: Test')
+    }
+
     It 'name the innermost error of a .NET method, and log the ones around it' {
         $script:missing = Join-Path $TestDrive 'none\x.txt'
         Mock -ModuleName PortableVM Invoke-PvmGetDisk { [IO.File]::ReadAllText($script:missing) } -ParameterFilter { $Number -eq 3 }
@@ -1732,7 +1786,7 @@ Describe 'The drive letter' {
         @{ Path = 'X:Launcher'; Letter = $null }
     ) {
         # String work only; no such path reaches Invoke-PortableVM.
-        Get-PvmDriveLetter -Path $Path | Should -Be $Letter
+        Get-PvmDriveLetter -Path $Path | Should -BeExactly $Letter
     }
 
     Context 'in a run' {
@@ -1763,6 +1817,19 @@ Describe 'The drive letter' {
 Describe 'Timings' {
     It 'list each step in milliseconds, and the total' {
         Format-PvmTiming -Times ([ordered]@{ setup = 14; settings = 31; stick = 1409 }) | Should -BeExactly 'Timings: setup 14 ms, settings 31 ms, stick 1409 ms, total 1454 ms'
+    }
+
+    It 'add up the time of a step entered again, with the clock restarted for each step' {
+        # A clock that only moves when the test says so, and that Restart sets back to 0.
+        $clock = [pscustomobject]@{ ElapsedMilliseconds = [int64]0 }
+        $clock | Add-Member -MemberType ScriptMethod -Name Restart -Value { $this.ElapsedMilliseconds = [int64]0 }
+        $context = [pscustomobject]@{ Step = 'setup'; Clock = $clock; Times = [ordered]@{} }
+        foreach ($stretch in @(@{ Spent = 5; Next = 'a' }, @{ Spent = 7; Next = 'b' }, @{ Spent = 11; Next = 'a' }, @{ Spent = 13; Next = '' })) {
+            $clock.ElapsedMilliseconds += $stretch.Spent
+            Enter-PvmStep -Context $context -Name $stretch.Next
+        }
+        $context.Step | Should -BeExactly ''
+        Format-PvmTiming -Times $context.Times | Should -BeExactly 'Timings: setup 5 ms, a 20 ms, b 11 ms, total 36 ms'
     }
 
     Context 'in a run' {

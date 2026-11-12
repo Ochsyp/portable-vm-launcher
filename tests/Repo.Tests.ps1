@@ -332,6 +332,7 @@ Describe 'Static guards' {
         $last | Should -BeOfType ([System.Management.Automation.Language.ExitStatementAst])
         $last.Pipeline.Extent.Text | Should -BeExactly '1'
         $traps[0].Body.Statements[0].Extent.Text | Should -BeExactly '$script:AskingForRights = $false'
+        $traps[0].Body.Statements[1].Extent.Text | Should -BeExactly '$message = "Unexpected error in Start-PortableVM.ps1: $($_.Exception.Message)"'
         # The error is logged with its details, and the message says when that failed.
         @($traps[0].Body.Statements | Where-Object { $_.Extent.Text -ceq '$message = Add-LogNote -Message $message -Problem (Add-StopLine -Message $message -ErrorRecord $_)' }).Count |
             Should -Be 1

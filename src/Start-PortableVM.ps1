@@ -61,6 +61,15 @@ function Get-ErrorCause([Exception]$Exception) {
     "an error of type $($Exception.GetType().Name)"
 }
 
+# Return the cause of the error $Exception of a write to the file or folder $Path as
+# Get-PvmPathCause in the module gives it: Get-ErrorCause's words, but 'a path is too long' when
+# they are 'it is missing' and $Path has $Limit characters or more.
+function Get-PathCause([Exception]$Exception, [string]$Path, [int]$Limit) {
+    $cause = Get-ErrorCause -Exception $Exception
+    if ($cause -eq 'it is missing' -and $Path.Length -ge $Limit) { return 'a path is too long' }
+    $cause
+}
+
 # Return $Message, followed after a blank line by the note that it could not be logged when
 # $Problem gives the cause.
 function Add-LogNote([string]$Message, [string]$Problem) {
@@ -77,11 +86,15 @@ function Add-LogLine([string]$Message) {
     Write-Host $text
     $data = Join-Path (Split-Path $Here) 'LauncherData'
     if (-not (Test-Path -LiteralPath $data -PathType Container)) { return '' }
+    # The folder, then the file, as the write reaches them, with Windows' length limit of each.
+    $path = Join-Path $data 'logs'
+    $limit = 248
     try {
-        $logs = Join-Path $data 'logs'
-        $null = [IO.Directory]::CreateDirectory($logs)
+        $null = [IO.Directory]::CreateDirectory($path)
+        $path = Join-Path $path 'launcher.log'
+        $limit = 260
         $bytes = [Text.Encoding]::Default.GetBytes($text + "`r`n")
-        $stream = [IO.FileStream]::new((Join-Path $logs 'launcher.log'), [IO.FileMode]::Append, [Security.AccessControl.FileSystemRights]::AppendData,
+        $stream = [IO.FileStream]::new($path, [IO.FileMode]::Append, [Security.AccessControl.FileSystemRights]::AppendData,
             ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete), 4096, [IO.FileOptions]::None)
         try { $stream.Write($bytes, 0, $bytes.Length) }
         finally { $stream.Dispose() }
@@ -90,7 +103,7 @@ function Add-LogLine([string]$Message) {
         $exception = $_.Exception
         while ($exception -is [System.Management.Automation.MethodInvocationException] -and $null -ne $exception.InnerException) { $exception = $exception.InnerException }
         Write-Host "launcher.log could not be written: $($exception.Message)"
-        Get-ErrorCause -Exception $exception
+        Get-PathCause -Exception $exception -Path $path -Limit $limit
     }
 }
 

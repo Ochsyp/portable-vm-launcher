@@ -119,7 +119,9 @@ wrote it:
 - A run starts with `----- Start VM -----`, or `----- Start VM (dry run) -----`, and ends with a
   `Timings:` line, which gives each step's duration in milliseconds, and `----- End: exit code N
   -----`, or `----- End (dry run): exit code N -----`. A run without its End line was ended
-  before it finished. Lines in which a dry run differs begin with `DRY RUN - `.
+  before it finished. The End line comes before the run's dialog: a dialog that fails adds a
+  `STOPPED:` line after it, and the script then exits with 1; a lock that cannot be released
+  adds a `Note:` line after it. Lines in which a dry run differs begin with `DRY RUN - `.
 - Before Windows asks for administrator rights, the launcher logs `Asking for administrator
   rights`; the elevated run follows under another process ID. A declined or failed request logs a
   `STOPPED:` line with `Error detail:` lines. When the request line is the last line of
@@ -237,6 +239,9 @@ The redesign removes these. Until then:
   again.
 - The lock covers the launcher's checks and its start command, not the time the VM runs; once the
   VM's process runs, the process checks find it.
+- While a run waits for the answer to its resume question, or hangs, it keeps the lock, and every
+  double-click says that another run is in progress. Answer the question, or close that run's
+  minimized PowerShell window; the run then ends, and the next one takes the lock.
 
 ## Development
 
