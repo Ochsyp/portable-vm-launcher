@@ -45,10 +45,10 @@ up to date with `git switch main` and `git pull --ff-only`.
 
 ## Test data
 
-Never commit a real `settings.psd1`, `launcher.log`, `.vmx`, `.vbox`, `VirtualBox.xml` or
-descriptor, a `LauncherData` folder or anything from one, or any value read from a real disk or
-VM, and keep copies of a stick's files outside the repository; a copy of a stick's
-`LauncherData\settings.psd1` in the clone is gitignored and only feeds
+Never commit a real `settings.psd1`, `launcher.log` or `launcher-*.log`, `.vmx`, `.vbox`,
+`VirtualBox.xml` or descriptor, a `LauncherData` folder or anything from one, or any value read
+from a real disk or VM, and keep copies of a stick's files outside the repository; a copy of a
+stick's `LauncherData\settings.psd1` in the clone is gitignored and only feeds
 `tools\Find-PrivateData.ps1`. Examples and fixtures use made-up values, and UUIDs start with
 `5ca1ab1e`, which `privacy-scan` and the secret scan let through. Code, docs and messages use
 neutral names ("the VM", "the guest"), never the name of a real VM or guest system: real names

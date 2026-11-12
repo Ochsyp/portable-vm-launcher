@@ -210,7 +210,8 @@ Describe 'Static guards' {
 
     It 'let only the adapters in the module read the PC or run programs' {
         $adapters = 'Invoke-PvmGetPartition', 'Invoke-PvmGetDisk', 'Invoke-PvmGetProcess', 'Invoke-PvmTestProcess', 'Invoke-PvmGetDeviceGuard',
-        'Invoke-PvmGetRegistryValue', 'Invoke-PvmNative', 'Invoke-PvmStartProcess', 'Invoke-PvmSetEnvironment', 'Invoke-PvmSleep'
+        'Invoke-PvmGetRegistryValue', 'Invoke-PvmNative', 'Invoke-PvmStartProcess', 'Invoke-PvmSetEnvironment', 'Invoke-PvmSleep',
+        'Invoke-PvmTestAdministrator', 'Invoke-PvmEnterLock', 'Invoke-PvmExitLock'
         $reads = 'Get-Partition', 'Get-Disk', 'Get-Volume', 'Get-PhysicalDisk', 'Get-CimInstance', 'Get-WmiObject', 'Get-Process',
         'Get-ItemProperty', 'Get-ItemPropertyValue', 'Start-Process', 'Start-Sleep', 'Invoke-CimMethod', 'Invoke-WmiMethod'
         $ast = Get-SourceAst -Path $script:module
@@ -270,6 +271,85 @@ Describe 'Static guards' {
         $replaces.Count | Should -Be 1
         for ($parent = $replaces[0].Parent; $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
         $parent.Name | Should -BeExactly 'Set-DeployDisarmedCopy'
+    }
+
+    It 'branch on -DryRun in the module only where a dry run must differ' {
+        # A new branch needs a change of this map on purpose.
+        $counts = @{}
+        foreach ($node in (Get-SourceAst -Path $script:module).FindAll({
+                    ($args[0] -is [System.Management.Automation.Language.VariableExpressionAst] -and $args[0].VariablePath.UserPath -eq 'DryRun' -and
+                    $args[0].Parent -isnot [System.Management.Automation.Language.ParameterAst]) -or
+                    ($args[0] -is [System.Management.Automation.Language.MemberExpressionAst] -and
+                    $args[0].Member -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $args[0].Member.Value -eq 'DryRun')
+                }, $true)) {
+            for ($parent = $node.Parent; $null -ne $parent -and $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
+            $name = if ($parent) { $parent.Name } else { '' }
+            $counts[$name] = 1 + [int]$counts[$name]
+        }
+        $expected = @{ 'Invoke-PvmStopUnlessDryRun' = 1; 'Confirm-PvmResume' = 1; 'Invoke-PvmVMware' = 3; 'Invoke-PvmVirtualBox' = 3; 'Invoke-PortableVM' = 3 }
+        @($counts.Keys | Sort-Object | ForEach-Object { "$_=$($counts[$_])" }) | Should -BeExactly @($expected.Keys | Sort-Object | ForEach-Object { "$_=$($expected[$_])" })
+    }
+
+    It 'keep the mutex and the rights check in their helpers' {
+        foreach ($case in @(
+                @{ Path = $script:module; Pattern = 'Threading\.Mutex|MutexRights|AbandonedMutexException'; Allowed = @('Enter-PvmMutex') }
+                @{ Path = $script:module; Pattern = 'Security\.Principal'; Allowed = @('Invoke-PvmTestAdministrator') }
+                @{ Path = $script:launcher; Pattern = 'Threading\.Mutex|MutexRights'; Allowed = @('Test-LockHeld') }
+                # '' is the administrator-rights block at the script's top level.
+                @{ Path = $script:launcher; Pattern = 'Security\.Principal'; Allowed = @('Test-Administrator', '') }
+            )) {
+            $places = foreach ($type in (Get-SourceAst -Path $case.Path).FindAll({
+                        $args[0] -is [System.Management.Automation.Language.TypeExpressionAst] -or $args[0] -is [System.Management.Automation.Language.TypeConstraintAst]
+                    }, $true)) {
+                if ($type.TypeName.FullName -notmatch $case.Pattern) { continue }
+                for ($parent = $type.Parent; $null -ne $parent -and $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
+                if ($parent) { $parent.Name } else { '' }
+            }
+            @($places).Count | Should -BeGreaterThan 0
+            @($places | Where-Object { $case.Allowed -notcontains $_ }) | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'let the module delete nothing, and move a file only to put the log aside' {
+        $ast = Get-SourceAst -Path $script:module
+        Get-SourceCommand -Ast $ast | Where-Object { $_.Name -in 'Remove-Item', 'Move-Item', 'Rename-Item', 'Clear-Content', 'Clear-Item' } |
+            ForEach-Object { "$($_.Name) at line $($_.Line)" } | Should -BeNullOrEmpty
+        $members = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
+        $members | Where-Object { $_.Member.Extent.Text -in 'Delete', 'MoveTo' } | ForEach-Object { $_.Extent.Text } | Should -BeNullOrEmpty
+        $moves = @($members | Where-Object {
+                $_.Member.Extent.Text -eq 'Move' -and $_.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
+                @('IO.File', 'System.IO.File', 'File', 'IO.Directory', 'System.IO.Directory', 'Directory') -contains $_.Expression.TypeName.FullName
+            })
+        $moves.Count | Should -Be 1
+        for ($parent = $moves[0].Parent; $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
+        $parent.Name | Should -BeExactly 'Move-PvmOldLog'
+    }
+
+    It 'end in the script''s one trap, with exit code 1, what no step of the script handles' {
+        $traps = @((Get-SourceAst -Path $script:launcher).EndBlock.Traps | Where-Object { $_ })
+        $traps.Count | Should -Be 1
+        $last = $traps[0].Body.Statements[-1]
+        $last | Should -BeOfType ([System.Management.Automation.Language.ExitStatementAst])
+        $last.Pipeline.Extent.Text | Should -BeExactly '1'
+    }
+
+    It 'remove PVM_TEST in the script only at its top level, so that a test that calls one of its functions keeps it' {
+        $removes = @(Get-SourceCommand -Ast (Get-SourceAst -Path $script:launcher) | Where-Object { $_.Name -eq 'Remove-Item' })
+        $removes.Count | Should -BeGreaterThan 0
+        $removes | Where-Object { $_.Function -ne '' } | ForEach-Object { "Remove-Item in $($_.Function)" } | Should -BeNullOrEmpty
+    }
+
+    It 'show dialogs in the script only from Show-Dialog and Show-Question' {
+        $places = foreach ($node in (Get-SourceAst -Path $script:launcher).FindAll({
+                    (($args[0] -is [System.Management.Automation.Language.TypeExpressionAst] -or $args[0] -is [System.Management.Automation.Language.TypeConstraintAst]) -and
+                    $args[0].TypeName.FullName -match 'Windows\.Forms') -or
+                    ($args[0] -is [System.Management.Automation.Language.CommandAst] -and $args[0].GetCommandName() -eq 'Add-Type')
+                }, $true)) {
+            for ($parent = $node.Parent; $null -ne $parent -and $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
+            if ($parent) { $parent.Name } else { '' }
+        }
+        @($places).Count | Should -BeGreaterThan 0
+        @($places | Where-Object { $_ -notin 'Show-Dialog', 'Show-Question' }) | Should -BeNullOrEmpty
     }
 }
 

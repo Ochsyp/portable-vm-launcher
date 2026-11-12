@@ -10,8 +10,9 @@
 # of phase 2 and the settings checks of phase 3.
 #
 # The launcher's code lives in the Launcher folder, which each deploy replaces as a whole. What it
-# keeps between runs lives beside it in LauncherData: settings.psd1, logs\launcher.log and, below
-# backups\, the first version of each file it rewrites (Get-PvmDataPath).
+# keeps between runs lives beside it in LauncherData: settings.psd1, logs\launcher.log with the
+# older logs moved aside beside it, and, below backups\, the first version of each file it
+# rewrites (Get-PvmDataPath).
 #
 # Importing the module runs nothing. Functions take what they need as parameters and throw, and
 # Invoke-PortableVM turns a stop into the exit code and the message for the script to show.
@@ -20,6 +21,14 @@
 # mock throws, so no test reaches a disk, a process or a VM. Files are read and written directly;
 # the tests keep theirs in TestDrive. tools\Deploy-PortableVM.ps1 imports the module too, for the
 # settings checks and to turn schema 1 settings into schema 2.
+#
+# Invoke-PortableVM runs one start or dry run at a time on this PC: it holds the named mutex
+# Global\PortableVM-Launcher (Invoke-PvmEnterLock) from before its first log line until it
+# returns. Write-PvmLog writes every line of a message as "<local time with milliseconds and UTC
+# offset> [<process ID>]  <message>", in one append that other launcher processes cannot break up,
+# and never throws. A run that holds the lock first moves a full log, or one in the format before
+# phase 4, aside as launcher-<yyyyMMdd-HHmmss>.log, and every run ends with a Timings line and an
+# End line with its exit code.
 
 Set-StrictMode -Version 3.0
 # Module functions do not see the caller's preference variables, so the module sets its own.
@@ -51,17 +60,77 @@ function Get-PvmStopMessage {
     $null
 }
 
-# Append "<yyyy-MM-dd HH:mm:ss>  <Message>" in local time to the log file $Path and show the line
-# on the console. The line is written under -WhatIf too, so a dry run logs what it would do.
+# Return the system's message that the stop in $ErrorRecord keeps in Data['PvmDetail'], as for a
+# settings file that cannot be opened, or '' when the stop keeps none or there is no stop.
+function Get-PvmStopDetail {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+    for ($exception = $ErrorRecord.Exception; $null -ne $exception; $exception = $exception.InnerException) {
+        if ($exception.Data['PvmStop']) { return "$($exception.Data['PvmDetail'])" }
+    }
+    ''
+}
+
+# Return the time now with its UTC offset. It is the log's clock, which the tests mock.
+function Get-PvmNow {
+    [CmdletBinding()]
+    [OutputType([DateTimeOffset])]
+    param()
+    [DateTimeOffset]::Now
+}
+
+# Return the message $Message as log text: each of its lines, split at CRLF, CR or LF, after the
+# prefix "<Time as yyyy-MM-ddTHH:mm:ss.fff+hh:mm> [<ProcessId>]  ", joined with CRLF. The prefix
+# uses the invariant culture, since another culture can change the time separator. The message
+# starts after the first two consecutive spaces of a line, as it did before this format.
+function Format-PvmLogText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][DateTimeOffset]$Time,
+        [Parameter(Mandatory)][int]$ProcessId,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Message
+    )
+    $prefix = [string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0:yyyy-MM-dd''T''HH:mm:ss.fffzzz} [{1}]  ', $Time, $ProcessId)
+    (@($Message -split '\r\n|\r|\n') | ForEach-Object { $prefix + $_ }) -join "`r`n"
+}
+
+# Return the cause, in Get-PvmErrorCause's words, of the first log write of this run that failed,
+# or '' while every write succeeded. Invoke-PortableVM clears it when a run starts.
+function Get-PvmLogProblem {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    "$(Get-Variable -Name PvmLogProblem -Scope Script -ValueOnly -ErrorAction SilentlyContinue)"
+}
+
+# Append the message $Message to the log file $Path as Format-PvmLogText gives it, with the time
+# now and this process's ID, and show it on the console. The text goes in one write through an
+# append-only handle that shares reading, writing and deletion, so that other launcher processes
+# can neither break it up nor block it; -WhatIf does not affect it, so a dry run logs what it would
+# do. It never throws: the first failed write of a run keeps its cause for Get-PvmLogProblem and
+# says so once on the console.
 function Write-PvmLog {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][AllowEmptyString()][string]$Message
     )
-    $line = '{0:yyyy-MM-dd HH:mm:ss}  {1}' -f (Get-Date), $Message
-    Write-Host $line
-    Add-Content -LiteralPath $Path -Value $line -WhatIf:$false -Confirm:$false
+    $text = Format-PvmLogText -Time (Get-PvmNow) -ProcessId $PID -Message $Message
+    Write-Host $text
+    try {
+        $bytes = [Text.Encoding]::Default.GetBytes($text + "`r`n")
+        $stream = [IO.FileStream]::new($Path, [IO.FileMode]::Append, [Security.AccessControl.FileSystemRights]::AppendData,
+            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete), 4096, [IO.FileOptions]::None)
+        try { $stream.Write($bytes, 0, $bytes.Length) }
+        finally { $stream.Dispose() }
+    } catch {
+        if (-not (Get-PvmLogProblem)) {
+            $script:PvmLogProblem = Get-PvmErrorCause -ErrorRecord $_
+            Write-Host "launcher.log could not be written: $script:PvmLogProblem"
+        }
+    }
 }
 
 # Return a short cause for the error $ErrorRecord that quotes no path, for a message that must not
@@ -101,16 +170,103 @@ function Get-PvmErrorCause {
     "an error of type $($exception.GetType().Name)"
 }
 
+# Return the message of the innermost error in $ErrorRecord that PowerShell did not add, below an
+# ActionPreferenceStopException and the wrappers of a .NET method call, as Get-PvmErrorCause
+# unwraps them.
+function Get-PvmErrorText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+    $exception = $ErrorRecord.Exception
+    if ($exception -is [System.Management.Automation.ActionPreferenceStopException] -and $null -ne $exception.ErrorRecord) { $exception = $exception.ErrorRecord.Exception }
+    while (($exception -is [System.Management.Automation.MethodInvocationException] -or $exception -is [System.Reflection.TargetInvocationException]) -and
+        $null -ne $exception.InnerException) {
+        $exception = $exception.InnerException
+    }
+    $exception.Message.Trim()
+}
+
+# Return the log lines that describe the unexpected error $ErrorRecord: "Error detail: <type>:
+# <message>" for its exception and up to three inner ones, each on one line, "Error ID: <its
+# FullyQualifiedErrorId>", and "Error trace: <frame>" for the first 10 frames of its script stack.
+# They can name paths on the stick, so they go to the log only.
+function Format-PvmErrorDetail {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+    $exception = $ErrorRecord.Exception
+    for ($depth = 0; $null -ne $exception -and $depth -le 3; $depth++) {
+        "Error detail: $($exception.GetType().FullName): $(($exception.Message -replace '\s*[\r\n]+\s*', ' ').Trim())"
+        $exception = $exception.InnerException
+    }
+    "Error ID: $($ErrorRecord.FullyQualifiedErrorId)"
+    foreach ($frame in @("$($ErrorRecord.ScriptStackTrace)" -split '\r\n|\r|\n' | Where-Object { $_.Trim() } | Select-Object -First 10)) {
+        "Error trace: $($frame.Trim())"
+    }
+}
+
+# Return the words for the step $Step of a run (Enter-PvmStep), as in "Unexpected error while
+# <them>".
+function Get-PvmStepText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Step)
+    switch ($Step) {
+        'setup' { 'starting the launcher' }
+        'settings' { 'reading the settings' }
+        'stick' { 'finding the stick' }
+        'choice' { 'checking this PC and the saved states' }
+        'checks' { 'checking for running VMs' }
+        'question' { 'asking whether to resume the saved state' }
+        'wait' { "waiting for VirtualBox's background service to end" }
+        'files' { 'pointing the VM files at the stick' }
+        'start' { 'starting the VM' }
+        default { 'running the launcher' }
+    }
+}
+
+# End the current step of the run $Context (Invoke-PortableVM), adding its time to
+# $Context.Times, and begin the step $Name; '' ends the last one. A step entered again adds up.
+function Enter-PvmStep {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Name
+    )
+    if ($Context.Step) { $Context.Times[$Context.Step] = [int64]$Context.Times[$Context.Step] + $Context.Clock.ElapsedMilliseconds }
+    $Context.Clock.Restart()
+    $Context.Step = $Name
+}
+
+# Return the log line for the step durations $Times (step -> milliseconds, in the order the steps
+# began): "Timings: <step> <n> ms, ..., total <n> ms", the total being their sum.
+function Format-PvmTiming {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Times)
+    $total = [int64]0
+    $parts = foreach ($key in $Times.Keys) {
+        $total += [int64]$Times[$key]
+        "$key $([int64]$Times[$key]) ms"
+    }
+    'Timings: ' + ((@($parts) + "total $total ms") -join ', ')
+}
+
 # In a dry run ($Context.DryRun), log that a real start would stop here with $Message and carry
-# on with the checks; otherwise throw the stop.
+# on with the checks; the first such message becomes the dry run's result ($Context.WouldStop).
+# Otherwise throw the stop.
 function Invoke-PvmStopUnlessDryRun {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][pscustomobject]$Context,
         [Parameter(Mandatory)][string]$Message
     )
-    if ($Context.DryRun) { Write-PvmLog -Path $Context.LogPath -Message "DRY RUN - a real start would stop here: $Message" }
-    else { throw (Get-PvmStopException -Message $Message) }
+    if ($Context.DryRun) {
+        Write-PvmLog -Path $Context.LogPath -Message "DRY RUN - a real start would stop here: $Message"
+        if (-not $Context.WouldStop) { $Context.WouldStop = $Message }
+    } else {
+        throw (Get-PvmStopException -Message $Message)
+    }
 }
 
 # --- Adapters --------------------------------------------------------------------------------
@@ -232,6 +388,33 @@ function Invoke-PvmSleep {
     Start-Sleep -Seconds $Seconds
 }
 
+# Return whether this process runs with administrator rights, as the script checks before it asks
+# for them.
+function Invoke-PvmTestAdministrator {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+    Assert-PvmNotUnderTest -Name $MyInvocation.MyCommand.Name
+    ([Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# Take the named mutex $Name for this run without waiting (Enter-PvmMutex).
+function Invoke-PvmEnterLock {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param([Parameter(Mandatory)][string]$Name)
+    Assert-PvmNotUnderTest -Name $MyInvocation.MyCommand.Name
+    Enter-PvmMutex -Name $Name
+}
+
+# Release the run's lock $Lock (Exit-PvmMutex).
+function Invoke-PvmExitLock {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][pscustomobject]$Lock)
+    Assert-PvmNotUnderTest -Name $MyInvocation.MyCommand.Name
+    Exit-PvmMutex -Lock $Lock
+}
+
 # --- Data folder -----------------------------------------------------------------------------
 
 # Return the paths that the launcher in the folder $LauncherPath uses. Root is the stick folder
@@ -275,6 +458,103 @@ function Get-PvmBackupPath {
     $full = [IO.Path]::GetFullPath($Path)
     if (-not $full.StartsWith($below, [StringComparison]::OrdinalIgnoreCase)) { throw "$Path is not below $Root." }
     Join-Path $Backups ($full.Substring($below.Length) + $Suffix)
+}
+
+# --- Run lock and log files ------------------------------------------------------------------
+
+# Return the name of the mutex that one run of the launcher at a time holds on this PC, in every
+# Windows session, since the stick's raw disk belongs to the PC.
+function Get-PvmLockName {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    'Global\PortableVM-Launcher'
+}
+
+# Return the message of a run that finds another run holding the lock.
+function Get-PvmBusyMessage {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    'Another run of the launcher is in progress on this PC: a start of the VM or a dry run. Wait until it has finished, then start the VM again if it is not running. Nothing was started.'
+}
+
+# Take the named mutex $Name without waiting. Returns State 'Acquired', or 'Abandoned' when an
+# earlier holder ended without releasing it, with the Mutex that this thread now owns; or State
+# 'Busy' and no Mutex when another holder has it or this process may not open it. Throws when the
+# name belongs to another kind of object, so that the run stops.
+function Enter-PvmMutex {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param([Parameter(Mandatory)][string]$Name)
+    try { $mutex = [System.Threading.Mutex]::new($false, $Name) }
+    catch [System.UnauthorizedAccessException] { return [pscustomobject]@{ State = 'Busy'; Mutex = $null } }
+    try {
+        if ($mutex.WaitOne(0)) { return [pscustomobject]@{ State = 'Acquired'; Mutex = $mutex } }
+    } catch [System.Threading.AbandonedMutexException] {
+        return [pscustomobject]@{ State = 'Abandoned'; Mutex = $mutex }
+    }
+    $mutex.Dispose()
+    [pscustomobject]@{ State = 'Busy'; Mutex = $null }
+}
+
+# Release and close the mutex of the lock $Lock (Enter-PvmMutex). The thread that took it must
+# release it.
+function Exit-PvmMutex {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][pscustomobject]$Lock)
+    try { $Lock.Mutex.ReleaseMutex() }
+    finally { $Lock.Mutex.Dispose() }
+}
+
+# Return whether the log file $Path is empty or starts with a line in the format of Write-PvmLog,
+# reading at most its first 64 bytes while others may write or move it. Throws when the file
+# cannot be read.
+function Test-PvmLogFormat {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)][string]$Path)
+    $buffer = New-Object byte[] 64
+    $stream = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try { $count = $stream.Read($buffer, 0, $buffer.Length) }
+    finally { $stream.Dispose() }
+    if ($count -eq 0) { return $true }
+    [Text.Encoding]::ASCII.GetString($buffer, 0, $count) -match '\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d \[\d+\]  '
+}
+
+# Move the log file $Path aside in its folder as <name>-<Time as yyyyMMdd-HHmmss><extension> when
+# it holds $MaxBytes or more, or when it starts with a line in another format (Test-PvmLogFormat),
+# as the log of a launcher before phase 4 does. Returns $null when there is nothing to move, else
+# Name, the new file name, or Problem, the cause in Get-PvmErrorCause's words when the move failed.
+# It never throws, and it never replaces a file: a move onto a name that exists fails.
+function Move-PvmOldLog {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][DateTimeOffset]$Time,
+        [int64]$MaxBytes = 1MB
+    )
+    try {
+        $file = [IO.FileInfo]::new($Path)
+        if (-not $file.Exists -or $file.Length -eq 0) { return $null }
+        if ($file.Length -lt $MaxBytes -and (Test-PvmLogFormat -Path $Path)) { return $null }
+        $name = [IO.Path]::GetFileNameWithoutExtension($Path) + '-' + $Time.ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture) + [IO.Path]::GetExtension($Path)
+        [IO.File]::Move($Path, (Join-Path (Split-Path $Path) $name))
+        [pscustomobject]@{ Name = $name; Problem = '' }
+    } catch {
+        [pscustomobject]@{ Name = ''; Problem = (Get-PvmErrorCause -ErrorRecord $_) }
+    }
+}
+
+# Return the drive letter, in upper case, of the path $Path when its root is "<letter>:\", or
+# $null for any other root: a share, a \\?\ or \\.\ path, or a path relative to a drive.
+function Get-PvmDriveLetter {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Path)
+    $root = [IO.Path]::GetPathRoot($Path)
+    if ($root -match '\A[A-Za-z]:\\\z') { $root.Substring(0, 1).ToUpperInvariant() } else { $null }
 }
 
 # --- Settings --------------------------------------------------------------------------------
@@ -1112,8 +1392,12 @@ function Confirm-PvmResume {
         Write-PvmLog -Path $Context.LogPath -Message "DRY RUN - a real start would ask whether to resume the saved state in $Program."
         return
     }
-    # Only a single $true counts as Yes, so a stray output of the script block cannot resume.
+    # Only a single $true counts as Yes, so a stray output of the script block cannot resume. The
+    # time the question waits for its answer is a step of its own.
+    $before = $Context.Step
+    Enter-PvmStep -Context $Context -Name 'question'
     $answer = if ($null -ne $Context.AskResume) { $Context.AskResume.InvokeReturnAsIs($Question, $Context.Caption) } else { $null }
+    Enter-PvmStep -Context $Context -Name $before
     if (-not ($answer -is [bool] -and $answer)) {
         throw (Get-PvmStopException -Message (Format-PvmMessage -Names $names -Template 'The saved state in {Program} was not resumed. Nothing was started. Start {vm} again to be asked again, or discard the saved state in {Program} first, which loses what {guest} had not saved.' -Values @{
                     Program = $Program
@@ -1233,6 +1517,7 @@ function Invoke-PvmVMware {
         [Parameter(Mandatory)][string]$VMwareDir,
         [Parameter(Mandatory)][string]$Drive
     )
+    Enter-PvmStep -Context $Context -Name 'checks'
     $settings = $Context.Settings
     $log = $Context.LogPath
     $layout = Get-PvmDiskLayout -Drive $Drive -VmSectors $settings['VmSectors'] -DataPartitionStart $settings['DataPartitionStart'] -HideData $true
@@ -1250,6 +1535,7 @@ function Invoke-PvmVMware {
     }
     Assert-PvmVMwareReady -Context $Context -Vmx $vmx
 
+    Enter-PvmStep -Context $Context -Name 'files'
     $disk = Join-Path $Context.Root $settings['VMwareDisk']
     if (Test-Path -LiteralPath $disk) {
         $backup = Get-PvmBackupPath -Root $Context.Root -Backups $Context.Backups -Path $disk -Suffix '.orig'
@@ -1257,6 +1543,7 @@ function Invoke-PvmVMware {
     } else {
         New-PvmVMwareDescriptor -Path $disk -Layout $layout -LogPath $log -WhatIf:$Context.DryRun
     }
+    Enter-PvmStep -Context $Context -Name 'start'
     if ($Context.DryRun) {
         Write-PvmLog -Path $log -Message "DRY RUN - would start $vmx with VMware Workstation ($VMwareDir)"
         return 'DryRun'
@@ -1321,6 +1608,7 @@ function Invoke-PvmVirtualBox {
         [Parameter(Mandatory)][string]$VirtualBoxDir,
         [Parameter(Mandatory)][string]$Drive
     )
+    Enter-PvmStep -Context $Context -Name 'checks'
     $settings = $Context.Settings
     $log = $Context.LogPath
     $layout = Get-PvmDiskLayout -Drive $Drive -VmSectors $settings['VmSectors'] -DataPartitionStart $settings['DataPartitionStart'] -HideData $settings['HideDataPartition']
@@ -1346,7 +1634,14 @@ function Invoke-PvmVirtualBox {
         }
         Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $names -Template 'VirtualBox is already open on this PC. Close all VirtualBox windows, then start {vm} again.')
     }
-    if (-not $Context.DryRun) { Wait-PvmProcessExit -Name 'VBoxSVC' -TimeoutSeconds 30 }
+    # A real start waits for VirtualBox's background service, so a dry run does too, unless it has
+    # found a stop already, at which a real start would have ended before the wait.
+    if (-not $Context.WouldStop -and (Invoke-PvmTestProcess -Name 'VBoxSVC')) {
+        Enter-PvmStep -Context $Context -Name 'wait'
+        Write-PvmLog -Path $log -Message "Waiting up to 30 s for VirtualBox's background service (VBoxSVC) to end"
+        Wait-PvmProcessExit -Name 'VBoxSVC' -TimeoutSeconds 30
+        Enter-PvmStep -Context $Context -Name 'checks'
+    }
     if (Invoke-PvmTestProcess -Name 'VBoxSVC') {
         Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $names -Template 'VirtualBox is still running in the background. Wait half a minute, then start {vm} again.')
     }
@@ -1358,6 +1653,7 @@ function Invoke-PvmVirtualBox {
         Confirm-PvmResume -Context $Context -Program 'VirtualBox' -Question $question
     }
 
+    Enter-PvmStep -Context $Context -Name 'files'
     $vbox = Join-Path $Context.Root $settings['VirtualBoxVbox']
     $registry = Join-Path (Join-Path $Context.Root $settings['VirtualBoxHome']) 'VirtualBox.xml'
     $disk = Join-Path $Context.Root $settings['VirtualBoxDisk']
@@ -1366,6 +1662,7 @@ function Invoke-PvmVirtualBox {
     Set-PvmDriveLetterInFile -Path $vbox -BackupPath (Get-PvmBackupPath @backup -Path $vbox -Suffix '.launcher-backup') @letterChange
     Set-PvmDriveLetterInFile -Path $registry -BackupPath (Get-PvmBackupPath @backup -Path $registry -Suffix '.launcher-backup') @letterChange
     Set-PvmDiskDescriptor -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @backup -Path $disk -Suffix '.orig') -LogPath $log -WhatIf:$Context.DryRun
+    Enter-PvmStep -Context $Context -Name 'start'
     if ($Context.DryRun) {
         Write-PvmLog -Path $log -Message "DRY RUN - would start VM {$uuid} with VirtualBox ($VirtualBoxDir)"
         return 'DryRun'
@@ -1393,17 +1690,28 @@ function Invoke-PvmLaunch {
     [CmdletBinding()]
     [OutputType([string])]
     param([Parameter(Mandatory)][pscustomobject]$Context)
+    Enter-PvmStep -Context $Context -Name 'stick'
     $settings = $Context.Settings
     $log = $Context.LogPath
 
-    # 1. Find the stick this launcher is on, and make sure it is the right one.
-    $partition = Invoke-PvmGetPartition -DriveLetter $Context.Letter
+    # 1. Find the stick this launcher is on, and make sure it is the right one. A network drive or
+    # a drive made with subst has a letter but no partition.
+    try { $partition = Invoke-PvmGetPartition -DriveLetter $Context.Letter }
+    catch {
+        if ("$($_.FullyQualifiedErrorId)" -like 'CmdletizationQuery_NotFound_DriveLetter,*') {
+            throw (Get-PvmStopException -Message (Format-PvmMessage -Names $Context.Names -Template 'Windows has no partition with the drive letter {Letter}:, so the launcher cannot tell which disk is the USB stick; a network drive or a drive made with subst has none. Start it with Start VM.cmd on the stick''s own drive. Nothing was started.' -Values @{
+                        Letter = $Context.Letter
+                    }))
+        }
+        throw
+    }
     $disk = Invoke-PvmGetDisk -Number $partition.DiskNumber
     $problem = Get-PvmStickProblem -Disk $disk -Partition $partition -Settings $settings
     if ($problem) { throw (Get-PvmStopException -Message $problem) }
     $drive = "\\.\PhysicalDrive$($disk.Number)"
     Write-PvmLog -Path $log -Message "Stick found: disk $($disk.Number) ($drive), drive $($Context.Letter):, ID $(Get-PvmDiskSignature -Disk $disk)"
 
+    Enter-PvmStep -Context $Context -Name 'choice'
     $deviceGuard = Invoke-PvmGetDeviceGuard
     if ($deviceGuard -and ($deviceGuard.SecurityServicesRunning -contains 2)) {
         Write-PvmLog -Path $log -Message 'Note: Memory Integrity is on, so the VM runs on top of Hyper-V (slower than native).'
@@ -1443,13 +1751,18 @@ function Invoke-PvmLaunch {
 # Run the launcher from the folder $LauncherPath, which holds the code and the VERSION that the
 # deploy tool writes, and whose parent folder, the stick folder, holds LauncherData as well
 # (Get-PvmDataPath): read and check the settings, check the stick, choose the hypervisor and start
-# the VM. With -DryRun every check runs and the log says what would change, but nothing is changed
-# or started. Before a saved state is resumed, the script block $AskResume gets the question and
-# the dialog's title and must return $true for Yes; without it the answer is No. Returns ExitCode,
-# 0 or 1, the Message to show with its Icon, both empty when there is nothing to show, and the
-# Caption for the dialog. Stops and other errors are logged to LauncherData\logs\launcher.log as
-# "STOPPED: ..." and returned. Without LauncherData there is no log, so the message is only
-# returned and printed; only a log that cannot be written throws.
+# the VM. One run at a time: it holds the lock (Get-PvmLockName) from before its first log line
+# until it returns, and another run meanwhile stops as busy. It needs administrator rights, a dry
+# run too. With -DryRun it takes a real start's decisions and logs what would change, but changes
+# no VM file and starts nothing; where a real start would stop it logs so and carries on, and its
+# result is the first such stop. Before a saved state is resumed, the script block $AskResume gets
+# the question and the dialog's title and must return $true for Yes; without it the answer is No.
+# Returns ExitCode, 0 or 1, the Message to show with its Icon, both empty when there is nothing to
+# show, and the Caption for the dialog. Stops and unexpected errors, which name the step they
+# happened in, are logged to LauncherData\logs\launcher.log as "STOPPED: ..." and returned; every
+# run ends with a Timings line and an End line. A log that cannot be written when the run starts
+# stops it; a later failure adds a note to the message. Without LauncherData there is no log and
+# no lock, so the message is only returned and printed. It does not throw.
 function Invoke-PortableVM {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -1459,7 +1772,6 @@ function Invoke-PortableVM {
         [scriptblock]$AskResume
     )
     $paths = Get-PvmDataPath -LauncherPath $LauncherPath
-    $caption = 'Portable VM'
     if (-not (Test-Path -LiteralPath $paths.Data -PathType Container)) {
         $message = if (Test-Path -LiteralPath $paths.OldSettings -PathType Leaf) {
             'The settings are still in Launcher\settings.psd1, where the launcher read them before LauncherData. Move them to LauncherData with tools\Deploy-PortableVM.ps1 -MigrateSettings, run from a clone of the launcher. Nothing was started.'
@@ -1467,19 +1779,74 @@ function Invoke-PortableVM {
             'LauncherData, the folder beside Launcher that holds the settings and the log, is missing. Create it, copy examples\settings.example.psd1 into it as settings.psd1 and fill that in. Nothing was started.'
         }
         Write-Host $message
-        return [pscustomobject]@{ ExitCode = 1; Message = $message; Icon = 'Error'; Caption = $caption }
+        return [pscustomobject]@{ ExitCode = 1; Message = $message; Icon = 'Error'; Caption = 'Portable VM' }
     }
-    $logPath = $paths.Log
+    $script:PvmLogProblem = ''
+    $runText = if ($DryRun) { ' (dry run)' } else { '' }
+    $lock = $null
+    $owned = $false
+    $result = $null
+    $logStop = $false
+    # The steps below fill in the settings, the names, the caption and the drive letter;
+    # Invoke-PvmLaunch fills in VMwareState and VirtualBoxState.
+    $context = [pscustomobject]@{
+        Root            = $paths.Root
+        LogPath         = $paths.Log
+        Backups         = $paths.Backups
+        Letter          = ''
+        DryRun          = [bool]$DryRun
+        AskResume       = $AskResume
+        Names           = @{ VM = 'the VM'; Guest = 'the guest' }
+        Caption         = 'Portable VM'
+        VMwareState     = $null
+        VirtualBoxState = $null
+        Settings        = @{}
+        Step            = 'setup'
+        Clock           = [Diagnostics.Stopwatch]::StartNew()
+        Times           = [ordered]@{}
+        WouldStop       = ''
+    }
     try {
-        # Every run logs, a dry run too, so the log's folder is created when it is missing.
-        $null = New-Item -ItemType Directory -Path $paths.Logs -Force
-        Write-PvmLog -Path $logPath -Message "----- Start VM$(if ($DryRun) { ' (dry run)' }) -----"
+        # Every run logs, a dry run too. New-Item -Force would accept a file named logs silently.
+        try { $null = [IO.Directory]::CreateDirectory($paths.Logs) }
+        catch { $script:PvmLogProblem = Get-PvmErrorCause -ErrorRecord $_ }
+        $admin = Invoke-PvmTestAdministrator
+        if ($admin) {
+            $lock = Invoke-PvmEnterLock -Name (Get-PvmLockName)
+            $owned = $lock.State -ne 'Busy'
+        }
+        # Only the run that holds the lock moves a full or old-format log aside.
+        $moved = if ($owned -and -not (Get-PvmLogProblem)) { Move-PvmOldLog -Path $paths.Log -Time (Get-PvmNow) } else { $null }
+        Write-PvmLog -Path $paths.Log -Message "----- Start VM$runText -----"
         # VERSION is only for the log, so a missing or unreadable one never stops a start.
         $versionPath = Join-Path $LauncherPath 'VERSION'
         $version = 'unknown'
         try { if (Test-Path -LiteralPath $versionPath -PathType Leaf) { $version = [IO.File]::ReadAllText($versionPath).Trim() } }
         catch { $version = 'unreadable' }
-        Write-PvmLog -Path $logPath -Message "Launcher version $version"
+        Write-PvmLog -Path $paths.Log -Message "Launcher version $version"
+        if ($null -ne $moved) {
+            if ($moved.Name) { Write-PvmLog -Path $paths.Log -Message "Note: the earlier lines of the log are in $($moved.Name)." }
+            else { Write-PvmLog -Path $paths.Log -Message "Note: the log could not be moved aside, because $($moved.Problem); this run adds to it." }
+        }
+        if ($owned -and $lock.State -eq 'Abandoned') {
+            Write-PvmLog -Path $paths.Log -Message 'Note: an earlier run of the launcher ended without releasing its lock; this run took the lock over.'
+        }
+        if (-not $admin) {
+            $rights = if ($DryRun) {
+                'A dry run needs administrator rights, as a real start has them, so that its checks see what a real start sees. Run it from an elevated PowerShell. Nothing was started.'
+            } else {
+                'The launcher needs administrator rights, because the VM boots this USB stick directly.'
+            }
+            throw (Get-PvmStopException -Message $rights)
+        }
+        if (-not $owned) { throw (Get-PvmStopException -Message (Get-PvmBusyMessage)) }
+        $problem = Get-PvmLogProblem
+        if ($problem) {
+            $logStop = $true
+            throw (Get-PvmStopException -Message "The launcher cannot write its log, LauncherData\logs\launcher.log, because $problem. Nothing was started.")
+        }
+
+        Enter-PvmStep -Context $context -Name 'settings'
         if (Test-Path -LiteralPath $paths.OldSettings) {
             throw (Get-PvmStopException -Message 'Launcher\settings.psd1 is there, but the launcher reads its settings from LauncherData\settings.psd1. Move any change you made in it there, then remove it from Launcher. Nothing was started.')
         }
@@ -1487,32 +1854,62 @@ function Invoke-PortableVM {
         catch {
             $stop = Get-PvmStopMessage -ErrorRecord $_
             if ($null -eq $stop) { throw }
-            throw (Get-PvmStopException -Message "$stop`n`nNothing was started.")
+            $exception = Get-PvmStopException -Message "$stop`n`nNothing was started."
+            $detail = Get-PvmStopDetail -ErrorRecord $_
+            if ($detail) { $exception.Data['PvmDetail'] = $detail }
+            throw $exception
         }
-        $caption = Get-PvmCaption -Settings $settings
-        # Invoke-PvmLaunch fills in VMwareState and VirtualBoxState.
-        $context = [pscustomobject]@{
-            Root            = $paths.Root
-            LogPath         = $logPath
-            Backups         = $paths.Backups
-            Letter          = $LauncherPath.Substring(0, 1).ToUpper()
-            DryRun          = [bool]$DryRun
-            AskResume       = $AskResume
-            Names           = @{ VM = $settings['VmDisplayName']; Guest = $settings['GuestName'] }
-            Caption         = $caption
-            VMwareState     = $null
-            VirtualBoxState = $null
-            Settings        = $settings
+        $context.Settings = $settings
+        $context.Names = @{ VM = $settings['VmDisplayName']; Guest = $settings['GuestName'] }
+        $context.Caption = Get-PvmCaption -Settings $settings
+        $letter = Get-PvmDriveLetter -Path $LauncherPath
+        if (-not $letter) {
+            throw (Get-PvmStopException -Message (Format-PvmMessage -Names $context.Names -Template 'The launcher runs from {Path}, which is not on a drive with a letter, so it cannot tell which disk is the USB stick. Start it with Start VM.cmd on the stick''s own drive. Nothing was started.' -Values @{
+                        Path = $LauncherPath
+                    }))
         }
+        $context.Letter = $letter
+
         $outcome = Invoke-PvmLaunch -Context $context
-        if ($outcome -eq 'AlreadyRunning') {
-            return [pscustomobject]@{ ExitCode = 0; Message = (Format-PvmMessage -Names $context.Names -Template '{VM} is already running.'); Icon = 'Information'; Caption = $caption }
+        $result = if ($context.WouldStop) {
+            [pscustomobject]@{ ExitCode = 1; Message = $context.WouldStop; Icon = 'Error'; Caption = $context.Caption }
+        } elseif ($outcome -eq 'AlreadyRunning') {
+            [pscustomobject]@{ ExitCode = 0; Message = (Format-PvmMessage -Names $context.Names -Template '{VM} is already running.'); Icon = 'Information'; Caption = $context.Caption }
+        } else {
+            [pscustomobject]@{ ExitCode = 0; Message = ''; Icon = ''; Caption = $context.Caption }
         }
-        [pscustomobject]@{ ExitCode = 0; Message = ''; Icon = ''; Caption = $caption }
     } catch {
         $stop = Get-PvmStopMessage -ErrorRecord $_
-        $message = if ($null -ne $stop) { $stop } else { "Unexpected error: $($_.Exception.Message)" }
-        Write-PvmLog -Path $logPath -Message "STOPPED: $message"
-        [pscustomobject]@{ ExitCode = 1; Message = $message; Icon = 'Error'; Caption = $caption }
+        $message = if ($null -ne $stop) { $stop } else { "Unexpected error while $(Get-PvmStepText -Step $context.Step): $(Get-PvmErrorText -ErrorRecord $_)" }
+        $lines = @("STOPPED: $message")
+        if ($null -eq $stop) { $lines += @(Format-PvmErrorDetail -ErrorRecord $_) }
+        else {
+            $detail = Get-PvmStopDetail -ErrorRecord $_
+            if ($detail) { $lines += "Error detail: $detail" }
+        }
+        Write-PvmLog -Path $context.LogPath -Message ($lines -join "`n")
+        # A dry run that found a stop earlier returns that one, as a real start would have.
+        $shown = if ($context.WouldStop) { $context.WouldStop } else { $message }
+        $result = [pscustomobject]@{ ExitCode = 1; Message = $shown; Icon = 'Error'; Caption = $context.Caption }
+    } finally {
+        Enter-PvmStep -Context $context -Name ''
+        Write-PvmLog -Path $context.LogPath -Message (Format-PvmTiming -Times $context.Times)
+        $exitCode = if ($null -ne $result) { $result.ExitCode } else { 1 }
+        Write-PvmLog -Path $context.LogPath -Message "----- End$($runText): exit code $exitCode -----"
+        if ($owned) {
+            try { Invoke-PvmExitLock -Lock $lock }
+            catch { Write-PvmLog -Path $context.LogPath -Message "Note: the launcher could not release its lock ($($_.Exception.Message)); Windows releases it when this process ends." }
+        }
     }
+    # A log that failed after the start line changed no decision, but the message says so.
+    $problem = Get-PvmLogProblem
+    if ($problem -and -not $logStop) {
+        $note = "The launcher could not write all of this run to its log, LauncherData\logs\launcher.log, because $problem."
+        if ($result.Message) { $result.Message += "`n`n$note" }
+        else {
+            $result.Message = $note
+            $result.Icon = 'Warning'
+        }
+    }
+    $result
 }

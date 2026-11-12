@@ -72,6 +72,26 @@ All notable changes to this project are listed here. The format follows
   the module sets strict mode first, and that the deploy tool replaces a file only to disarm a
   descriptor copy.
 - A *Public interface* section in the README.
+- One launcher run at a time (phase 4): a start or a dry run holds the named mutex
+  `Global\PortableVM-Launcher` from before its first log line until it returns, the resume
+  question included. Another run meanwhile stops with "Another run of the launcher is in progress
+  on this PC ..." before it reads the stick, and a second double-click says so before it asks for
+  administrator rights. A lock left by a run that ended without releasing it is taken over and
+  noted in the log.
+- Log rotation: when `LauncherData\logs\launcher.log` holds 1 MiB or more, or starts with a line
+  in the format before phase 4, the run that holds the lock renames it to
+  `launcher-<yyyyMMdd-HHmmss>.log` before its first line and starts a new one. The launcher
+  deletes no log.
+- More of each run in the log: the request for administrator rights, and a declined or failed
+  request with its error; a `Timings:` line with each step's duration and
+  `----- End: exit code N -----` at the end of every run; `Error detail:`, `Error ID:` and
+  `Error trace:` lines after an unexpected error, and the system's message when the settings file
+  cannot be opened; and a line when a start waits for VirtualBox's background service.
+- `tests\StartScript.Tests.ps1` for the script's own functions; a dry-run parity table that runs
+  each case as a real start and as a dry run and compares their decisions; Repo checks that the
+  module branches on `-DryRun` only where it must, keeps the mutex and the rights check in their
+  helpers, deletes nothing and moves only the log, and that the script ends unhandled errors in a
+  trap.
 
 ### Changed
 
@@ -111,5 +131,23 @@ Compared with the launcher on a stick before the redesign:
 - A `.vmx` or `.vbox` that is missing, cannot be read, lacks `config.version` or is no valid XML
   stops the launcher, naming the setting and the path. Before, a missing file counted as "no saved
   state".
+- Log lines read `<local time with milliseconds and UTC offset> [<process ID>]  <message>`, as in
+  `2026-11-12T08:15:06.904+01:00 [6732]  ----- Start VM -----`, every line of a message that spans
+  lines included. The message still follows the first two consecutive spaces. Each message is
+  appended in one write that other launcher processes cannot break up or block; before, a second
+  writer failed.
+- A log that cannot be written when a run starts stops the launcher before it reads the PC,
+  naming the cause. A later failure to write changes no decision and no longer hides a message:
+  the message says that the log is incomplete, and a start that succeeded shows that as a
+  warning. Before, a log error hid the message box.
+- An unexpected error names the step it happened in, as in "Unexpected error while finding the
+  stick: ...", with the innermost error's message.
+- The launcher takes the stick's drive letter from the root of its path. It stops with a message
+  when it runs from a path without a drive letter, or from a letter that no partition has, such as
+  a network or substituted drive. Before, it took the path's first character.
+- Dry runs take a real start's decisions: they need administrator rights, take the lock, wait for
+  VirtualBox's background service, and exit with 1 and the first message a real start would stop
+  with (before: 0 and no message). They still change no VM file, start nothing, ask nothing, and
+  do not ask VBoxManage for the VM list or the VM's state after the file step.
 
 [Unreleased]: https://github.com/Ochsyp/portable-vm-launcher/commits/main
