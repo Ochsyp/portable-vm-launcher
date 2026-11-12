@@ -333,9 +333,10 @@ Describe 'Static guards' {
         $last.Pipeline.Extent.Text | Should -BeExactly '1'
         $traps[0].Body.Statements[0].Extent.Text | Should -BeExactly '$script:AskingForRights = $false'
         $traps[0].Body.Statements[1].Extent.Text | Should -BeExactly '$message = "Unexpected error in Start-PortableVM.ps1: $($_.Exception.Message)"'
-        # The error is logged with its details, and the message says when that failed.
-        @($traps[0].Body.Statements | Where-Object { $_.Extent.Text -ceq '$message = Add-LogNote -Message $message -Problem (Add-StopLine -Message $message -ErrorRecord $_)' }).Count |
-            Should -Be 1
+        # The error is logged with its details, the message says when that failed, and a failure of
+        # the log line itself cannot end the trap before its message and exit code.
+        $traps[0].Body.Statements[2].Extent.Text | Should -BeExactly '$problem = try { Add-StopLine -Message $message -ErrorRecord $_ } catch { Get-ErrorCause -Exception $_.Exception }'
+        $traps[0].Body.Statements[3].Extent.Text | Should -BeExactly '$message = Add-LogNote -Message $message -Problem $problem'
         $commands = @($traps[0].Body.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true))
         @($commands | Where-Object { $_.GetCommandName() -eq 'Show-Message' }).Count | Should -Be 1
     }

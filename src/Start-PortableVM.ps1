@@ -61,12 +61,12 @@ function Get-ErrorCause([Exception]$Exception) {
     "an error of type $($Exception.GetType().Name)"
 }
 
-# Return the cause of the error $Exception of a write to the file or folder $Path as
-# Get-PvmPathCause in the module gives it: Get-ErrorCause's words, but 'a path is too long' when
-# they are 'it is missing' and $Path has $Limit characters or more.
-function Get-PathCause([Exception]$Exception, [string]$Path, [int]$Limit) {
+# Return the cause of the error $Exception of a write to the file $Path as Get-PvmPathCause in the
+# module gives it: Get-ErrorCause's words, but 'a path is too long' when they are 'it is missing'
+# and $Path has 260 characters or more.
+function Get-PathCause([Exception]$Exception, [string]$Path) {
     $cause = Get-ErrorCause -Exception $Exception
-    if ($cause -eq 'it is missing' -and $Path.Length -ge $Limit) { return 'a path is too long' }
+    if ($cause -eq 'it is missing' -and $Path.Length -ge 260) { return 'a path is too long' }
     $cause
 }
 
@@ -84,15 +84,17 @@ function Add-LogNote([string]$Message, [string]$Problem) {
 function Add-LogLine([string]$Message) {
     $text = Format-LogText -Time ([DateTimeOffset]::Now) -ProcessId $PID -Message $Message
     Write-Host $text
-    $data = Join-Path (Split-Path $Here) 'LauncherData'
-    if (-not (Test-Path -LiteralPath $data -PathType Container)) { return '' }
-    # The folder, then the file, as the write reaches them, with Windows' length limit of each.
-    $path = Join-Path $data 'logs'
-    $limit = 248
+    # .NET builds the paths, since PowerShell throws for a drive that is gone, as when the stick is
+    # pulled; the logs folder comes first, then the file.
+    $path = ''
+    $folder = $true
     try {
+        $data = [IO.Path]::Combine([IO.Path]::GetDirectoryName($Here), 'LauncherData')
+        if (-not [IO.Directory]::Exists($data)) { return '' }
+        $path = [IO.Path]::Combine($data, 'logs')
         $null = [IO.Directory]::CreateDirectory($path)
-        $path = Join-Path $path 'launcher.log'
-        $limit = 260
+        $folder = $false
+        $path = [IO.Path]::Combine($path, 'launcher.log')
         $bytes = [Text.Encoding]::Default.GetBytes($text + "`r`n")
         $stream = [IO.FileStream]::new($path, [IO.FileMode]::Append, [Security.AccessControl.FileSystemRights]::AppendData,
             ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete), 4096, [IO.FileOptions]::None)
@@ -103,7 +105,10 @@ function Add-LogLine([string]$Message) {
         $exception = $_.Exception
         while ($exception -is [System.Management.Automation.MethodInvocationException] -and $null -ne $exception.InnerException) { $exception = $exception.InnerException }
         Write-Host "launcher.log could not be written: $($exception.Message)"
-        Get-PathCause -Exception $exception -Path $path -Limit $limit
+        if (-not $folder) { return (Get-PathCause -Exception $exception -Path $path) }
+        # An item that is in the way of the logs folder is a file of that name, as in the module.
+        $cause = Get-ErrorCause -Exception $exception
+        if ($cause -eq 'an item of that name exists already') { 'LauncherData\logs is a file, not a folder' } else { $cause }
     }
 }
 
@@ -206,7 +211,9 @@ function Invoke-RightsRequest {
 trap {
     $script:AskingForRights = $false
     $message = "Unexpected error in Start-PortableVM.ps1: $($_.Exception.Message)"
-    $message = Add-LogNote -Message $message -Problem (Add-StopLine -Message $message -ErrorRecord $_)
+    # Nothing may keep the trap from its message and its exit code, a failed log line neither.
+    $problem = try { Add-StopLine -Message $message -ErrorRecord $_ } catch { Get-ErrorCause -Exception $_.Exception }
+    $message = Add-LogNote -Message $message -Problem $problem
     try { Show-Message -Message $message -Icon 'Error' -Caption '' }
     catch { Write-Host "The message could not be shown: $($_.Exception.Message)" }
     exit 1

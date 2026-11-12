@@ -127,7 +127,7 @@ function Write-PvmLog {
         finally { $stream.Dispose() }
     } catch {
         if (-not (Get-PvmLogProblem)) {
-            $script:PvmLogProblem = Get-PvmPathCause -Path $Path -Limit 260 -ErrorRecord $_
+            $script:PvmLogProblem = Get-PvmPathCause -Path $Path -ErrorRecord $_
             Write-Host "launcher.log could not be written: $script:PvmLogProblem"
         }
     }
@@ -170,20 +170,19 @@ function Get-PvmErrorCause {
     "an error of type $($exception.GetType().Name)"
 }
 
-# Return the cause of the error $ErrorRecord of a write to the file or folder $Path, as
-# Get-PvmErrorCause words it, but 'a path is too long' when it says 'it is missing' and $Path has
-# $Limit characters or more: without long-path support, Windows names a missing part of a path of
-# 260 characters or more for a file, and of 248 or more for a folder.
+# Return the cause of the error $ErrorRecord of a write to the file $Path, as Get-PvmErrorCause
+# words it, but 'a path is too long' when it says 'it is missing' and $Path has 260 characters or
+# more: without long-path support, Windows names a missing part of such a file path, while it
+# names a folder path that is too long as such.
 function Get-PvmPathCause {
     [CmdletBinding()]
     [OutputType([string])]
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][int]$Limit,
         [Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord
     )
     $cause = Get-PvmErrorCause -ErrorRecord $ErrorRecord
-    if ($cause -eq 'it is missing' -and $Path.Length -ge $Limit) { return 'a path is too long' }
+    if ($cause -eq 'it is missing' -and $Path.Length -ge 260) { return 'a path is too long' }
     $cause
 }
 
@@ -562,7 +561,7 @@ function Move-PvmOldLog {
         [IO.File]::Move($Path, $target)
         [pscustomobject]@{ Name = $name; Problem = '' }
     } catch {
-        [pscustomobject]@{ Name = ''; Problem = (Get-PvmPathCause -Path $target -Limit 260 -ErrorRecord $_) }
+        [pscustomobject]@{ Name = ''; Problem = (Get-PvmPathCause -Path $target -ErrorRecord $_) }
     }
 }
 
@@ -1781,7 +1780,8 @@ function Invoke-PvmLaunch {
 # happened in, are logged to LauncherData\logs\launcher.log as "STOPPED: ..." and returned; every
 # run ends with a Timings line and an End line. A log that cannot be written when the run starts
 # stops it; a later failure adds a note to the message. Without LauncherData there is no log and
-# no lock, so the message is only returned and printed. It does not throw.
+# no lock, so the message is only returned and printed. It throws only when PowerShell cannot build
+# the launcher's paths, as when the stick's drive is gone before the run begins.
 function Invoke-PortableVM {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -1828,7 +1828,11 @@ function Invoke-PortableVM {
     try {
         # Every run logs, a dry run too. New-Item -Force would accept a file named logs silently.
         try { $null = [IO.Directory]::CreateDirectory($paths.Logs) }
-        catch { $script:PvmLogProblem = Get-PvmPathCause -Path $paths.Logs -Limit 248 -ErrorRecord $_ }
+        catch {
+            # An item that is in the way of the logs folder is a file of that name.
+            $cause = Get-PvmErrorCause -ErrorRecord $_
+            $script:PvmLogProblem = if ($cause -eq 'an item of that name exists already') { 'LauncherData\logs is a file, not a folder' } else { $cause }
+        }
         # An error of the rights check or of the lock ends the run after its start and version
         # lines, as every run begins with them.
         $admin = $false

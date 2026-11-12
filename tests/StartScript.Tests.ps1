@@ -32,6 +32,15 @@ BeforeAll {
     function Get-TestLog {
         @([IO.File]::ReadAllLines($script:log, [Text.Encoding]::Default) | ForEach-Object { $_ -replace '^.*?  ', '' })
     }
+
+    # Return a drive letter that neither Windows nor PowerShell knows, as for a stick that is gone.
+    function Get-TestFreeDriveLetter {
+        $used = @([IO.DriveInfo]::GetDrives() | ForEach-Object { $_.Name.Substring(0, 1).ToUpperInvariant() }) +
+        @(Get-PSDrive -PSProvider FileSystem | ForEach-Object { $_.Name.ToUpperInvariant() })
+        $free = @(90..68 | ForEach-Object { [string][char]$_ } | Where-Object { $used -notcontains $_ })
+        if (-not $free.Count) { throw 'No drive letter is free.' }
+        $free[0]
+    }
 }
 
 AfterAll {
@@ -112,17 +121,28 @@ Describe 'The script''s log lines' {
         $lines[1] | Should -Match ('\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d \[' + $PID + '\]  b\z')
     }
 
-    It 'name a missing part of a long path as the module does: <Case>' -ForEach @(
-        @{ Case = 'a file of 260 characters'; Length = 260; Limit = 260; HResult = 0x80070003; Cause = 'a path is too long' }
-        @{ Case = 'a file of 259 characters'; Length = 259; Limit = 260; HResult = 0x80070003; Cause = 'it is missing' }
-        @{ Case = 'a folder of 248 characters'; Length = 248; Limit = 248; HResult = 0x80070003; Cause = 'a path is too long' }
-        @{ Case = 'a long file held by another program'; Length = 300; Limit = 260; HResult = 0x80070020; Cause = 'it is open in another program' }
+    It 'name a missing part of a long file path as the module does: <Case>' -ForEach @(
+        @{ Case = 'a path of 260 characters'; Length = 260; HResult = 0x80070003; Cause = 'a path is too long' }
+        @{ Case = 'a path of 259 characters'; Length = 259; HResult = 0x80070003; Cause = 'it is missing' }
+        @{ Case = 'a long path held by another program'; Length = 300; HResult = 0x80070020; Cause = 'it is open in another program' }
     ) {
         $exception = [IO.IOException]::new('x', [int]$HResult)
         $record = [System.Management.Automation.ErrorRecord]::new($exception, 'Test', 'NotSpecified', $null)
         $path = 'X:\' + 'a' * ($Length - 3)
-        Get-PathCause -Exception $exception -Path $path -Limit $Limit | Should -BeExactly $Cause
-        Get-PvmPathCause -Path $path -Limit $Limit -ErrorRecord $record | Should -BeExactly $Cause
+        Get-PathCause -Exception $exception -Path $path | Should -BeExactly $Cause
+        Get-PvmPathCause -Path $path -ErrorRecord $record | Should -BeExactly $Cause
+    }
+
+    It 'say that a file is in the way of the logs folder, as the module does' {
+        [IO.File]::WriteAllText((Join-Path $script:stickRoot 'LauncherData\logs'), '')
+        Add-LogLine -Message 'x' | Should -BeExactly 'LauncherData\logs is a file, not a folder'
+    }
+
+    It 'never throw, and write nothing, when the drive of the script is gone' {
+        $script:Here = "$(Get-TestFreeDriveLetter):\Stick\Launcher"
+        { $script:reason = Add-LogLine -Message 'x' } | Should -Not -Throw
+        $script:reason | Should -BeExactly ''
+        Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { "$Object" -like '*  x' }
     }
 
     It 'are appended with their lines together while another writer holds the log open, as the module''s are' {
@@ -200,6 +220,13 @@ Describe 'The warning of the rights request' {
         Should -Invoke Show-Dialog -Times 1 -Exactly -ParameterFilter {
             $Message -ceq "$script:warning`n`nThe launcher could not write this message to its log, LauncherData\logs\launcher.log, because it is open in another program."
         }
+    }
+
+    It 'is shown when the drive of the script is gone, as when the stick was pulled during the prompt' {
+        $script:Here = "$(Get-TestFreeDriveLetter):\Stick\Launcher"
+        try { throw [InvalidOperationException]::new('canceled') }
+        catch { Show-Message $script:warning 'Warning' }
+        Should -Invoke Show-Dialog -Times 1 -Exactly -ParameterFilter { $Message -ceq $script:warning -and $Icon -eq 'Warning' }
     }
 
     It 'is not logged without the flag, and a dry run shows no dialog' {

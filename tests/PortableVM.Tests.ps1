@@ -1246,15 +1246,13 @@ Describe 'The log' {
         [IO.File]::ReadAllText($script:log) | Should -BeExactly "$script:shown`r`n"
     }
 
-    It 'names a missing part of a long path as a path that is too long: <Case>' -ForEach @(
-        @{ Case = 'a file of 260 characters'; Length = 260; Limit = 260; HResult = 0x80070003; Cause = 'a path is too long' }
-        @{ Case = 'a file of 259 characters'; Length = 259; Limit = 260; HResult = 0x80070003; Cause = 'it is missing' }
-        @{ Case = 'a folder of 248 characters'; Length = 248; Limit = 248; HResult = 0x80070003; Cause = 'a path is too long' }
-        @{ Case = 'a folder of 247 characters'; Length = 247; Limit = 248; HResult = 0x80070003; Cause = 'it is missing' }
-        @{ Case = 'a long file held by another program'; Length = 300; Limit = 260; HResult = 0x80070020; Cause = 'it is open in another program' }
+    It 'names a missing part of a long file path as a path that is too long: <Case>' -ForEach @(
+        @{ Case = 'a path of 260 characters'; Length = 260; HResult = 0x80070003; Cause = 'a path is too long' }
+        @{ Case = 'a path of 259 characters'; Length = 259; HResult = 0x80070003; Cause = 'it is missing' }
+        @{ Case = 'a long path held by another program'; Length = 300; HResult = 0x80070020; Cause = 'it is open in another program' }
     ) {
         $record = [System.Management.Automation.ErrorRecord]::new([IO.IOException]::new('x', [int]$HResult), 'Test', 'NotSpecified', $null)
-        Get-PvmPathCause -Path ('X:\' + 'a' * ($Length - 3)) -Limit $Limit -ErrorRecord $record | Should -BeExactly $Cause
+        Get-PvmPathCause -Path ('X:\' + 'a' * ($Length - 3)) -ErrorRecord $record | Should -BeExactly $Cause
     }
 
     It 'never throws, and says once on the console why the log cannot be written' {
@@ -1298,6 +1296,18 @@ Describe 'Log rotation' {
         $result.Problem | Should -BeExactly ''
         (Get-FileHash -LiteralPath $script:moved -Algorithm SHA256).Hash | Should -BeExactly $hash
         $script:log | Should -Not -Exist
+    }
+
+    It 'moves a log in the format aside once it holds 1 MiB, and not a byte before' {
+        $head = [Text.Encoding]::ASCII.GetBytes((Format-PvmLogText -Time $script:time -ProcessId 1 -Message 'line') + "`r`n")
+        foreach ($case in @(@{ Size = 1MB - 1; Name = $null }, @{ Size = 1MB; Name = 'launcher-20261112-101530.log' })) {
+            $bytes = New-Object byte[] $case.Size
+            [Array]::Copy($head, $bytes, $head.Length)
+            [IO.File]::WriteAllBytes($script:log, $bytes)
+            $result = Move-PvmOldLog -Path $script:log -Time $script:time
+            if ($null -eq $case.Name) { $result | Should -BeNullOrEmpty } else { $result.Name | Should -BeExactly $case.Name }
+        }
+        @(Get-ChildItem -LiteralPath $script:logFolder -Name) | Should -BeExactly @('launcher-20261112-101530.log')
     }
 
     It 'names the moved log by the time in the Gregorian calendar under a culture with another one' {
@@ -1349,7 +1359,12 @@ Describe 'Log rotation' {
             Set-TestPc -Stick $script:stick -Installed 'VMware'
             Mock -ModuleName PortableVM Get-PvmNow { [DateTimeOffset]::new(2026, 11, 12, 10, 15, 30, 123, [TimeSpan]::FromHours(1)) }
             $null = New-Item -ItemType Directory -Path (Split-Path $script:stick.Log) -Force
-            [IO.File]::WriteAllBytes($script:stick.Log, (New-Object byte[] 1MB))
+            # A full log in the format: a line of an earlier run, then padding up to 1 MiB.
+            $bytes = New-Object byte[] 1MB
+            $script:oldHead = (Format-PvmLogText -Time ([DateTimeOffset]::new(2026, 11, 11, 9, 0, 0, 0, [TimeSpan]::FromHours(1))) -ProcessId 7 -Message 'an earlier run') + "`r`n"
+            $head = [Text.Encoding]::ASCII.GetBytes($script:oldHead)
+            [Array]::Copy($head, $bytes, $head.Length)
+            [IO.File]::WriteAllBytes($script:stick.Log, $bytes)
             $script:oldHash = (Get-FileHash -LiteralPath $script:stick.Log -Algorithm SHA256).Hash
             $script:movedLog = Join-Path (Split-Path $script:stick.Log) 'launcher-20261112-101530.log'
         }
@@ -1374,8 +1389,8 @@ Describe 'Log rotation' {
             Mock -ModuleName PortableVM Invoke-PvmEnterLock { [pscustomobject]@{ State = $script:state; Mutex = $null } }
             (Invoke-PortableVM -LauncherPath $script:stick.Launcher).ExitCode | Should -Be 1
             $script:movedLog | Should -Not -Exist
-            # The old zero bytes still come first.
-            [IO.File]::ReadAllBytes($script:stick.Log)[0] | Should -Be 0
+            # The earlier run's line still comes first.
+            [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($script:stick.Log), 0, $script:oldHead.Length) | Should -BeExactly $script:oldHead
         }
 
         It 'says so and adds to the log when it cannot move it aside' {
@@ -1401,7 +1416,7 @@ Describe 'Log failures' {
 
     It 'stops before it reads the PC when the log cannot be written: <Case>' -ForEach @(
         @{ Case = 'a program holds it'; Cause = 'it is open in another program' }
-        @{ Case = 'a file is named logs'; Cause = 'an item of that name exists already' }
+        @{ Case = 'a file is named logs'; Cause = 'LauncherData\logs is a file, not a folder' }
     ) {
         $holder = $null
         if ($Case -like 'a program*') {
