@@ -286,7 +286,7 @@ Describe 'Static guards' {
             $name = if ($parent) { $parent.Name } else { '' }
             $counts[$name] = 1 + [int]$counts[$name]
         }
-        $expected = @{ 'Invoke-PvmStopUnlessDryRun' = 1; 'Confirm-PvmResume' = 1; 'Invoke-PvmVMware' = 3; 'Invoke-PvmVirtualBox' = 3; 'Invoke-PortableVM' = 3 }
+        $expected = @{ 'Invoke-PvmStopUnlessDryRun' = 1; 'Confirm-PvmResume' = 1; 'Invoke-PvmVMware' = 3; 'Invoke-PvmVirtualBox' = 3; 'Invoke-PortableVM' = 4 }
         @($counts.Keys | Sort-Object | ForEach-Object { "$_=$($counts[$_])" }) | Should -BeExactly @($expected.Keys | Sort-Object | ForEach-Object { "$_=$($expected[$_])" })
     }
 

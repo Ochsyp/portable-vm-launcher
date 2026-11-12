@@ -118,10 +118,15 @@ wrote it:
   has the prefix.
 - A run starts with `----- Start VM -----`, or `----- Start VM (dry run) -----`, and ends with a
   `Timings:` line, which gives each step's duration in milliseconds, and `----- End: exit code N
-  -----`, or `----- End (dry run): exit code N -----`. A run without its End line was ended
-  before it finished. The End line comes before the run's dialog: a dialog that fails adds a
-  `STOPPED:` line after it, and the script then exits with 1; a lock that cannot be released
-  adds a `Note:` line after it. Lines in which a dry run differs begin with `DRY RUN - `.
+  -----`, or `----- End (dry run): exit code N -----`. A run that has its start line but no End
+  line was ended before it finished. The End line comes before the run's dialog: a dialog that
+  fails adds a `STOPPED:` line after it, and the script then exits with 1; a lock that cannot be
+  released adds a `Note:` line after it. Lines in which a dry run differs begin with `DRY RUN - `.
+- The script logs a few stops itself, before a run begins: another run in progress at the
+  request for administrator rights, a declined or failed request, a `PortableVM.psm1` that
+  cannot be loaded, and an error that no step handles. Each is one `STOPPED:` line, with the
+  error's details where there was one, and has no start or End line. A declined request exits
+  with 0, the others with 1.
 - Before Windows asks for administrator rights, the launcher logs `Asking for administrator
   rights`; the elevated run follows under another process ID. A declined or failed request logs a
   `STOPPED:` line with `Error detail:` lines. When the request line is the last line of

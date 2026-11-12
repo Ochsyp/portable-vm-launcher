@@ -84,9 +84,10 @@ All notable changes to this project are listed here. The format follows
   deletes no log.
 - More of each run in the log: the request for administrator rights, and a declined or failed
   request with its error; a `Timings:` line with each step's duration and
-  `----- End: exit code N -----` at the end of every run; `Error detail:`, `Error ID:` and
-  `Error trace:` lines after an unexpected error, and the system's message when the settings file
-  cannot be opened; and a line when a start waits for VirtualBox's background service.
+  `----- End: exit code N -----` at the end of every run that the module begins; `Error detail:`,
+  `Error ID:` and `Error trace:` lines after an unexpected error, and the system's message when
+  the settings file cannot be opened; and a line when a start waits for VirtualBox's background
+  service.
 - `tests\StartScript.Tests.ps1` for the script's own functions; a dry-run parity table that runs
   each case as a real start and as a dry run and compares their decisions; Repo checks that the
   module branches on `-DryRun` only where it must, keeps the mutex and the rights check in their
@@ -139,8 +140,8 @@ Compared with the launcher on a stick before the redesign:
   writer failed.
 - A log that cannot be written when a run starts stops the launcher before it reads the PC,
   naming the cause. A later failure to write changes no decision and no longer hides a message:
-  the message says that the log is incomplete, and a start that succeeded shows that as a
-  warning. Before, a log error hid the message box.
+  the message says that the log is incomplete, and a start that succeeded says that the VM was
+  started, with that note, as a warning. Before, a log error hid the message box.
 - An unexpected error names the step it happened in, as in "Unexpected error while finding the
   stick: ...", with the innermost error's message.
 - The launcher takes the stick's drive letter from the root of its path. It stops with a message

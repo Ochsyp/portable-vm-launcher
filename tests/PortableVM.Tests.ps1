@@ -990,6 +990,13 @@ Describe 'A start' {
             $script:stick.Data | Should -Not -Exist
         }
 
+        It 'says so when the launcher''s own folder is gone, as when the stick was pulled' {
+            $result = Invoke-PortableVM -LauncherPath (Join-Path $script:stick.Root 'gone\Launcher')
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly 'The launcher''s own folder cannot be found any more, as when the USB stick was removed. Plug the stick in, then start the VM again. Nothing was started.'
+            Should -Invoke -CommandName Invoke-PvmTestAdministrator -ModuleName PortableVM -Times 0 -Exactly
+        }
+
         It 'creates the logs folder when it is missing, also in a dry run' {
             $script:stick.Log | Should -Not -Exist
             (Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun).ExitCode | Should -Be 0
@@ -1456,7 +1463,20 @@ Describe 'Log failures' {
         finally { if ($script:blocker) { $script:blocker.Dispose() } }
         Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
         $result.ExitCode | Should -Be 0
-        $result.Message | Should -BeExactly 'The launcher could not write all of this run to its log, LauncherData\logs\launcher.log, because it is open in another program.'
+        $result.Message | Should -BeExactly "The VM was started.`n`nThe launcher could not write all of this run to its log, LauncherData\logs\launcher.log, because it is open in another program."
+        $result.Icon | Should -BeExactly 'Warning'
+    }
+
+    It 'says that a dry run found no stop, and warns that the log is incomplete, when the log fails later' {
+        Mock -ModuleName PortableVM Invoke-PvmGetDisk {
+            $script:blocker = [IO.File]::Open($script:stick.Log, 'Open', 'Read', 'Read')
+            Get-TestDisk
+        } -ParameterFilter { $Number -eq 3 }
+        try { $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun }
+        finally { if ($script:blocker) { $script:blocker.Dispose() } }
+        Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+        $result.ExitCode | Should -Be 0
+        $result.Message | Should -BeExactly "The dry run found nothing that would stop a start.`n`nThe launcher could not write all of this run to its log, LauncherData\logs\launcher.log, because it is open in another program."
         $result.Icon | Should -BeExactly 'Warning'
     }
 }

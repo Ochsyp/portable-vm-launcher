@@ -84,8 +84,8 @@ function Add-LogNote([string]$Message, [string]$Problem) {
 function Add-LogLine([string]$Message) {
     $text = Format-LogText -Time ([DateTimeOffset]::Now) -ProcessId $PID -Message $Message
     Write-Host $text
-    # .NET builds the paths, since PowerShell throws for a drive that is gone, as when the stick is
-    # pulled; the logs folder comes first, then the file.
+    # .NET builds the paths, since PowerShell can throw for a removable drive that is gone, as when
+    # the stick was pulled; the logs folder comes first, then the file.
     $path = ''
     $folder = $true
     try {

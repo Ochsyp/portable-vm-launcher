@@ -96,8 +96,9 @@ function Format-PvmLogText {
     (@($Message -split '\r\n|\r|\n') | ForEach-Object { $prefix + $_ }) -join "`r`n"
 }
 
-# Return the cause, in Get-PvmPathCause's words, of the first log write of this run that failed,
-# or '' while every write succeeded. Invoke-PortableVM clears it when a run starts.
+# Return the cause of the first log failure of this run, or '' while there was none: the logs
+# folder that Invoke-PortableVM could not create, in its words, or else the first write that
+# failed, in Get-PvmPathCause's words. Invoke-PortableVM clears it when a run starts.
 function Get-PvmLogProblem {
     [CmdletBinding()]
     [OutputType([string])]
@@ -109,8 +110,8 @@ function Get-PvmLogProblem {
 # now and this process's ID, and show it on the console. The text goes in one write through an
 # append-only handle that shares reading, writing and deletion, so that other launcher processes
 # can neither break it up nor block it; -WhatIf does not affect it, so a dry run logs what it would
-# do. It never throws: the first failed write of a run keeps its cause for Get-PvmLogProblem and
-# says so once on the console.
+# do. It never throws: a failed write keeps its cause for Get-PvmLogProblem and says so on the
+# console, unless an earlier failure of this run, the logs folder's included, is kept already.
 function Write-PvmLog {
     [CmdletBinding()]
     param(
@@ -172,8 +173,7 @@ function Get-PvmErrorCause {
 
 # Return the cause of the error $ErrorRecord of a write to the file $Path, as Get-PvmErrorCause
 # words it, but 'a path is too long' when it says 'it is missing' and $Path has 260 characters or
-# more: without long-path support, Windows names a missing part of such a file path, while it
-# names a folder path that is too long as such.
+# more, since Windows without long-path support names a missing part of such a path.
 function Get-PvmPathCause {
     [CmdletBinding()]
     [OutputType([string])]
@@ -1780,8 +1780,9 @@ function Invoke-PvmLaunch {
 # happened in, are logged to LauncherData\logs\launcher.log as "STOPPED: ..." and returned; every
 # run ends with a Timings line and an End line. A log that cannot be written when the run starts
 # stops it; a later failure adds a note to the message. Without LauncherData there is no log and
-# no lock, so the message is only returned and printed. It throws only when PowerShell cannot build
-# the launcher's paths, as when the stick's drive is gone before the run begins.
+# no lock, so the message is only returned and printed; a launcher folder that is gone, as when
+# the stick was pulled, gets a message of its own. It throws only when PowerShell cannot build the
+# launcher's paths, which can happen when the stick's drive is gone before the run begins.
 function Invoke-PortableVM {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -1792,7 +1793,9 @@ function Invoke-PortableVM {
     )
     $paths = Get-PvmDataPath -LauncherPath $LauncherPath
     if (-not (Test-Path -LiteralPath $paths.Data -PathType Container)) {
-        $message = if (Test-Path -LiteralPath $paths.OldSettings -PathType Leaf) {
+        $message = if (-not [IO.Directory]::Exists($LauncherPath)) {
+            'The launcher''s own folder cannot be found any more, as when the USB stick was removed. Plug the stick in, then start the VM again. Nothing was started.'
+        } elseif (Test-Path -LiteralPath $paths.OldSettings -PathType Leaf) {
             'The settings are still in Launcher\settings.psd1, where the launcher read them before LauncherData. Move them to LauncherData with tools\Deploy-PortableVM.ps1 -MigrateSettings, run from a clone of the launcher. Nothing was started.'
         } else {
             'LauncherData, the folder beside Launcher that holds the settings and the log, is missing. Create it, copy examples\settings.example.psd1 into it as settings.psd1 and fill that in. Nothing was started.'
@@ -1933,13 +1936,15 @@ function Invoke-PortableVM {
             catch { Write-PvmLog -Path $context.LogPath -Message "Note: the launcher could not release its lock ($($_.Exception.Message)); Windows releases it when this process ends." }
         }
     }
-    # A log that failed after the start line changed no decision, but the message says so.
+    # A log that failed after the start line changed no decision, but the message says so. A run
+    # without a message ended well, which the warning then says first.
     $problem = Get-PvmLogProblem
     if ($problem -and -not $logStop) {
         $note = "The launcher could not write all of this run to its log, LauncherData\logs\launcher.log, because $problem."
         if ($result.Message) { $result.Message += "`n`n$note" }
         else {
-            $result.Message = $note
+            $done = if ($DryRun) { 'The dry run found nothing that would stop a start.' } else { Format-PvmMessage -Names $context.Names -Template '{VM} was started.' }
+            $result.Message = "$done`n`n$note"
             $result.Icon = 'Warning'
         }
     }
