@@ -112,6 +112,24 @@ Describe 'The script''s log lines' {
         $lines[1] | Should -Match ('\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d \[' + $PID + '\]  b\z')
     }
 
+    It 'are appended with their lines together while another writer holds the log open, as the module''s are' {
+        $null = [IO.Directory]::CreateDirectory((Split-Path $script:log))
+        $other = [IO.FileStream]::new($script:log, [IO.FileMode]::Append, [Security.AccessControl.FileSystemRights]::AppendData,
+            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete), 4096, [IO.FileOptions]::None)
+        try {
+            $bytes = [Text.Encoding]::ASCII.GetBytes("other 1`r`n")
+            $other.Write($bytes, 0, $bytes.Length)
+            $other.Flush()
+            Add-LogLine -Message "x`ny" | Should -BeExactly ''
+            $bytes = [Text.Encoding]::ASCII.GetBytes("other 2`r`n")
+            $other.Write($bytes, 0, $bytes.Length)
+            $other.Flush()
+        } finally {
+            $other.Dispose()
+        }
+        @(Get-TestLog) | Should -BeExactly @('other 1', 'x', 'y', 'other 2')
+    }
+
     It 'return the cause, without a path, of why they could not be written, without throwing' {
         $null = Add-LogLine -Message 'first'
         $holder = [IO.File]::Open($script:log, 'Open', 'Read', 'Read')
@@ -214,6 +232,17 @@ Describe 'The request for administrator rights' {
         $result.Caption | Should -BeExactly 'Portable VM'
         @(Get-TestLog) | Should -BeExactly @("STOPPED: $(Get-PvmBusyMessage)")
         $script:AskingForRights | Should -BeFalse
+    }
+
+    It 'says in the busy message when its line could not be logged' {
+        Mock Test-LockHeld { $true }
+        $null = Add-LogLine -Message 'first'
+        $holder = [IO.File]::Open($script:log, 'Open', 'Read', 'Read')
+        try { $result = Invoke-RightsRequest }
+        finally { $holder.Dispose() }
+        $result.ExitCode | Should -Be 1
+        $result.Message | Should -BeExactly "$(Get-PvmBusyMessage)`n`nThe launcher could not write this message to its log, LauncherData\logs\launcher.log, because it is open in another program."
+        @(Get-TestLog) | Should -BeExactly @('first')
     }
 
     It 'checks the lock without LauncherData too, and logs nothing' {

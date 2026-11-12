@@ -332,8 +332,10 @@ Describe 'Static guards' {
         $last | Should -BeOfType ([System.Management.Automation.Language.ExitStatementAst])
         $last.Pipeline.Extent.Text | Should -BeExactly '1'
         $traps[0].Body.Statements[0].Extent.Text | Should -BeExactly '$script:AskingForRights = $false'
+        # The error is logged with its details, and the message says when that failed.
+        @($traps[0].Body.Statements | Where-Object { $_.Extent.Text -ceq '$message = Add-LogNote -Message $message -Problem (Add-StopLine -Message $message -ErrorRecord $_)' }).Count |
+            Should -Be 1
         $commands = @($traps[0].Body.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true))
-        @($commands | Where-Object { $_.Extent.Text -ceq 'Add-StopLine -Message $message -ErrorRecord $_' }).Count | Should -Be 1
         @($commands | Where-Object { $_.GetCommandName() -eq 'Show-Message' }).Count | Should -Be 1
     }
 
@@ -367,8 +369,19 @@ Describe 'Static guards' {
         $opens.Count | Should -Be 1
         $opens[0].Arguments[1].Extent.Text | Should -BeExactly '[IO.FileMode]::Append'
         $opens[0].Arguments[2].Extent.Text | Should -BeExactly '[Security.AccessControl.FileSystemRights]::AppendData'
+        # Other writers may append, and a run may move the log aside, while the file is open.
+        $opens[0].Arguments[3].Extent.Text | Should -BeExactly '([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)'
+        $opens[0].Arguments[4].Extent.Text | Should -BeExactly '4096'
+        $opens[0].Arguments[5].Extent.Text | Should -BeExactly '[IO.FileOptions]::None'
         $writes = @($members | Where-Object { $_.Member.Extent.Text -match '^(Write|WriteByte|BeginWrite|WriteAsync|Flush|(Append|Write)All(Text|Lines|Bytes))$' })
         @($writes | ForEach-Object { $_.Extent.Text }) | Should -BeExactly @('$stream.Write($bytes, 0, $bytes.Length)')
+        # The one write runs once: no loop and no script block lies around it.
+        for ($parent = $writes[0].Parent; -not [object]::ReferenceEquals($parent, $definition); $parent = $parent.Parent) {
+            $parent | Should -Not -BeOfType ([System.Management.Automation.Language.LoopStatementAst])
+            $parent | Should -Not -BeOfType ([System.Management.Automation.Language.ScriptBlockExpressionAst])
+        }
+        # The text of all lines of the message becomes the bytes of that write.
+        @($members | Where-Object { $_.Member.Extent.Text -eq 'GetBytes' } | ForEach-Object { $_.Extent.Text }) | Should -BeExactly @('[Text.Encoding]::Default.GetBytes($text + "`r`n")')
         Get-SourceCommand -Ast $definition | Where-Object { $_.Name -in 'Add-Content', 'Set-Content', 'Out-File', 'Tee-Object' } | Should -BeNullOrEmpty
     }
 

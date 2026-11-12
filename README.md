@@ -232,9 +232,11 @@ The redesign removes these. Until then:
   inside the guest: Windows writes to it at the same time, and it holds the VM's own files.
 - A second double-click while Windows still asks for administrator rights for the first one, or
   in the second after that, asks again. That second run then stops, saying that another run is in
-  progress, or says that the VM is already running.
-- The lock covers the launcher's checks and its start command, not the time the VM runs; until
-  then the process checks find a running VM.
+  progress, or says that the VM is already running. Right after a start in VMware, before
+  VMware's process for the VM shows, it can also find no running VM and run VMware for the VM
+  again.
+- The lock covers the launcher's checks and its start command, not the time the VM runs; once the
+  VM's process runs, the process checks find it.
 
 ## Development
 

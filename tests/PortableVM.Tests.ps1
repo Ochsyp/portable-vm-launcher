@@ -1188,14 +1188,17 @@ Describe 'The log' {
             Should -BeExactly '2026-11-12T10:15:30.123-05:00 [4242]  x'
     }
 
-    It 'writes the same prefix under a culture with another time separator' {
-        $culture = [Threading.Thread]::CurrentThread.CurrentCulture
+    It 'writes the same prefix under a culture with <Case>' -ForEach @(
+        @{ Case = 'another time separator'; CultureName = 'fi-FI'; LocalText = '2026 10.15.30' }
+        @{ Case = 'another calendar'; CultureName = 'th-TH'; LocalText = '2569 10:15:30' }
+    ) {
+        $previous = [Threading.Thread]::CurrentThread.CurrentCulture
         try {
-            [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::new('fi-FI')
-            $script:time.ToString('HH:mm:ss') | Should -BeExactly '10.15.30'
+            [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::new($CultureName)
+            $script:time.ToString('yyyy HH:mm:ss') | Should -BeExactly $LocalText
             Format-PvmLogText -Time $script:time -ProcessId 4242 -Message 'x' | Should -BeExactly '2026-11-12T10:15:30.123+01:00 [4242]  x'
         } finally {
-            [Threading.Thread]::CurrentThread.CurrentCulture = $culture
+            [Threading.Thread]::CurrentThread.CurrentCulture = $previous
         }
     }
 
@@ -1204,7 +1207,9 @@ Describe 'The log' {
         '2026-11-12 10:15:30  a  b' -replace '^.*?  ', '' | Should -BeExactly 'a  b'
     }
 
-    It 'appends a message in one write that another writer cannot break up' {
+    # tests\Repo.Tests.ps1 pins the one write; this test shows the lines staying together while
+    # another writer holds the log open for appending.
+    It 'appends a message with its lines together while another writer holds the log open' {
         $other = [IO.FileStream]::new($script:log, [IO.FileMode]::Append, [Security.AccessControl.FileSystemRights]::AppendData,
             ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete), 4096, [IO.FileOptions]::None)
         try {
@@ -1229,7 +1234,8 @@ Describe 'The log' {
     It 'writes ANSI, as the log was before' {
         Write-PvmLog -Path $script:log -Message "caf$([char]0xE9)"
         $bytes = [IO.File]::ReadAllBytes($script:log)
-        $bytes[$bytes.Length - 3] | Should -Be 0xE9
+        $expected = [Text.Encoding]::Default.GetBytes("caf$([char]0xE9)`r`n")
+        [Convert]::ToBase64String($bytes, $bytes.Length - $expected.Length, $expected.Length) | Should -BeExactly ([Convert]::ToBase64String($expected))
     }
 
     It 'never throws, and says once on the console why the log cannot be written' {
@@ -1269,6 +1275,18 @@ Describe 'Log rotation' {
         $result.Problem | Should -BeExactly ''
         (Get-FileHash -LiteralPath $script:moved -Algorithm SHA256).Hash | Should -BeExactly $hash
         $script:log | Should -Not -Exist
+    }
+
+    It 'names the moved log by the time in the Gregorian calendar under a culture with another one' {
+        $culture = [Threading.Thread]::CurrentThread.CurrentCulture
+        try {
+            [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::new('th-TH')
+            $script:time.ToString('yyyy') | Should -BeExactly '2569'
+            [IO.File]::WriteAllBytes($script:log, (New-Object byte[] 1MB))
+            (Move-PvmOldLog -Path $script:log -Time $script:time).Name | Should -BeExactly 'launcher-20261112-101530.log'
+        } finally {
+            [Threading.Thread]::CurrentThread.CurrentCulture = $culture
+        }
     }
 
     It 'moves a small log in the format before phase 4 aside' {
@@ -1628,6 +1646,7 @@ Describe 'Unexpected errors' {
 
     It 'name the step they happened in: <Text>' -ForEach @(
         @{ Text = 'starting the launcher'; Releases = 0; Setup = { Mock -ModuleName PortableVM Invoke-PvmEnterLock { throw 'boom' } } }
+        @{ Text = 'starting the launcher'; Releases = 0; Setup = { Mock -ModuleName PortableVM Invoke-PvmTestAdministrator { throw 'boom' } } }
         @{ Text = 'reading the settings'; Releases = 1; Setup = { Mock -ModuleName PortableVM Import-PvmSetting { throw 'boom' } } }
         @{ Text = 'finding the stick'; Releases = 1; Setup = { Mock -ModuleName PortableVM Invoke-PvmGetDisk { throw 'boom' } -ParameterFilter { $Number -eq 3 } } }
         # Only the error of a missing drive letter becomes a stop; another error of Get-Partition does not.
@@ -1664,6 +1683,9 @@ Describe 'Unexpected errors' {
         $result.Message | Should -BeExactly "Unexpected error while ${Text}: boom"
         $result.Icon | Should -BeExactly 'Error'
         $log = Get-TestLog -Path $script:stick.Log
+        # Every run begins with its start and version lines, a run that fails in its setup too.
+        $log[0] | Should -BeExactly '----- Start VM -----'
+        $log[1] | Should -BeExactly 'Launcher version unknown'
         $log | Should -Contain "STOPPED: Unexpected error while ${Text}: boom"
         $detail = @($log | Where-Object { $_.StartsWith('Error detail: ') })
         $detail.Count | Should -BeGreaterOrEqual 1

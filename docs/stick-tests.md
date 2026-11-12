@@ -108,11 +108,13 @@ A. On a scratch copy on the PC, never the stick: copy `src\Start-PortableVM.ps1`
    4. A scratch dry run from a normal PowerShell stops with "A dry run needs administrator
       rights" and exit code 1, without a UAC prompt.
    5. With the scratch `launcher.log` set read-only, an elevated scratch dry run stops with "The
-      launcher cannot write its log ..." and exit code 1, and the file stays unchanged.
-   6. In an elevated PowerShell, keep a handle to the lock without taking it
+      launcher cannot write its log ..." and exit code 1, and the file stays unchanged. Then
+      clear the read-only attribute again.
+   6. Type these lines in an elevated PowerShell. Keep a handle to the lock without taking it
       (`$k = [System.Threading.Mutex]::new($false, 'Global\PortableVM-Launcher')`), and let a new
-      process take it and end without releasing it
-      (`powershell -NoProfile -Command "$m = [System.Threading.Mutex]::new($false, 'Global\PortableVM-Launcher'); $null = $m.WaitOne(0)"`).
+      process take it and end without releasing it; the single quotes keep the outer PowerShell
+      from expanding the `$` names
+      (`powershell -NoProfile -Command '$m = [System.Threading.Mutex]::new($false, ''Global\PortableVM-Launcher''); $null = $m.WaitOne(0)'`).
       The next elevated scratch dry run, as a new process, logs that an earlier run ended without
       releasing the lock and that it took the lock over, then stops at the missing settings.
       `$k.Dispose()` ends the check.

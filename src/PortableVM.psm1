@@ -1810,10 +1810,18 @@ function Invoke-PortableVM {
         # Every run logs, a dry run too. New-Item -Force would accept a file named logs silently.
         try { $null = [IO.Directory]::CreateDirectory($paths.Logs) }
         catch { $script:PvmLogProblem = Get-PvmErrorCause -ErrorRecord $_ }
-        $admin = Invoke-PvmTestAdministrator
-        if ($admin) {
-            $lock = Invoke-PvmEnterLock -Name (Get-PvmLockName)
-            $owned = $lock.State -ne 'Busy'
+        # An error of the rights check or of the lock ends the run after its start and version
+        # lines, as every run begins with them.
+        $admin = $false
+        $setupError = $null
+        try {
+            $admin = Invoke-PvmTestAdministrator
+            if ($admin) {
+                $lock = Invoke-PvmEnterLock -Name (Get-PvmLockName)
+                $owned = $lock.State -ne 'Busy'
+            }
+        } catch {
+            $setupError = $_
         }
         # Only the run that holds the lock moves a full or old-format log aside.
         $moved = if ($owned -and -not (Get-PvmLogProblem)) { Move-PvmOldLog -Path $paths.Log -Time (Get-PvmNow) } else { $null }
@@ -1831,6 +1839,7 @@ function Invoke-PortableVM {
         if ($owned -and $lock.State -eq 'Abandoned') {
             Write-PvmLog -Path $paths.Log -Message 'Note: an earlier run of the launcher ended without releasing its lock; this run took the lock over.'
         }
+        if ($null -ne $setupError) { throw $setupError }
         if (-not $admin) {
             $rights = if ($DryRun) {
                 'A dry run needs administrator rights, as a real start has them, so that its checks see what a real start sees. Run it from an elevated PowerShell. Nothing was started.'

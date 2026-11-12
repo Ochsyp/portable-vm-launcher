@@ -21,9 +21,9 @@ or commits: they identify one stick and the PCs it was used on.
   Windows disk. The README lists the known limits of these checks.
 - Raw-disk VMs need the hypervisor to run elevated. Shared folders, drag and drop and shared
   clipboards then act on the host with administrator rights, so keep them off for this VM.
-- Any program that runs on the PC as the same user, or as an administrator, can hold the
-  launcher's lock (`Global\PortableVM-Launcher`) and so keep it from starting the VM; it cannot
-  make the launcher start anything.
+- Any program on the PC, under any account, can create or hold the launcher's lock
+  (`Global\PortableVM-Launcher`) and so keep it from starting the VM; it cannot make the launcher
+  start anything.
 
 ## Data that stays private
 
