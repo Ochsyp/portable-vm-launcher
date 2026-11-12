@@ -1262,11 +1262,18 @@ Describe 'The log' {
         Get-PvmPathCause -Path ('X:\' + 'a' * ($Length - 3)) -ErrorRecord $record | Should -BeExactly $Cause
     }
 
+    It 'words a cause for the place after "because": <Cause>' -ForEach @(
+        @{ Cause = 'it is open in another program'; Text = 'it is open in another program' }
+        @{ Cause = 'an error of type IOException'; Text = 'of an error of type IOException' }
+    ) {
+        Format-PvmBecause -Cause $Cause | Should -BeExactly $Text
+    }
+
     It 'never throws, and says once on the console why the log cannot be written' {
         $null = New-Item -ItemType Directory -Path $script:log
         { foreach ($n in 1..3) { Write-PvmLog -Path $script:log -Message "line $n" } } | Should -Not -Throw
-        Get-PvmLogProblem | Should -BeExactly 'access is denied'
-        Should -Invoke -CommandName Write-Host -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { "$Object" -ceq 'launcher.log could not be written: access is denied' }
+        Get-PvmLogProblem | Should -BeExactly 'it is a folder, not a file'
+        Should -Invoke -CommandName Write-Host -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { "$Object" -ceq 'launcher.log could not be written: it is a folder, not a file' }
     }
 }
 
@@ -1422,21 +1429,31 @@ Describe 'Log failures' {
     AfterEach { Remove-Item -LiteralPath $script:stick.Root -Recurse -Force }
 
     It 'stops before it reads the PC when the log cannot be written: <Case>' -ForEach @(
-        @{ Case = 'a program holds it'; Cause = 'it is open in another program' }
-        @{ Case = 'a file is named logs'; Cause = 'LauncherData\logs is a file, not a folder' }
+        @{ Case = 'a program holds it'; Because = 'it is open in another program'; Hold = $true; Setup = {} }
+        @{ Case = 'a file is named logs'; Because = 'LauncherData\logs is a file, not a folder'; Hold = $false; Setup = {
+                [IO.File]::WriteAllText((Split-Path $script:stick.Log), 'not a folder')
+            }
+        }
+        @{ Case = 'a folder is named launcher.log'; Because = 'it is a folder, not a file'; Hold = $false; Setup = {
+                $null = New-Item -ItemType Directory -Path $script:stick.Log -Force
+            }
+        }
+        @{ Case = 'an error the launcher has no words for'; Because = 'of an error of type IOException'; Hold = $true; Setup = {
+                Mock -ModuleName PortableVM Get-PvmPathCause { 'an error of type IOException' }
+            }
+        }
     ) {
         $holder = $null
-        if ($Case -like 'a program*') {
+        if ($Hold) {
             $null = New-Item -ItemType Directory -Path (Split-Path $script:stick.Log) -Force
             [IO.File]::WriteAllText($script:stick.Log, '')
             $holder = [IO.File]::Open($script:stick.Log, 'Open', 'Read', 'Read')
-        } else {
-            [IO.File]::WriteAllText((Split-Path $script:stick.Log), 'not a folder')
         }
+        & $Setup
         try { $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher }
         finally { if ($holder) { $holder.Dispose() } }
         $result.ExitCode | Should -Be 1
-        $result.Message | Should -BeExactly "The launcher cannot write its log, LauncherData\logs\launcher.log, because $Cause. Nothing was started."
+        $result.Message | Should -BeExactly "The launcher cannot write its log, LauncherData\logs\launcher.log, because $Because. Nothing was started."
         Should -Invoke -CommandName Invoke-PvmGetPartition -ModuleName PortableVM -Times 0 -Exactly
         Should -Invoke -CommandName Invoke-PvmExitLock -ModuleName PortableVM -Times 1 -Exactly
     }

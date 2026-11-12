@@ -138,6 +138,19 @@ Describe 'The script''s log lines' {
         Add-LogLine -Message 'x' | Should -BeExactly 'LauncherData\logs is a file, not a folder'
     }
 
+    It 'say that the log is a folder, as the module does' {
+        $null = New-Item -ItemType Directory -Path $script:log -Force
+        Add-LogLine -Message 'x' | Should -BeExactly 'it is a folder, not a file'
+    }
+
+    It 'have a note whose cause reads after "because" as the module''s do: <Problem>' -ForEach @(
+        @{ Problem = 'it is open in another program'; Text = 'it is open in another program' }
+        @{ Problem = 'an error of type IOException'; Text = 'of an error of type IOException' }
+    ) {
+        Add-LogNote -Message 'm' -Problem $Problem | Should -BeExactly "m`n`nThe launcher could not write this message to its log, LauncherData\logs\launcher.log, because $Text."
+        Format-PvmBecause -Cause $Problem | Should -BeExactly $Text
+    }
+
     It 'never throw, and write nothing, when the drive of the script is gone' {
         $script:Here = "$(Get-TestFreeDriveLetter):\Stick\Launcher"
         { $script:reason = Add-LogLine -Message 'x' } | Should -Not -Throw

@@ -125,8 +125,8 @@ wrote it:
 - The script logs a few stops itself, before a run begins: another run in progress at the
   request for administrator rights, a declined or failed request, a `PortableVM.psm1` that
   cannot be loaded, and an error that no step handles. Each is one `STOPPED:` line, with the
-  error's details where there was one, and has no start or End line. A declined request exits
-  with 0, the others with 1.
+  error's details where there was one, and has no start or End line. A declined or failed request
+  exits with 0, the others with 1.
 - Before Windows asks for administrator rights, the launcher logs `Asking for administrator
   rights`; the elevated run follows under another process ID. A declined or failed request logs a
   `STOPPED:` line with `Error detail:` lines. When the request line is the last line of

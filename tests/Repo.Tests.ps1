@@ -341,6 +341,13 @@ Describe 'Static guards' {
         @($commands | Where-Object { $_.GetCommandName() -eq 'Show-Message' }).Count | Should -Be 1
     }
 
+    It 'word every log cause after "because" in the module through Format-PvmBecause' {
+        # A new sentence with a cause after "because" needs a change of these counts on purpose.
+        $text = [IO.File]::ReadAllText($script:module)
+        [regex]::Matches($text, 'because \$').Count | Should -Be 3
+        [regex]::Matches($text, 'because \$\(Format-PvmBecause -Cause ').Count | Should -Be 3
+    }
+
     It 'check the lock in the script before its administrator-rights block, and end the script there when another run holds it' {
         $statements = @((Get-SourceAst -Path $script:launcher).EndBlock.Statements)
         $texts = @($statements | ForEach-Object { $_.Extent.Text })

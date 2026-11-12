@@ -128,7 +128,8 @@ function Write-PvmLog {
         finally { $stream.Dispose() }
     } catch {
         if (-not (Get-PvmLogProblem)) {
-            $script:PvmLogProblem = Get-PvmPathCause -Path $Path -ErrorRecord $_
+            # Windows denies the write to a folder of the log's name, which is the cause to name.
+            $script:PvmLogProblem = if ([IO.Directory]::Exists($Path)) { 'it is a folder, not a file' } else { Get-PvmPathCause -Path $Path -ErrorRecord $_ }
             Write-Host "launcher.log could not be written: $script:PvmLogProblem"
         }
     }
@@ -184,6 +185,16 @@ function Get-PvmPathCause {
     $cause = Get-PvmErrorCause -ErrorRecord $ErrorRecord
     if ($cause -eq 'it is missing' -and $Path.Length -ge 260) { return 'a path is too long' }
     $cause
+}
+
+# Return the cause $Cause as it reads after "because" in a sentence: a cause that names only the
+# type of an error, as Get-PvmErrorCause words an error it does not know, gets "of" before it.
+function Format-PvmBecause {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Cause)
+    if ($Cause.StartsWith('an error of type ')) { return "of $Cause" }
+    $Cause
 }
 
 # Return the message of the innermost error in $ErrorRecord that PowerShell did not add, below an
@@ -1860,7 +1871,7 @@ function Invoke-PortableVM {
         Write-PvmLog -Path $paths.Log -Message "Launcher version $version"
         if ($null -ne $moved) {
             if ($moved.Name) { Write-PvmLog -Path $paths.Log -Message "Note: the earlier lines of the log are in $($moved.Name)." }
-            else { Write-PvmLog -Path $paths.Log -Message "Note: the log could not be moved aside, because $($moved.Problem); this run adds to it." }
+            else { Write-PvmLog -Path $paths.Log -Message "Note: the log could not be moved aside, because $(Format-PvmBecause -Cause $moved.Problem); this run adds to it." }
         }
         if ($owned -and $lock.State -eq 'Abandoned') {
             Write-PvmLog -Path $paths.Log -Message 'Note: an earlier run of the launcher ended without releasing its lock; this run took the lock over.'
@@ -1878,7 +1889,7 @@ function Invoke-PortableVM {
         $problem = Get-PvmLogProblem
         if ($problem) {
             $logStop = $true
-            throw (Get-PvmStopException -Message "The launcher cannot write its log, LauncherData\logs\launcher.log, because $problem. Nothing was started.")
+            throw (Get-PvmStopException -Message "The launcher cannot write its log, LauncherData\logs\launcher.log, because $(Format-PvmBecause -Cause $problem). Nothing was started.")
         }
 
         Enter-PvmStep -Context $context -Name 'settings'
@@ -1940,7 +1951,7 @@ function Invoke-PortableVM {
     # without a message ended well, which the warning then says first.
     $problem = Get-PvmLogProblem
     if ($problem -and -not $logStop) {
-        $note = "The launcher could not write all of this run to its log, LauncherData\logs\launcher.log, because $problem."
+        $note = "The launcher could not write all of this run to its log, LauncherData\logs\launcher.log, because $(Format-PvmBecause -Cause $problem)."
         if ($result.Message) { $result.Message += "`n`n$note" }
         else {
             $done = if ($DryRun) { 'The dry run found nothing that would stop a start.' } else { Format-PvmMessage -Names $context.Names -Template '{VM} was started.' }

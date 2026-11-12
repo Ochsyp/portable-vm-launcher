@@ -71,10 +71,12 @@ function Get-PathCause([Exception]$Exception, [string]$Path) {
 }
 
 # Return $Message, followed after a blank line by the note that it could not be logged when
-# $Problem gives the cause.
+# $Problem gives the cause; a cause that names only the type of an error gets "of" before it after
+# "because", as Format-PvmBecause in the module does.
 function Add-LogNote([string]$Message, [string]$Problem) {
     if (-not $Problem) { return $Message }
-    "$Message`n`nThe launcher could not write this message to its log, LauncherData\logs\launcher.log, because $Problem."
+    $because = if ($Problem.StartsWith('an error of type ')) { "of $Problem" } else { $Problem }
+    "$Message`n`nThe launcher could not write this message to its log, LauncherData\logs\launcher.log, because $because."
 }
 
 # Show $Message in the log's format on the console and append it to
@@ -105,7 +107,11 @@ function Add-LogLine([string]$Message) {
         $exception = $_.Exception
         while ($exception -is [System.Management.Automation.MethodInvocationException] -and $null -ne $exception.InnerException) { $exception = $exception.InnerException }
         Write-Host "launcher.log could not be written: $($exception.Message)"
-        if (-not $folder) { return (Get-PathCause -Exception $exception -Path $path) }
+        if (-not $folder) {
+            # Windows denies the write to a folder of the log's name, which is the cause to name.
+            if ([IO.Directory]::Exists($path)) { return 'it is a folder, not a file' }
+            return (Get-PathCause -Exception $exception -Path $path)
+        }
         # An item that is in the way of the logs folder is a file of that name, as in the module.
         $cause = Get-ErrorCause -Exception $exception
         if ($cause -eq 'an item of that name exists already') { 'LauncherData\logs is a file, not a folder' } else { $cause }
