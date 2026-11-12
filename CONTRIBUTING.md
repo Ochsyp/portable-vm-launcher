@@ -30,8 +30,9 @@ repository, so git hooks in `.githooks` enforce it on each clone:
 
 - `pre-commit` refuses a commit while `main` or `master` is checked out, then runs
   `privacy-scan` on the staged files;
-- `pre-push` refuses a push to `main` or `master`, then, when `Launcher\settings.psd1` or
-  `.git/info/privacy-denylist` exists, runs `tools\Find-PrivateData.ps1 -History`.
+- `pre-push` refuses a push to `main` or `master`, then, when `LauncherData\settings.psd1`,
+  `Launcher\settings.psd1` or `.git/info/privacy-denylist` exists, runs
+  `tools\Find-PrivateData.ps1 -History`.
 
 Turn them on once after cloning:
 
@@ -45,12 +46,15 @@ up to date with `git switch main` and `git pull --ff-only`.
 ## Test data
 
 Never commit a real `settings.psd1`, `launcher.log`, `.vmx`, `.vbox`, `VirtualBox.xml` or
-descriptor, or any value read from a real disk or VM, and keep copies of a stick's files outside
-the repository. Examples and fixtures use made-up values, and UUIDs start with `5ca1ab1e`,
-which `privacy-scan` and the secret scan let through. Code,
-docs and messages use neutral names ("the VM", "the guest"), never the name of a real VM. A
-value with no recognisable shape, such as a disk signature or a VM name, can be listed in the
-untracked `.git/info/privacy-denylist`, so that `privacy-scan` refuses it too.
+descriptor, a `LauncherData` folder or anything from one, or any value read from a real disk or
+VM, and keep copies of a stick's files outside the repository; a copy of a stick's
+`LauncherData\settings.psd1` in the clone is gitignored and only feeds
+`tools\Find-PrivateData.ps1`. Examples and fixtures use made-up values, and UUIDs start with
+`5ca1ab1e`, which `privacy-scan` and the secret scan let through. Code, docs and messages use
+neutral names ("the VM", "the guest"), never the name of a real VM or guest system: real names
+belong only in `VmDisplayName` and `GuestName` in the stick's settings. A value with no
+recognisable shape, such as a disk signature or such a name, belongs in the untracked
+`.git/info/privacy-denylist` too, the only list `privacy-scan` reads.
 
 The Pester tests build the stick's files in TestDrive and mock the module's `Invoke-Pvm*`
 adapters. `tests\run-checks.ps1` sets `PVM_TEST=1`, so an adapter that a test did not mock

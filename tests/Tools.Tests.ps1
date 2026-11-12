@@ -1,10 +1,13 @@
 # Tests of tools\Deploy-PortableVM.ps1 and tools\Get-StickInventory.ps1 on a synthetic clone and
 # stick in TestDrive. Each tool is dot-sourced for its functions, which skips its main block, and
-# the functions that read the PC (processes, git, disks, registry) are mocked.
+# the functions that read the PC (processes, git, disks, registry) are mocked. The deploy tool
+# imports the clone's src\PortableVM.psm1, so the fake clone holds a copy of the real module.
 
 BeforeAll {
     $script:repoRoot = Split-Path $PSScriptRoot -Parent
     $script:utf8 = New-Object System.Text.UTF8Encoding $false
+    # A made-up name with letters outside ASCII that Windows-1252 holds too.
+    $script:sampleName = 'K' + [char]0x00E9 + 'l' + [char]0x00F8 + 'n' + [char]0x00EF
     . (Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1')
     . (Join-Path $script:repoRoot 'tools\Get-StickInventory.ps1')
 
@@ -15,13 +18,47 @@ BeforeAll {
         [IO.File]::WriteAllText($Path, $Text, $script:utf8)
     }
 
-    # Return the settings.psd1 text of the synthetic stick.
+    # Return the schema 1 settings.psd1 text of the synthetic stick, with a comment and CRLF, as
+    # the launcher before LauncherData read it.
     function Get-TestSettingsText {
-        @("@{", "    Hypervisor = 'Auto'", "    VMwareView = 'Window'", '    HideDataPartition = $false',
+        @("# The stick's settings", "@{", "    Hypervisor = 'Auto'", "    VMwareView = 'Window'", '    HideDataPartition = $false',
             "    StickMbrSignature = '5CA1AB1E'", '    StickSectors = 4000000', '    VmSectors = 3900000', '    DataPartitionStart = 2500000',
             "    VirtualBoxVmUuid = '5ca1ab1e-0000-4000-8000-000000000001'", "    VirtualBoxHome = 'VirtualBox'",
             "    VirtualBoxVbox = 'VirtualBox\Test VM\Test VM.vbox'", "    VirtualBoxDisk = 'VirtualBox\Test VM\stick.vmdk'",
             "    VMwareVmx = 'VMware\Test VM.vmx'", "    VMwareDisk = 'VMware\stick.vmdk'", '}', '') -join "`r`n"
+    }
+
+    # Return the schema 2 text that a migration makes of Get-TestSettingsText, with the lines in
+    # $Add after SchemaVersion.
+    function Get-TestSchema2Text {
+        param([string[]]$Add = @())
+        $lines = @('    SchemaVersion = 2') + @($Add | ForEach-Object { "    $_" })
+        (Get-TestSettingsText).Replace("@{`r`n", "@{`r`n" + (($lines | ForEach-Object { "$_`r`n" }) -join ''))
+    }
+
+    # Return a descriptor text whose one extent names the raw disk $Device.
+    function Get-TestDescriptorText {
+        param([string]$Device = '\\.\PhysicalDrive3')
+        @('# Disk DescriptorFile', 'createType="fullDevice"', "RW 3900000 FLAT `"$Device`" 0", 'ddb.adapterType = "ide"', '') -join "`r`n"
+    }
+
+    # Return every folder and file below $Root, a file with its SHA-256 hash, as sorted lines.
+    function Get-TestTree {
+        param([string]$Root)
+        @(Get-ChildItem -LiteralPath $Root -Recurse -Force | Sort-Object FullName | ForEach-Object {
+                $relative = $_.FullName.Substring($Root.Length + 1)
+                if ($_.PSIsContainer) { "$relative\" } else { "$relative $((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)" }
+            })
+    }
+
+    # Create the fake clone TestDrive\clone: the real module, a stand-in launcher script and
+    # Start VM.cmd.
+    function Initialize-TestClone {
+        $script:clone = Join-Path $TestDrive 'clone'
+        Remove-Item -LiteralPath $script:clone -Recurse -Force -ErrorAction SilentlyContinue
+        Write-TestFile -Path (Join-Path $script:clone 'src\Start-PortableVM.ps1') -Text "# new script`r`n"
+        Copy-Item -LiteralPath (Join-Path $script:repoRoot 'src\PortableVM.psm1') -Destination (Join-Path $script:clone 'src\PortableVM.psm1')
+        Write-TestFile -Path (Join-Path $script:clone 'Start VM.cmd') -Text "@echo off`r`nstart `"`" -File `"%~dp0Launcher\Start-PortableVM.ps1`"`r`n"
     }
 
     # Return a .vbox text for the VM, with $Machine added to its Machine element and $Body inside it.
@@ -81,16 +118,18 @@ BeforeAll {
     }
 }
 
+AfterAll {
+    # The deploy tool imported the fake clone's copy of the module.
+    Remove-Module PortableVM -ErrorAction SilentlyContinue
+}
+
 Describe 'Deploy-PortableVM' {
     BeforeEach {
-        $script:clone = Join-Path $TestDrive 'clone'
+        Initialize-TestClone
         $script:target = Join-Path $TestDrive 'target'
-        Remove-Item -LiteralPath $script:clone, $script:target -Recurse -Force -ErrorAction SilentlyContinue
-        Write-TestFile -Path (Join-Path $script:clone 'src\Start-PortableVM.ps1') -Text "# new script`r`n"
-        Write-TestFile -Path (Join-Path $script:clone 'src\PortableVM.psm1') -Text "# new module`r`n"
-        Write-TestFile -Path (Join-Path $script:clone 'Start VM.cmd') -Text "@echo off`r`nstart `"`" -File `"%~dp0Launcher\Start-PortableVM.ps1`"`r`n"
-        Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text (Get-TestSettingsText)
-        Write-TestFile -Path (Join-Path $script:target 'Launcher\launcher.log') -Text "old log line`r`n"
+        Remove-Item -LiteralPath $script:target -Recurse -Force -ErrorAction SilentlyContinue
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\logs\launcher.log') -Text "old log line`r`n"
         Write-TestFile -Path (Join-Path $script:target 'Launcher\Old-Launcher.ps1') -Text "# old script`r`n"
         Write-TestFile -Path (Join-Path $script:target 'Start Old.cmd') -Text "@echo off`r`nstart `"`" -File `"%~dp0LAUNCHER\Old-Launcher.ps1`"`r`n"
         Write-TestFile -Path (Join-Path $script:target 'Other.cmd') -Text "@echo off`r`nrem reads %~dp0Launcher\launcher.log`r`n"
@@ -99,15 +138,16 @@ Describe 'Deploy-PortableVM' {
         Mock Get-DeployVersion { 'v0.0.0-test' }
     }
 
-    It 'swaps in the new launcher, keeps the stick''s settings and log, and moves the old .cmd away' {
+    It 'swaps in the new launcher, leaves LauncherData as it is, and moves the old .cmd away' {
+        $data = Get-TestTree -Root (Join-Path $script:target 'LauncherData')
         $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target
         $result.Version | Should -BeExactly 'v0.0.0-test'
+        $result.Mode | Should -BeExactly 'Update'
+        $result.Applied | Should -BeTrue
         $result.MovedCmdCount | Should -Be 1
         $launcher = Join-Path $script:target 'Launcher'
-        @(Get-ChildItem -LiteralPath $launcher -Name | Sort-Object) |
-            Should -BeExactly @('launcher.log', 'PortableVM.psm1', 'settings.psd1', 'SHA256SUMS', 'Start-PortableVM.ps1', 'VERSION')
-        [IO.File]::ReadAllText((Join-Path $launcher 'settings.psd1')) | Should -BeExactly (Get-TestSettingsText)
-        [IO.File]::ReadAllText((Join-Path $launcher 'launcher.log')) | Should -BeExactly "old log line`r`n"
+        @(Get-ChildItem -LiteralPath $launcher -Name | Sort-Object) | Should -BeExactly @('PortableVM.psm1', 'SHA256SUMS', 'Start-PortableVM.ps1', 'VERSION')
+        Get-TestTree -Root (Join-Path $script:target 'LauncherData') | Should -BeExactly $data
         [IO.File]::ReadAllText((Join-Path $launcher 'VERSION')) | Should -BeExactly "v0.0.0-test`n"
         $sums = @([IO.File]::ReadAllText((Join-Path $launcher 'SHA256SUMS')).TrimEnd("`n") -split "`n")
         $sums | Should -BeExactly @(
@@ -121,6 +161,18 @@ Describe 'Deploy-PortableVM' {
         Join-Path $script:target 'Start VM.cmd.new' | Should -Not -Exist
         [IO.File]::ReadAllText((Join-Path $script:target 'Start VM.cmd')) | Should -BeExactly ([IO.File]::ReadAllText((Join-Path $script:clone 'Start VM.cmd')))
         [IO.File]::ReadAllText((Join-Path $script:target 'VMware\Test VM.vmx')) | Should -BeExactly "displayName = `"Test VM`"`r`n"
+        Format-DeployReport -Result $result | Should -BeExactly @('deployed v0.0.0-test (Update).', 'old launcher .cmd files moved into Launcher.previous: 1.')
+    }
+
+    It 'installs the launcher on a stick without a Launcher folder' {
+        Remove-Item -LiteralPath (Join-Path $script:target 'Launcher') -Recurse
+        Remove-Item -LiteralPath (Join-Path $script:target 'Start Old.cmd')
+        $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target
+        $result.Mode | Should -BeExactly 'Install'
+        @(Get-ChildItem -LiteralPath (Join-Path $script:target 'Launcher') -Name | Sort-Object) | Should -BeExactly @('PortableVM.psm1', 'SHA256SUMS', 'Start-PortableVM.ps1', 'VERSION')
+        Join-Path $script:target 'Start VM.cmd' | Should -Exist
+        Join-Path $script:target 'Launcher.previous' | Should -Not -Exist
+        Format-DeployReport -Result $result | Should -BeExactly @('deployed v0.0.0-test (Install).')
     }
 
     It 'replaces a Start VM.cmd from an earlier deploy, keeping it in Launcher.previous' {
@@ -132,27 +184,31 @@ Describe 'Deploy-PortableVM' {
     }
 
     It 'refuses <Case>, changing nothing' -ForEach @(
-        @{ Case = 'while a VM runs'; Setup = { Mock Get-DeployVmProcess { 'vmware-vmx.exe' } }; Message = 'A VM runs on this PC (vmware-vmx.exe). Shut the guest down first.' }
-        @{ Case = 'without the stick''s settings'; Setup = { Remove-Item -LiteralPath (Join-Path $script:target 'Launcher\settings.psd1') }; Message = 'The target has no Launcher\settings.psd1.*' }
-        @{ Case = 'with Launcher.new left over'; Setup = { $null = New-Item -ItemType Directory -Path (Join-Path $script:target 'Launcher.new') }; Message = 'Launcher.new is left from an earlier deploy*' }
-        @{ Case = 'with Launcher.previous in place'; Setup = { $null = New-Item -ItemType Directory -Path (Join-Path $script:target 'Launcher.previous') }; Message = 'Launcher.previous holds the launcher that the last deploy replaced.*' }
-        @{ Case = 'with a Start VM.cmd that does not start the launcher'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Start VM.cmd') -Text 'rem mine' }; Message = "'Start VM.cmd' at the target does not start the launcher.*" }
-        @{ Case = 'when Launcher holds a file named like the old .cmd'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Launcher\Start Old.cmd') -Text 'rem x' }; Message = 'Launcher holds a file with the name of an old launcher .cmd*' }
+        @{ Case = 'while a VM runs'; Setup = { Mock Get-DeployVmProcess { 'vmware-vmx.exe' } }; Extra = @{}; Message = 'A VM runs on this PC (vmware-vmx.exe). Shut the guest down first.' }
+        @{ Case = 'without the stick''s settings'; Setup = { Remove-Item -LiteralPath (Join-Path $script:target 'LauncherData\settings.psd1') }; Extra = @{}; Message = 'The new launcher reads LauncherData\settings.psd1, which must pass its checks first, so nothing was changed. LauncherData\settings.psd1 is missing.*' }
+        @{ Case = 'with settings that fail the checks'; Setup = { Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text).Replace("'Auto'", "'VBox'") }; Extra = @{}; Message = "*LauncherData\settings.psd1 has 1 problem:`n- Hypervisor: must be*" }
+        @{ Case = 'on an install without the stick''s settings'; Setup = { Remove-Item -LiteralPath (Join-Path $script:target 'LauncherData'), (Join-Path $script:target 'Launcher') -Recurse }; Extra = @{}; Message = 'The new launcher reads LauncherData\settings.psd1*is missing*' }
+        @{ Case = 'on an install with a launcher .cmd at the target'; Setup = { Remove-Item -LiteralPath (Join-Path $script:target 'Launcher') -Recurse }; Extra = @{}; Message = 'A launcher .cmd is at the target, but there is no Launcher folder to keep it in.*' }
+        @{ Case = 'with Launcher.new left over'; Setup = { $null = New-Item -ItemType Directory -Path (Join-Path $script:target 'Launcher.new') }; Extra = @{}; Message = 'Launcher.new is left from an earlier deploy*' }
+        @{ Case = 'with Start VM.cmd.new left over'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Start VM.cmd.new') -Text 'rem x' }; Extra = @{}; Message = "'Start VM.cmd.new' is left from an earlier deploy*" }
+        @{ Case = 'with LauncherData.new left over'; Setup = { $null = New-Item -ItemType Directory -Path (Join-Path $script:target 'LauncherData.new') }; Extra = @{}; Message = 'LauncherData.new is left from a migration whose staging did not finish*' }
+        @{ Case = 'with Launcher.previous in place'; Setup = { $null = New-Item -ItemType Directory -Path (Join-Path $script:target 'Launcher.previous') }; Extra = @{}; Message = 'Launcher.previous holds the launcher that the last deploy replaced.*' }
+        @{ Case = 'with a Start VM.cmd that does not start the launcher'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Start VM.cmd') -Text 'rem mine' }; Extra = @{}; Message = "'Start VM.cmd' at the target does not start the launcher.*" }
+        @{ Case = 'when Launcher holds a file named like the old .cmd'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Launcher\Start Old.cmd') -Text 'rem x' }; Extra = @{}; Message = 'Launcher holds a file with the name of an old launcher .cmd*' }
+        @{ Case = 'with schema 2 settings in Launcher'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text (Get-TestSchema2Text) }; Extra = @{}; Message = 'Launcher\settings.psd1 holds schema 2 settings, but the launcher reads them from LauncherData\settings.psd1.*' }
+        @{ Case = 'with -MigrateSettings on a migrated stick'; Setup = {}; Extra = @{ MigrateSettings = $true }; Message = 'The settings are in LauncherData already, so there is nothing to migrate.*' }
+        @{ Case = 'with a name but no -MigrateSettings'; Setup = {}; Extra = @{ VmDisplayName = 'Test VM' }; Message = '-VmDisplayName and -GuestName go only with -MigrateSettings, which writes them into the new LauncherData\settings.psd1.*' }
     ) {
         & $Setup
-        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } | Should -Throw -ExpectedMessage $Message
-        Join-Path $script:target 'Launcher\Old-Launcher.ps1' | Should -Exist
-        Join-Path $script:target 'Start Old.cmd' | Should -Exist
-        Join-Path $script:target 'Start VM.cmd.new' | Should -Not -Exist
+        $before = Get-TestTree -Root $script:target
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target @Extra } | Should -Throw -ExpectedMessage $Message
+        Get-TestTree -Root $script:target | Should -BeExactly $before
     }
 
-    It 'refuses without a Launcher folder, and names Launcher.previous after an interrupted swap' {
+    It 'refuses without a Launcher folder while Launcher.previous holds the one an interrupted swap replaced' {
         Rename-Item -LiteralPath (Join-Path $script:target 'Launcher') -NewName 'Launcher.previous'
         { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
             Should -Throw -ExpectedMessage 'The target has no Launcher folder, but Launcher.previous holds*Rename Launcher.previous back to Launcher*'
-        Rename-Item -LiteralPath (Join-Path $script:target 'Launcher.previous') -NewName 'Spare'
-        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
-            Should -Throw -ExpectedMessage 'The target has no Launcher folder. Create it*'
     }
 
     It 'leaves the launcher as it was when Launcher cannot be renamed, and says so' {
@@ -178,15 +234,101 @@ Describe 'Deploy-PortableVM' {
         Mock Rename-DeployItem { Rename-Item -LiteralPath $Path -NewName $NewName }
         Mock Rename-DeployItem { throw 'held' } -ParameterFilter { $NewName -eq 'Launcher' }
         { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
-            Should -Throw -ExpectedMessage 'Launcher is missing: Launcher.previous holds*Rename Launcher.previous back to Launcher*'
-        Join-Path $script:target 'Launcher.previous\settings.psd1' | Should -Exist
+            Should -Throw -ExpectedMessage 'Launcher is missing: Launcher.previous holds the launcher that was in use.*Rename Launcher.previous back to Launcher*'
+        Join-Path $script:target 'Launcher.previous\Old-Launcher.ps1' | Should -Exist
+    }
+
+    It 'names the cause but no path when a program holds a file in Launcher, and shows the message from Windows with -Verbose' {
+        $script:failure = $null
+        $held = [IO.File]::Open((Join-Path $script:target 'Launcher\Old-Launcher.ps1'), 'Open', 'Read', 'Read')
+        try { $verbose = @(& { try { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -Verbose } catch { $script:failure = $_ } } 4>&1) }
+        finally { $held.Dispose() }
+        $script:failure.Exception.Message | Should -BeExactly ("Launcher could not be renamed, so the stick's launcher is unchanged. A window, console or program probably has " +
+            "the Launcher folder or a file in it open: close it, remove Launcher.new and 'Start VM.cmd.new', then deploy again. Cause: access is denied (-Verbose shows the details).")
+        # The message from Windows names the Launcher folder, in quotes of its language; the copies
+        # that staging made name Launcher.new.
+        $named = [regex]::Escape((Join-Path $script:target 'Launcher')) + '[^.\\]'
+        @($verbose | Where-Object { $_ -is [Management.Automation.VerboseRecord] -and $_.Message -match $named }) | Should -Not -BeNullOrEmpty
+        Join-Path $script:target 'Launcher\Old-Launcher.ps1' | Should -Exist
+        Join-Path $script:target 'Start Old.cmd' | Should -Exist
+    }
+
+    It 'names the cause of settings it cannot open, and shows the message from Windows with -Verbose' {
+        $script:failure = $null
+        $settings = Join-Path $script:target 'LauncherData\settings.psd1'
+        $held = [IO.File]::Open($settings, 'Open', 'Read', 'None')
+        try { $verbose = @(& { try { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -Verbose } catch { $script:failure = $_ } } 4>&1) }
+        finally { $held.Dispose() }
+        $script:failure.Exception.Message | Should -BeExactly ('The new launcher reads LauncherData\settings.psd1, which must pass its checks first, so nothing was changed. ' +
+            'LauncherData\settings.psd1 cannot be read: it is open in another program (-Verbose shows the details).')
+        @($verbose | Where-Object { $_ -is [Management.Automation.VerboseRecord] -and $_.Message.IndexOf($settings, [StringComparison]::OrdinalIgnoreCase) -ge 0 }) |
+            Should -Not -BeNullOrEmpty
+    }
+
+    It 'names the cause but no path when the clone''s module <Case>, and shows the message with -Verbose' -ForEach @(
+        @{ Case = 'does not parse'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $false; Failure = $null
+            Bytes = { [Text.Encoding]::ASCII.GetBytes("function {`r`n") } }
+        # Windows PowerShell 5.1 reads a script without a byte order mark as ANSI: there a dash in
+        # UTF-8 ends a string early, and the curly quotes of Windows-1252 make one.
+        @{ Case = 'does not parse as ANSI, although it parses as UTF-8'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $true; Failure = $null
+            Bytes = { (New-Object System.Text.UTF8Encoding $false).GetBytes("`$dash = `"a $([char]0x2014) b`"`r`n") } }
+        @{ Case = 'stops while it loads, although it does not parse as UTF-8'; Cause = ''; Held = $false; Ansi = $true; Failure = $null
+            Bytes = { [byte[]]([Text.Encoding]::ASCII.GetBytes('$m = ') + 0x93 + [Text.Encoding]::ASCII.GetBytes('a (b') + 0x94 + [Text.Encoding]::ASCII.GetBytes("`r`nthrow 'stopped while it loads'`r`n")) } }
+        # With a byte order mark, PowerShell reads UTF-8, where a curly quote ends a string.
+        @{ Case = 'does not parse as UTF-8 with a byte order mark'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $false; Failure = $null
+            Bytes = { (New-Object System.Text.UTF8Encoding $true).GetPreamble() + (New-Object System.Text.UTF8Encoding $false).GetBytes("`$x = `"a $([char]0x201D) b`"`r`n") } }
+        @{ Case = 'is open in another program'; Cause = '. Cause: it is open in another program'; Held = $true; Ansi = $false; Failure = $null; Bytes = $null }
+        # Errors in the shape PowerShell gives, so that no test changes an ACL of the clone or the
+        # execution policy, or sets off antivirus software.
+        @{ Case = 'may not be read'; Cause = '. Cause: access is denied'; Held = $false; Ansi = $false; Bytes = $null
+            Failure = { [Management.Automation.CommandNotFoundException]::new('X:\clone\src\PortableVM.psm1 may not be read.', [UnauthorizedAccessException]::new('Access is denied.')) } }
+        @{ Case = 'is refused by the execution policy'; Cause = '. Cause: PowerShell''s execution policy blocks it'; Held = $false; Ansi = $false; Bytes = $null
+            Failure = { [Management.Automation.PSSecurityException]::new('X:\clone\src\PortableVM.psm1 is not signed.', [UnauthorizedAccessException]::new('Access is denied.')) } }
+        @{ Case = 'is refused by the execution policy and does not parse either'; Cause = '. Cause: PowerShell''s execution policy blocks it'; Held = $false; Ansi = $false
+            Bytes = { [Text.Encoding]::ASCII.GetBytes("function {`r`n") }
+            Failure = { [Management.Automation.PSSecurityException]::new('X:\clone\src\PortableVM.psm1 is not signed.', [UnauthorizedAccessException]::new('Access is denied.')) } }
+        # A file that does not parse counts only when PowerShell reports a parse error.
+        @{ Case = 'fails with another error and does not parse either'; Cause = ''; Held = $false; Ansi = $false
+            Bytes = { [Text.Encoding]::ASCII.GetBytes("function {`r`n") }
+            Failure = { [Management.Automation.CommandNotFoundException]::new('X:\clone\src\PortableVM.psm1 was not found.', [IO.FileNotFoundException]::new('Not found.')) } }
+        @{ Case = 'fails with a parse error although it parses'; Cause = ''; Held = $false; Ansi = $false; Bytes = $null
+            Failure = {
+                $extent = [Management.Automation.Language.Parser]::ParseInput('x', [ref]$null, [ref]$null).Extent
+                [Management.Automation.ParseException]::new([Management.Automation.Language.ParseError[]]@([Management.Automation.Language.ParseError]::new($extent, 'ContentBlocked', 'X:\clone\src\PortableVM.psm1 is blocked.')))
+            } }
+    ) {
+        if ($Ansi -and [Text.Encoding]::Default.CodePage -ne 1252) {
+            Set-ItResult -Skipped -Because 'the case needs Windows-1252 as the ANSI code page'
+            return
+        }
+        $module = Join-Path $script:clone 'src\PortableVM.psm1'
+        $script:failure = $null
+        $holder = $null
+        if ($Bytes) { [IO.File]::WriteAllBytes($module, [byte[]](& $Bytes)) }
+        if ($Held) { $holder = [IO.File]::Open($module, 'Open', 'Read', 'None') }
+        if ($Failure) {
+            $script:loadFailure = & $Failure
+            Mock Import-Module { throw $script:loadFailure }
+        }
+        try {
+            # The message PowerShell gives for the same import, which -Verbose must show.
+            $expected = try { Import-Module -Name $module -Force -Global -ErrorAction Stop } catch { $_.Exception.Message }
+            $verbose = @(& { try { $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -Verbose } catch { $script:failure = $_ } } 4>&1)
+        } finally {
+            if ($holder) { $holder.Dispose() }
+        }
+        $script:failure.Exception.Message | Should -BeExactly "The clone's src\PortableVM.psm1 cannot be loaded, so the settings cannot be checked$Cause (-Verbose shows the details)."
+        $expected | Should -Not -BeNullOrEmpty
+        @($verbose | Where-Object { $_ -is [Management.Automation.VerboseRecord] -and $_.Message -eq $expected }) | Should -Not -BeNullOrEmpty
     }
 
     It 'only runs the checks under -WhatIf' {
+        $before = Get-TestTree -Root $script:target
         $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -WhatIf
-        $result | Should -BeNullOrEmpty
-        Join-Path $script:target 'Launcher.new' | Should -Not -Exist
-        Join-Path $script:target 'Launcher\Old-Launcher.ps1' | Should -Exist
+        $result.Applied | Should -BeFalse
+        $result.Mode | Should -BeExactly 'Update'
+        Get-TestTree -Root $script:target | Should -BeExactly $before
+        Format-DeployReport -Result $result | Should -BeExactly @('would deploy v0.0.0-test (Update).', 'old launcher .cmd files to move into Launcher.previous: 1.')
         Mock Get-DeployVmProcess { 'VirtualBoxVM.exe' }
         { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -WhatIf } | Should -Throw -ExpectedMessage 'A VM runs on this PC*'
     }
@@ -196,7 +338,317 @@ Describe 'Deploy-PortableVM' {
         Write-TestFile -Path (Join-Path $script:target 'Start Old.cmdx') -Text 'start "" -File "%~dp0Launcher\x.ps1"'
         @(Find-DeployLauncherCmd -Folder $script:target | ForEach-Object { $_.Name } | Sort-Object) | Should -BeExactly @('Start Old.cmd', 'Start Slash.cmd')
     }
+}
 
+Describe 'Deploy-PortableVM -MigrateSettings' {
+    BeforeEach {
+        Initialize-TestClone
+        $script:target = Join-Path $TestDrive 'target'
+        Remove-Item -LiteralPath $script:target -Recurse -Force -ErrorAction SilentlyContinue
+        # A stick as the launcher before LauncherData left it: settings and log in Launcher, and the
+        # copies it kept beside the files it rewrote.
+        Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text (Get-TestSettingsText)
+        Write-TestFile -Path (Join-Path $script:target 'Launcher\launcher.log') -Text "old log line`r`n"
+        Write-TestFile -Path (Join-Path $script:target 'Launcher\Start-PortableVM.ps1') -Text "# old script`r`n"
+        Write-TestFile -Path (Join-Path $script:target 'Start VM.cmd') -Text "@echo off`r`nstart `"`" -File `"%~dp0Launcher\Start-PortableVM.ps1`"`r`n"
+        Write-TestFile -Path (Join-Path $script:target 'VMware\Test VM.vmx') -Text "displayName = `"Test VM`"`r`n"
+        Write-TestFile -Path (Join-Path $script:target 'VMware\stick.vmdk') -Text (Get-TestDescriptorText)
+        Write-TestFile -Path (Join-Path $script:target 'VMware\stick.vmdk.orig') -Text (Get-TestDescriptorText -Device '\\.\PhysicalDrive1')
+        Write-TestFile -Path (Join-Path $script:target 'VMware\Test VM.vmx.orig') -Text 'a copy made by hand'
+        [IO.File]::WriteAllBytes((Join-Path $script:target 'VMware\big.vmdk.orig'), (New-Object byte[] 1048576))
+        Write-TestFile -Path (Join-Path $script:target 'VirtualBox\VirtualBox.xml') -Text '<VirtualBox/>'
+        Write-TestFile -Path (Join-Path $script:target 'VirtualBox\VirtualBox.xml.launcher-backup') -Text '<VirtualBox old="1"/>'
+        Write-TestFile -Path (Join-Path $script:target 'VirtualBox\Test VM\Test VM.vbox') -Text '<VirtualBox/>'
+        Write-TestFile -Path (Join-Path $script:target 'VirtualBox\Test VM\Test VM.vbox.launcher-backup') -Text '<VirtualBox old="2"/>'
+        Write-TestFile -Path (Join-Path $script:target 'VirtualBox\Test VM\stick.vmdk') -Text (Get-TestDescriptorText)
+        Write-TestFile -Path (Join-Path $script:target 'VirtualBox\Test VM\stick.vmdk.orig') -Text (Get-TestDescriptorText -Device '\\?\PhysicalDrive2').Replace("`r`n", "`n")
+        $script:legacy = Join-Path $script:target 'LauncherData\backups\legacy'
+        $script:vmFiles = @('VMware\Test VM.vmx', 'VMware\stick.vmdk', 'VirtualBox\VirtualBox.xml', 'VirtualBox\Test VM\Test VM.vbox', 'VirtualBox\Test VM\stick.vmdk')
+        $script:vmHashes = @($script:vmFiles | ForEach-Object { (Get-FileHash -LiteralPath (Join-Path $script:target $_) -Algorithm SHA256).Hash })
+        Mock Get-DeployVmProcess { @() }
+        Mock Get-DeployVersion { 'v0.0.0-test' }
+    }
+
+    It 'moves the settings, the log and the old copies to LauncherData, disarms the descriptor copies, then swaps the code' {
+        $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings
+        $result.Mode | Should -BeExactly 'Migrate'
+        $result.Applied | Should -BeTrue
+        $result.Plan.Log | Should -BeTrue
+        $result.Plan.Descriptors | Should -Be 2
+        $result.Plan.VirtualBoxCopies | Should -Be 2
+        $result.Plan.KeptCopies | Should -Be 2
+        $data = Join-Path $script:target 'LauncherData'
+        [IO.File]::ReadAllText((Join-Path $data 'settings.psd1')) | Should -BeExactly (Get-TestSchema2Text)
+        $null = Import-PvmSetting -Path (Join-Path $data 'settings.psd1')
+        [IO.File]::ReadAllText((Join-Path $script:legacy 'Launcher\settings.psd1')) | Should -BeExactly (Get-TestSettingsText)
+        [IO.File]::ReadAllText((Join-Path $script:target 'Launcher.previous\settings.psd1')) | Should -BeExactly (Get-TestSettingsText)
+        [IO.File]::ReadAllText((Join-Path $data 'logs\launcher.log')) | Should -BeExactly "old log line`r`n"
+        Join-Path $script:target 'Launcher.previous\launcher.log' | Should -Not -Exist
+        [IO.File]::ReadAllText((Join-Path $script:legacy 'VMware\stick.vmdk.orig')) | Should -BeExactly (Get-TestDescriptorText -Device '\\.\PortableVM-disarmed')
+        [IO.File]::ReadAllText((Join-Path $script:legacy 'VirtualBox\Test VM\stick.vmdk.orig')) |
+            Should -BeExactly (Get-TestDescriptorText -Device '\\.\PortableVM-disarmed').Replace("`r`n", "`n")
+        [IO.File]::ReadAllText((Join-Path $script:legacy 'VirtualBox\VirtualBox.xml.launcher-backup')) | Should -BeExactly '<VirtualBox old="1"/>'
+        [IO.File]::ReadAllText((Join-Path $script:legacy 'VirtualBox\Test VM\Test VM.vbox.launcher-backup')) | Should -BeExactly '<VirtualBox old="2"/>'
+        foreach ($moved in 'VMware\stick.vmdk.orig', 'VirtualBox\VirtualBox.xml.launcher-backup', 'VirtualBox\Test VM\Test VM.vbox.launcher-backup', 'VirtualBox\Test VM\stick.vmdk.orig') {
+            Join-Path $script:target $moved | Should -Not -Exist
+        }
+        Join-Path $script:target 'VMware\Test VM.vmx.orig' | Should -Exist
+        Join-Path $script:target 'VMware\big.vmdk.orig' | Should -Exist
+        @(Get-ChildItem -LiteralPath $script:target -Recurse -Filter '*.pvm-tmp') | Should -BeNullOrEmpty
+        @($script:vmFiles | ForEach-Object { (Get-FileHash -LiteralPath (Join-Path $script:target $_) -Algorithm SHA256).Hash }) | Should -BeExactly $script:vmHashes
+        @(Get-ChildItem -LiteralPath (Join-Path $script:target 'Launcher') -Name | Sort-Object) | Should -BeExactly @('PortableVM.psm1', 'SHA256SUMS', 'Start-PortableVM.ps1', 'VERSION')
+        Join-Path $script:target 'Launcher.previous\Start-PortableVM.ps1' | Should -Exist
+        Join-Path $script:target 'Launcher.previous\Start VM.cmd' | Should -Exist
+        Format-DeployReport -Result $result | Should -BeExactly @(
+            'deployed v0.0.0-test (Migrate).'
+            'settings: LauncherData\settings.psd1 holds them in schema 2, with a copy of the old file in LauncherData\backups\legacy\Launcher.'
+            'log moved to LauncherData\logs: 1.'
+            'descriptor copies moved to LauncherData\backups\legacy and disarmed: 2.'
+            'VirtualBox copies moved to LauncherData\backups\legacy: 2.'
+            'other copies left beside the VM files: 2.'
+            'old launcher .cmd files moved into Launcher.previous: 1.'
+        )
+    }
+
+    It 'adds the names when they are given' {
+        $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings -VmDisplayName "Ann's VM" -GuestName 'Test OS'
+        [IO.File]::ReadAllText((Join-Path $script:target 'LauncherData\settings.psd1')) |
+            Should -BeExactly (Get-TestSchema2Text -Add "VmDisplayName = 'Ann''s VM'", "GuestName = 'Test OS'")
+    }
+
+    It 'changes nothing under -WhatIf and reports its plan' {
+        $before = Get-TestTree -Root $script:target
+        $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings -WhatIf
+        Get-TestTree -Root $script:target | Should -BeExactly $before
+        (Format-DeployReport -Result $result)[0..2] | Should -BeExactly @(
+            'would deploy v0.0.0-test (Migrate).'
+            'settings: LauncherData\settings.psd1 would hold them in schema 2, with a copy of the old file in LauncherData\backups\legacy\Launcher.'
+            'log to move to LauncherData\logs: 1.'
+        )
+    }
+
+    It 'runs as a script with -WhatIf, printing its plan and changing nothing' {
+        $before = Get-TestTree -Root $script:target
+        $tool = Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1'
+        $output = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $tool -Target $script:target -MigrateSettings -WhatIf 2>&1 | ForEach-Object { "$_" })
+        $exitCode = $LASTEXITCODE
+        if ($output -match 'A VM runs on this PC') {
+            Set-ItResult -Skipped -Because 'a VM runs on this PC'
+            return
+        }
+        $exitCode | Should -Be 0
+        ($output -join "`n") | Should -Match 'Deploy-PortableVM: would deploy \S+ \(Migrate\)\.'
+        ($output -join "`n") | Should -Match 'Deploy-PortableVM: descriptor copies to move to LauncherData\\backups\\legacy and disarmed: 2\.'
+        $output | Where-Object { $_ -like 'What if:*' -and $_ -notlike '*"Deploy the launcher *" on target "the -Target folder".' } | Should -BeNullOrEmpty
+        Get-TestTree -Root $script:target | Should -BeExactly $before
+    }
+
+    It 'runs as a script and prints the cause of an error from Windows, not its path' {
+        $tool = Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1'
+        $held = [IO.File]::Open((Join-Path $script:target 'Launcher\settings.psd1'), 'Open', 'Read', 'None')
+        try { $output = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $tool -Target $script:target -MigrateSettings 2>&1 | ForEach-Object { "$_" }) }
+        finally { $held.Dispose() }
+        $exitCode = $LASTEXITCODE
+        if ($output -match 'A VM runs on this PC') {
+            Set-ItResult -Skipped -Because 'a VM runs on this PC'
+            return
+        }
+        $exitCode | Should -Be 1
+        $output | Should -Contain 'Deploy-PortableVM: Launcher\settings.psd1 cannot be read: it is open in another program (-Verbose shows the details).'
+        ($output -join "`n").IndexOf($script:target, [StringComparison]::OrdinalIgnoreCase) | Should -Be -1
+    }
+
+    It 'runs as a script and prints only the cause of an error from Windows that no step catches' {
+        # A resume hashes a 'Start VM.cmd.new' that it could reuse, and another program holds it.
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        $cmd = Join-Path $script:target 'Start VM.cmd.new'
+        Copy-Item -LiteralPath (Join-Path $script:repoRoot 'Start VM.cmd') -Destination $cmd
+        $tool = Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1'
+        $held = [IO.File]::Open($cmd, 'Open', 'Read', 'None')
+        try { $output = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $tool -Target $script:target -MigrateSettings 2>&1 | ForEach-Object { "$_" }) }
+        finally { $held.Dispose() }
+        $exitCode = $LASTEXITCODE
+        if ($output -match 'A VM runs on this PC') {
+            Set-ItResult -Skipped -Because 'a VM runs on this PC'
+            return
+        }
+        $exitCode | Should -Be 1
+        $output | Should -Contain 'Deploy-PortableVM: the deploy stopped: it is open in another program (-Verbose shows the details).'
+        ($output -join "`n").IndexOf($script:target, [StringComparison]::OrdinalIgnoreCase) | Should -Be -1
+    }
+
+    It 'says which file it is when the settings a resume keeps cannot be read a second time' {
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        # The first read passes; then another program opens the file. A test before may have left
+        # no module behind, and a mock needs the command it replaces.
+        Import-Module (Join-Path $script:clone 'src\PortableVM.psm1') -Force -Global
+        Mock Import-PvmSetting { @{} }
+        $held = [IO.File]::Open((Join-Path $script:target 'LauncherData\settings.psd1'), 'Open', 'Read', 'None')
+        try { $message = try { $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings } catch { $_.Exception.Message } }
+        finally { $held.Dispose() }
+        $message | Should -BeExactly 'LauncherData\settings.psd1 cannot be read, so nothing was changed: it is open in another program (-Verbose shows the details).'
+        Should -Invoke Import-PvmSetting -Times 1 -Exactly
+    }
+
+    It 'names the cause of <Case> that it cannot open, and shows the message from Windows with -Verbose' -ForEach @(
+        @{ Case = 'the old settings'; File = 'Launcher\settings.psd1'; Resume = $false; Message = 'Launcher\settings.psd1 cannot be read: it is open in another program (-Verbose shows the details).' }
+        @{ Case = 'the settings a resume keeps'; File = 'LauncherData\settings.psd1'; Resume = $true; Message = ('LauncherData\settings.psd1 is there from a migration that stopped, and this run keeps it, ' +
+                'but it must pass the checks first, so nothing was changed. LauncherData\settings.psd1 cannot be read: it is open in another program (-Verbose shows the details).') }
+    ) {
+        if ($Resume) { Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text) }
+        $script:failure = $null
+        $settings = Join-Path $script:target $File
+        $held = [IO.File]::Open($settings, 'Open', 'Read', 'None')
+        try { $verbose = @(& { try { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings -Verbose } catch { $script:failure = $_ } } 4>&1) }
+        finally { $held.Dispose() }
+        $script:failure.Exception.Message | Should -BeExactly $Message
+        @($verbose | Where-Object { $_ -is [Management.Automation.VerboseRecord] -and $_.Message.IndexOf($settings, [StringComparison]::OrdinalIgnoreCase) -ge 0 }) |
+            Should -Not -BeNullOrEmpty
+    }
+
+    It 'runs as a script and says so when the -Target folder does not exist, also when its name holds brackets' {
+        $tool = Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1'
+        $output = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $tool -Target (Join-Path $TestDrive 'no stick [1]') 2>&1 | ForEach-Object { "$_" })
+        $LASTEXITCODE | Should -Be 1
+        $output | Should -Contain 'Deploy-PortableVM: The -Target folder does not exist. Give the folder on the stick that holds the Launcher and LauncherData folders.'
+    }
+
+    It 'refuses <Case>, changing nothing' -ForEach @(
+        @{ Case = 'without -MigrateSettings'; Setup = {}; Extra = @{}; Message = 'The stick keeps its settings in Launcher\settings.psd1*-MigrateSettings*' }
+        @{ Case = 'settings that fail the checks of schema 2'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text (Get-TestSettingsText).Replace("'Auto'", "'VBox'") }; Extra = @{ MigrateSettings = $true }; Message = "*do not pass the checks of schema 2, so nothing was changed.*`n- Hypervisor: must be*" }
+        @{ Case = 'a name that fails the checks'; Setup = {}; Extra = @{ MigrateSettings = $true; GuestName = ' Test OS' }; Message = "*`n- GuestName: must be 1 to 40 characters of text*" }
+        @{ Case = 'a resume when the two settings files differ'; Setup = { Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text).Replace("'Window'", "'FullScreen'") }; Extra = @{ MigrateSettings = $true }; Message = 'Launcher\settings.psd1 and LauncherData\settings.psd1 differ in VMwareView, so nothing was changed. The new launcher reads LauncherData\settings.psd1: make the two files agree, then run the same command again.' }
+        @{ Case = 'settings that run code'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text '@{ Hypervisor = $(Get-Date) }' }; Extra = @{ MigrateSettings = $true }; Message = 'Launcher\settings.psd1 cannot be read: line 1 holds an expression*' }
+        @{ Case = 'LauncherData without settings.psd1'; Setup = { $null = New-Item -ItemType Directory -Path (Join-Path $script:target 'LauncherData') }; Extra = @{ MigrateSettings = $true }; Message = 'LauncherData is there, but without settings.psd1*' }
+        @{ Case = 'a resume whose LauncherData settings fail the checks'; Setup = { Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text).Replace("'Auto'", "'VBox'") }; Extra = @{ MigrateSettings = $true }; Message = "LauncherData\settings.psd1 is there from a migration that stopped, and this run keeps it, but it must pass the checks first*`n- Hypervisor: must be*" }
+        @{ Case = 'a resume with a name that LauncherData does not hold'; Setup = { Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text -Add "GuestName = 'Test OS'") }; Extra = @{ MigrateSettings = $true; GuestName = 'Other OS' }; Message = '*but its GuestName is not the one given, so nothing was changed. Set VmDisplayName and GuestName in LauncherData\settings.psd1*' }
+    ) {
+        & $Setup
+        $before = Get-TestTree -Root $script:target
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target @Extra } | Should -Throw -ExpectedMessage $Message
+        Get-TestTree -Root $script:target | Should -BeExactly $before
+    }
+
+    It 'refuses, changing nothing, while another program holds a file it would move' {
+        $before = Get-TestTree -Root $script:target
+        $held = [IO.File]::Open((Join-Path $script:target 'VMware\stick.vmdk.orig'), 'Open', 'Read', 'Read')
+        try {
+            { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings } |
+                Should -Throw -ExpectedMessage 'A file that the migration moves is open in another program*'
+        } finally {
+            $held.Dispose()
+        }
+        Get-TestTree -Root $script:target | Should -BeExactly $before
+    }
+
+    It 'leaves the stick as it was when LauncherData.new cannot become LauncherData' {
+        Mock Rename-DeployItem { Rename-Item -LiteralPath $Path -NewName $NewName }
+        Mock Rename-DeployItem { throw 'held' } -ParameterFilter { $NewName -eq 'LauncherData' }
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings } |
+            Should -Throw -ExpectedMessage 'LauncherData.new could not become LauncherData, and nothing the launcher uses was changed.*'
+        Join-Path $script:target 'LauncherData' | Should -Not -Exist
+        Join-Path $script:target 'VMware\stick.vmdk.orig' | Should -Exist
+        Join-Path $script:target 'Launcher\launcher.log' | Should -Exist
+    }
+
+    It 'finishes, when the same command runs again, a migration that stopped while it moved the copies' {
+        $script:failMove = $true
+        # A mock that calls Move-Item would call itself, so the default one moves with .NET.
+        Mock Move-Item { [IO.File]::Move($LiteralPath, $Destination) }
+        Mock Move-Item { throw 'held' } -ParameterFilter { $script:failMove -and $Destination -like '*VirtualBox.xml.launcher-backup' }
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings } |
+            Should -Throw -ExpectedMessage 'The migration stopped part way, but the launcher in Launcher still works with Launcher\settings.psd1. Run the same command again*'
+        Join-Path $script:target 'Launcher\settings.psd1' | Should -Exist
+        Join-Path $script:target 'Launcher.new' | Should -Exist
+
+        $script:failMove = $false
+        $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings
+        $result.Mode | Should -BeExactly 'Resume'
+        $result.Plan.Log | Should -BeFalse
+        [IO.File]::ReadAllText((Join-Path $script:target 'LauncherData\logs\launcher.log')) | Should -BeExactly "old log line`r`n"
+        [IO.File]::ReadAllText((Join-Path $script:legacy 'VirtualBox\VirtualBox.xml.launcher-backup')) | Should -BeExactly '<VirtualBox old="1"/>'
+        [IO.File]::ReadAllText((Join-Path $script:legacy 'VMware\stick.vmdk.orig')) | Should -BeExactly (Get-TestDescriptorText -Device '\\.\PortableVM-disarmed')
+        @(Get-ChildItem -LiteralPath (Join-Path $script:target 'Launcher') -Name | Sort-Object) | Should -BeExactly @('PortableVM.psm1', 'SHA256SUMS', 'Start-PortableVM.ps1', 'VERSION')
+        Join-Path $script:target 'Launcher.new' | Should -Not -Exist
+    }
+
+    It 'disarms, when the same command runs again, a copy that was moved but not disarmed, and keeps a copy the old launcher made since' {
+        # The state after a stop: LauncherData is in place with a moved copy that is still armed,
+        # and the old launcher has made a new copy with the same name beside the VM files.
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        Write-TestFile -Path (Join-Path $script:legacy 'VMware\stick.vmdk.orig') -Text (Get-TestDescriptorText -Device '\\.\PhysicalDrive7')
+        $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings
+        $result.Mode | Should -BeExactly 'Resume'
+        [IO.File]::ReadAllText((Join-Path $script:legacy 'VMware\stick.vmdk.orig')) | Should -BeExactly (Get-TestDescriptorText -Device '\\.\PortableVM-disarmed')
+        [IO.File]::ReadAllText((Join-Path $script:legacy 'VMware\stick (2).vmdk.orig')) | Should -BeExactly (Get-TestDescriptorText -Device '\\.\PortableVM-disarmed')
+        [IO.File]::ReadAllText((Join-Path $script:legacy 'Launcher\settings.psd1')) | Should -BeExactly (Get-TestSettingsText)
+        Join-Path $script:target 'VMware\stick.vmdk.orig' | Should -Not -Exist
+    }
+
+    It 'keeps LauncherData''s settings and names on a resume and finishes, <Case>' -ForEach @(
+        @{ Case = 'with the same name given again'; Extra = @{ GuestName = 'Test OS' } }
+        @{ Case = 'without names'; Extra = @{} }
+    ) {
+        $kept = Get-TestSchema2Text -Add "GuestName = 'Test OS'"
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text $kept
+        $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings @Extra
+        $result.Mode | Should -BeExactly 'Resume'
+        (Format-DeployReport -Result $result)[1] | Should -BeExactly 'settings: LauncherData\settings.psd1 was kept as it is, with a copy of the old file in LauncherData\backups\legacy\Launcher.'
+        [IO.File]::ReadAllText((Join-Path $script:target 'LauncherData\settings.psd1')) | Should -BeExactly $kept
+        [IO.File]::ReadAllText((Join-Path $script:legacy 'VMware\stick.vmdk.orig')) | Should -BeExactly (Get-TestDescriptorText -Device '\\.\PortableVM-disarmed')
+        @(Get-ChildItem -LiteralPath (Join-Path $script:target 'Launcher') -Name | Sort-Object) | Should -BeExactly @('PortableVM.psm1', 'SHA256SUMS', 'Start-PortableVM.ps1', 'VERSION')
+    }
+
+    It 'keeps, on a resume, the log and a settings file that the old launcher changed after the stop, beside the earlier ones' {
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\logs\launcher.log') -Text "old log line`r`n"
+        Write-TestFile -Path (Join-Path $script:legacy 'Launcher\settings.psd1') -Text (Get-TestSettingsText)
+        Write-TestFile -Path (Join-Path $script:target 'Launcher\launcher.log') -Text "line after the stop`r`n"
+        $edited = (Get-TestSettingsText).Replace("# The stick's settings", "# The stick's settings, edited after the stop")
+        Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text $edited
+        $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings
+        $result.Mode | Should -BeExactly 'Resume'
+        $result.Plan.Log | Should -BeTrue
+        [IO.File]::ReadAllText((Join-Path $script:target 'LauncherData\logs\launcher.log')) | Should -BeExactly "old log line`r`n"
+        [IO.File]::ReadAllText((Join-Path $script:target 'LauncherData\logs\launcher (2).log')) | Should -BeExactly "line after the stop`r`n"
+        [IO.File]::ReadAllText((Join-Path $script:legacy 'Launcher\settings.psd1')) | Should -BeExactly (Get-TestSettingsText)
+        [IO.File]::ReadAllText((Join-Path $script:legacy 'Launcher\settings (2).psd1')) | Should -BeExactly $edited
+        [IO.File]::ReadAllText((Join-Path $script:target 'LauncherData\settings.psd1')) | Should -BeExactly (Get-TestSchema2Text)
+        Join-Path $script:target 'Launcher.previous\settings.psd1' | Should -Exist
+    }
+
+    It 'keeps comments outside ASCII of a schema 1 file that an editor saved as UTF-8 without a byte order mark' {
+        $comment = "# $script:sampleName's stick"
+        $text = (Get-TestSettingsText).Replace("# The stick's settings", $comment)
+        [IO.File]::WriteAllBytes((Join-Path $script:target 'Launcher\settings.psd1'), (New-Object System.Text.UTF8Encoding $false).GetBytes($text))
+        $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings
+        $written = [IO.File]::ReadAllBytes((Join-Path $script:target 'LauncherData\settings.psd1'))
+        @($written[0..2]) | Should -Be @(0xEF, 0xBB, 0xBF)
+        (New-Object System.Text.UTF8Encoding $false).GetString($written, 3, $written.Length - 3) | Should -BeExactly (Get-TestSchema2Text).Replace("# The stick's settings", $comment)
+    }
+
+    It 'refuses, changing nothing, a schema 1 file without a byte order mark whose values read differently as UTF-8 and as ANSI' {
+        $text = (Get-TestSettingsText).Replace("'VMware\Test VM.vmx'", "'VMware\$script:sampleName.vmx'")
+        [IO.File]::WriteAllBytes((Join-Path $script:target 'Launcher\settings.psd1'), (New-Object System.Text.UTF8Encoding $false).GetBytes($text))
+        $before = Get-TestTree -Root $script:target
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings } |
+            Should -Throw -ExpectedMessage 'Launcher\settings.psd1 has no byte order mark, and VMwareVmx read differently as UTF-8*save the file as UTF-8 with BOM or as ANSI*'
+        Get-TestTree -Root $script:target | Should -BeExactly $before
+    }
+
+    It 'reads a schema 1 file in ANSI as the launcher before LauncherData did' {
+        $text = (Get-TestSettingsText).Replace("# The stick's settings", "# $script:sampleName").Replace("'VMware\Test VM.vmx'", "'VMware\$script:sampleName.vmx'")
+        [IO.File]::WriteAllBytes((Join-Path $script:target 'Launcher\settings.psd1'), [Text.Encoding]::Default.GetBytes($text))
+        $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings
+        (Import-PvmDataFile -Path (Join-Path $script:target 'LauncherData\settings.psd1'))['VMwareVmx'] | Should -BeExactly "VMware\$script:sampleName.vmx"
+    }
+
+    It 'refuses to resume with a Launcher.new that is not what this run would stage' {
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        Write-TestFile -Path (Join-Path $script:target 'Launcher.new\PortableVM.psm1') -Text '# another module'
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings } |
+            Should -Throw -ExpectedMessage 'Launcher.new is left from an earlier deploy*'
+    }
 }
 
 Describe 'Get-DeployVmProcess' {
@@ -206,6 +658,139 @@ Describe 'Get-DeployVmProcess' {
         Should -Invoke -CommandName Get-CimInstance -Times 1 -Exactly -ParameterFilter {
             $Filter -ceq "Name LIKE 'vmware-vmx%' OR Name='VirtualBoxVM.exe' OR Name='VBoxHeadless.exe'"
         }
+    }
+}
+
+Describe 'Get-DeployCause' {
+    BeforeAll {
+        # Get-DeployCause asks the launcher's module for the cause of an error from Windows.
+        Import-Module (Join-Path $script:repoRoot 'src\PortableVM.psm1') -Force -Global
+        $script:cause = Join-Path $TestDrive "cause\Ann's VM (old)"
+        $null = New-Item -ItemType Directory -Path $script:cause -Force
+    }
+
+    It 'passes on a message this tool wrote' {
+        $record = try { throw 'The copy of PortableVM.psm1 does not match the clone.' } catch { $_ }
+        Get-DeployCause -ErrorRecord $record | Should -BeExactly 'The copy of PortableVM.psm1 does not match the clone.'
+    }
+
+    It 'gives the cause of an error from Windows without its path: <Case>' -ForEach @(
+        @{ Case = 'a file open in another program'; Cause = 'it is open in another program' }
+        @{ Case = 'a missing file'; Cause = 'it is missing' }
+        @{ Case = 'a move onto an existing file'; Cause = 'an item of that name exists already' }
+    ) {
+        $file = Join-Path $script:cause 'stick.vmdk.orig'
+        Set-Content -LiteralPath $file -Value 'x'
+        $record = switch ($Case) {
+            'a file open in another program' {
+                $held = [IO.File]::Open($file, 'Open', 'Read', 'None')
+                try { try { $null = [IO.File]::ReadAllBytes($file) } catch { $_ } } finally { $held.Dispose() }
+            }
+            'a missing file' { try { $null = [IO.File]::ReadAllBytes((Join-Path $script:cause 'none.vmdk')) } catch { $_ } }
+            'a move onto an existing file' {
+                Set-Content -LiteralPath "$file.2" -Value 'y'
+                try { Move-Item -LiteralPath "$file.2" -Destination $file -ErrorAction Stop } catch { $_ }
+            }
+        }
+        $text = Get-DeployCause -ErrorRecord $record
+        $text | Should -BeExactly "$Cause (-Verbose shows the details)"
+        $text | Should -Not -Match 'Ann'
+    }
+
+    It 'passes on a message of the module and sends the message from Windows behind it to -Verbose' {
+        $exception = [Management.Automation.RuntimeException]::new('it is open in another program')
+        $exception.Data['PvmDetail'] = "The process cannot access the file 'X:\Ann's VM\settings.psd1'."
+        $record = try { throw $exception } catch { $_ }
+        $output = @(Get-DeployCause -ErrorRecord $record -Verbose 4>&1)
+        @($output | Where-Object { $_ -is [string] }) | Should -BeExactly @('it is open in another program (-Verbose shows the details)')
+        @($output | Where-Object { $_ -is [Management.Automation.VerboseRecord] } | ForEach-Object { $_.Message }) |
+            Should -BeExactly @("The process cannot access the file 'X:\Ann's VM\settings.psd1'.")
+        # A stop's message ends with a full stop, which stays at the end.
+        Get-DeployOwnMessage -ErrorRecord $record -Message 'LauncherData\settings.psd1 cannot be read: it is open in another program.' |
+            Should -BeExactly 'LauncherData\settings.psd1 cannot be read: it is open in another program (-Verbose shows the details).'
+    }
+
+    It 'ends a message with the cause as a sentence of its own' {
+        $record = try { throw 'in use' } catch { $_ }
+        Format-DeployCause -ErrorRecord $record | Should -BeExactly 'Cause: in use.'
+        $record = try { throw 'The copy of PortableVM.psm1 does not match the clone.' } catch { $_ }
+        Format-DeployCause -ErrorRecord $record | Should -BeExactly 'Cause: The copy of PortableVM.psm1 does not match the clone.'
+        $record = try { $null = [IO.File]::ReadAllBytes((Join-Path $script:cause 'none.vmdk')) } catch { $_ }
+        Format-DeployCause -ErrorRecord $record | Should -BeExactly 'Cause: it is missing (-Verbose shows the details).'
+    }
+}
+
+Describe 'Rename-DeployItem' {
+    BeforeAll {
+        Import-Module (Join-Path $script:repoRoot 'src\PortableVM.psm1') -Force -Global
+    }
+
+    BeforeEach {
+        $script:folder = Join-Path $TestDrive "rename\Ann's VM [3]"
+        Remove-Item -LiteralPath (Join-Path $TestDrive 'rename') -Recurse -Force -ErrorAction SilentlyContinue
+        $null = New-Item -ItemType Directory -Path (Join-Path $script:folder 'Launcher')
+        Set-Content -LiteralPath (Join-Path $script:folder 'Launcher\a.ps1') -Value 'x'
+        Set-Content -LiteralPath (Join-Path $script:folder 'Start VM.cmd.new') -Value 'x'
+    }
+
+    It 'renames a folder and a file whose paths hold brackets and an apostrophe, also given a relative path' {
+        # Should -Exist would read the brackets as a wildcard.
+        Rename-DeployItem -Path (Join-Path $script:folder 'Launcher') -NewName 'Launcher.previous'
+        Test-Path -LiteralPath (Join-Path $script:folder 'Launcher.previous\a.ps1') | Should -BeTrue
+        Push-Location -LiteralPath $script:folder
+        try { Rename-DeployItem -Path 'Start VM.cmd.new' -NewName 'Start VM.cmd' }
+        finally { Pop-Location }
+        Test-Path -LiteralPath (Join-Path $script:folder 'Start VM.cmd') | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path $script:folder 'Start VM.cmd.new') | Should -BeFalse
+    }
+
+    It 'fails with an error whose cause Get-DeployCause names, without the path, when <Case>' -ForEach @(
+        @{ Case = 'a program holds a file in the folder'; Cause = 'access is denied' }
+        @{ Case = 'a program holds the file'; Cause = 'it is open in another program' }
+        @{ Case = 'the item is missing'; Cause = 'it is missing' }
+        @{ Case = 'the new name is taken'; Cause = 'an item of that name exists already' }
+    ) {
+        $launcher = Join-Path $script:folder 'Launcher'
+        $record = switch ($Case) {
+            'a program holds a file in the folder' {
+                $held = [IO.File]::Open((Join-Path $launcher 'a.ps1'), 'Open', 'Read', 'Read')
+                try { try { Rename-DeployItem -Path $launcher -NewName 'Launcher.previous' } catch { $_ } } finally { $held.Dispose() }
+            }
+            'a program holds the file' {
+                $file = Join-Path $script:folder 'Start VM.cmd.new'
+                $held = [IO.File]::Open($file, 'Open', 'Read', 'None')
+                try { try { Rename-DeployItem -Path $file -NewName 'Start VM.cmd' } catch { $_ } } finally { $held.Dispose() }
+            }
+            'the item is missing' { try { Rename-DeployItem -Path (Join-Path $script:folder 'none') -NewName 'Launcher.previous' } catch { $_ } }
+            'the new name is taken' {
+                $null = New-Item -ItemType Directory -Path (Join-Path $script:folder 'Launcher.previous')
+                try { Rename-DeployItem -Path $launcher -NewName 'Launcher.previous' } catch { $_ }
+            }
+        }
+        $text = Get-DeployCause -ErrorRecord $record
+        $text | Should -BeExactly "$Cause (-Verbose shows the details)"
+        $text | Should -Not -Match 'Ann'
+    }
+
+    It 'gives the cause from Windows, not a missing item, when Windows cannot read the attributes of the <Kind>' -ForEach @(
+        @{ Kind = 'folder'; Name = 'Launcher' }
+        @{ Kind = 'file'; Name = 'Start VM.cmd.new' }
+    ) {
+        $item = Join-Path $script:folder $Name
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        # Without the item's attributes and the folder's list, Directory.Exists and File.Exists
+        # answer false although the item is there.
+        $null = & icacls.exe $item /deny "*${sid}:(RA)"
+        $null = & icacls.exe $script:folder /deny "*${sid}:(RD)"
+        try {
+            ([IO.Directory]::Exists($item) -or [IO.File]::Exists($item)) | Should -BeFalse
+            $record = try { Rename-DeployItem -Path $item -NewName 'renamed' } catch { $_ }
+        } finally {
+            $null = & icacls.exe $script:folder /reset /Q
+            $null = & icacls.exe $item /reset /Q
+        }
+        Get-DeployCause -ErrorRecord $record | Should -BeExactly 'access is denied (-Verbose shows the details)'
+        Test-Path -LiteralPath $item | Should -BeTrue
     }
 }
 
@@ -242,6 +827,12 @@ Describe 'Get-StickInventory' {
 
     It 'answers "<Name>" with <Answer> for a clean stick' -ForEach @(
         @{ Name = 'settings file read'; Answer = $true }
+        @{ Name = 'LauncherData folder found'; Answer = $false }
+        @{ Name = 'settings file has SchemaVersion 2'; Answer = $false }
+        @{ Name = 'Launcher folder holds a settings file'; Answer = $true }
+        @{ Name = 'LauncherData log found'; Answer = $false }
+        @{ Name = 'LauncherData backups hold legacy copies'; Answer = $false }
+        @{ Name = 'a legacy descriptor copy names a raw device'; Answer = $false }
         @{ Name = 'stick disk found from the drive letter'; Answer = $true }
         @{ Name = 'stick is MBR'; Answer = $true }
         @{ Name = 'stick signature matches StickMbrSignature'; Answer = $true }
@@ -277,6 +868,7 @@ Describe 'Get-StickInventory' {
         @{ Name = 'VirtualBox.xml lists the VM'; Answer = $true }
         @{ Name = "VirtualBox.xml lists the VM's .vbox with a drive letter"; Answer = $true }
         @{ Name = 'VirtualBox descriptor found'; Answer = $true }
+        @{ Name = 'VirtualBox descriptor has a .orig copy'; Answer = $false }
         @{ Name = 'VirtualBox files have .launcher-backup copies'; Answer = $false }
         @{ Name = 'VMware Workstation installed'; Answer = $false }
         @{ Name = 'VirtualBox installed'; Answer = $false }
@@ -298,6 +890,7 @@ Describe 'Get-StickInventory' {
         @{ Name = "VirtualBox host I/O cache is on for the descriptor's controller"; Answer = $false }
         @{ Name = 'VirtualBox descriptor has a bandwidth group'; Answer = $true }
         @{ Name = 'VirtualBox .vbox holds paths with a drive letter'; Answer = $true }
+        @{ Name = 'VirtualBox descriptor has a .orig copy'; Answer = $true }
         @{ Name = 'VirtualBox files have .launcher-backup copies'; Answer = $true }
         @{ Name = 'VMware Workstation installed'; Answer = $true }
         @{ Name = 'VirtualBox installed'; Answer = $true }
@@ -309,6 +902,7 @@ Describe 'Get-StickInventory' {
         Write-TestFile -Path (Join-Path $root 'VMware\old.vmdk') -Text 'RW 9 FLAT "\\.\PhysicalDrive1" 0'
         Write-TestFile -Path (Join-Path $root 'VMware\stick-pt.vmdk') -Text 'partition table'
         Write-TestFile -Path (Join-Path $root 'VMware\stick.vmdk.orig') -Text 'old'
+        Write-TestFile -Path (Join-Path $root 'VirtualBox\Test VM\stick.vmdk.orig') -Text 'old'
         Write-TestFile -Path (Join-Path $root 'VirtualBox\VirtualBox.xml.launcher-backup') -Text 'old'
         Write-TestFile -Path (Join-Path $root 'Programs\vmware.exe') -Text ''
         Write-TestFile -Path (Join-Path $root 'Programs\VBoxManage.exe') -Text ''
@@ -319,6 +913,34 @@ Describe 'Get-StickInventory' {
         Mock Get-InventoryVolume { [pscustomobject]@{ FileSystem = 'NTFS' } }
         Mock Get-InventoryRegistryValue { Join-Path $TestDrive 'flagged-stick\Programs' }
         (Get-TestAnswer -Root $root)[$Name] | Should -Be $Answer
+    }
+
+    It 'reads the settings from LauncherData, else from Launcher' {
+        $root = Join-Path $TestDrive 'settings-stick'
+        Get-InventorySettingsPath -Root $root | Should -BeExactly (Join-Path $root 'LauncherData\settings.psd1')
+        Write-TestFile -Path (Join-Path $root 'Launcher\settings.psd1') -Text (Get-TestSettingsText)
+        Get-InventorySettingsPath -Root $root | Should -BeExactly (Join-Path $root 'Launcher\settings.psd1')
+        Write-TestFile -Path (Join-Path $root 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        Get-InventorySettingsPath -Root $root | Should -BeExactly (Join-Path $root 'LauncherData\settings.psd1')
+    }
+
+    It 'answers the LauncherData checks for a migrated stick, and finds a legacy copy that still names a raw device' {
+        $root = Initialize-InventoryStick -Name 'migrated-stick' -Vmx @() -Vbox (Get-TestVboxText -Body (Get-TestVboxBody)) -Registry (Get-TestRegistryText)
+        Remove-Item -LiteralPath (Join-Path $root 'Launcher\settings.psd1')
+        Write-TestFile -Path (Join-Path $root 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        Write-TestFile -Path (Join-Path $root 'LauncherData\logs\launcher.log') -Text "a line`r`n"
+        Write-TestFile -Path (Join-Path $root 'LauncherData\backups\legacy\VMware\stick.vmdk.orig') -Text (Get-TestDescriptorText -Device '\\.\PortableVM-disarmed')
+        Write-TestFile -Path (Join-Path $root 'LauncherData\backups\legacy\VirtualBox\VirtualBox.xml.launcher-backup') -Text '<VirtualBox/>'
+        $answers = Get-TestAnswer -Root $root -SettingsPath (Get-InventorySettingsPath -Root $root)
+        $answers['settings file read'] | Should -BeTrue
+        $answers['LauncherData folder found'] | Should -BeTrue
+        $answers['settings file has SchemaVersion 2'] | Should -BeTrue
+        $answers['Launcher folder holds a settings file'] | Should -BeFalse
+        $answers['LauncherData log found'] | Should -BeTrue
+        $answers['LauncherData backups hold legacy copies'] | Should -BeTrue
+        $answers['a legacy descriptor copy names a raw device'] | Should -BeFalse
+        Write-TestFile -Path (Join-Path $root 'LauncherData\backups\legacy\VirtualBox\Test VM\stick.vmdk.orig') -Text (Get-TestDescriptorText -Device '\\?\PhysicalDrive2')
+        (Get-TestAnswer -Root $root -SettingsPath (Get-InventorySettingsPath -Root $root))['a legacy descriptor copy names a raw device'] | Should -BeTrue
     }
 
     It 'counts a disk entry as attached only when it is switched on' {

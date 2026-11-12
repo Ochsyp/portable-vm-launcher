@@ -16,7 +16,7 @@ BeforeAll {
             ForEach-Object { Join-Path $script:repoRoot $_ })
     $script:utf8 = New-Object System.Text.UTF8Encoding $false
     # A name with a letter outside ASCII, as a denylisted name can have.
-    $script:umlautName = 'J' + [char]0x00FC + 'rgen'
+    $script:sampleName = 'K' + [char]0x00E9 + 'l' + [char]0x00F8 + 'n' + [char]0x00EF
 
     # Git for Windows' sh, which runs the hooks: the one on the path, as in Git Bash, or the one
     # in a folder above git.exe, which sits in cmd\ or mingw64\bin\ of the Git folder.
@@ -106,13 +106,13 @@ BeforeAll {
 Describe 'Tracked files' {
     It 'include the launcher and its tools, so the other checks have something to check' {
         foreach ($path in 'src/Start-PortableVM.ps1', 'src/PortableVM.psm1', 'tools/Deploy-PortableVM.ps1',
-            'tools/Get-StickInventory.ps1', 'examples/settings.example.psd1') {
+            'tools/Get-StickInventory.ps1', 'examples/settings.example.psd1', 'tests/Settings.Tests.ps1') {
             $script:tracked | Should -Contain $path
         }
     }
 
     It 'include no real settings, logs, backups or VM files' {
-        $private = '(^|/)settings[^/]*\.psd1|\.log$|\.log\.[0-9]|\.bak$|\.orig$|\.launcher-backup$|' +
+        $private = '(^|/)settings[^/]*\.psd1|(^|/)LauncherData/|\.log$|\.log\.[0-9]|\.bak$|\.orig$|\.launcher-backup$|\.pvm-tmp$|' +
             '(^|/)VirtualBox\.xml|(^|/)VBox[^/]*\.log|\.(vmx|vmxf|vmsd|vmss|vmem|vmdk|nvram|vbox|vbox-prev|vbox-tmp|vdi|vhd|vhdx|sav)$'
         $script:tracked | Where-Object { $_ -match $private -and $_ -notmatch '(^|/)settings\.example\.psd1$' } |
             Should -BeNullOrEmpty
@@ -154,7 +154,25 @@ Describe 'Launcher sources' {
     It 'ask before a resume with No as the default answer' {
         $text = [IO.File]::ReadAllText($script:launcher)
         $text | Should -Match 'function Show-Question[\s\S]*MessageBoxButtons\]::YesNo[\s\S]*MessageBoxDefaultButton\]::Button2'
-        $text | Should -Match ([regex]::Escape('Invoke-PortableVM -LauncherPath $Here -DryRun:$DryRun -AskResume { param([string]$Question) Show-Question -Message $Question }'))
+        $text | Should -Match ([regex]::Escape('Invoke-PortableVM -LauncherPath $Here -DryRun:$DryRun -AskResume { param([string]$Question, [string]$Caption) Show-Question -Message $Question -Caption $Caption }'))
+    }
+
+    It 'keep the administrator-rights block of the script exactly as it was before the redesign' {
+        # The 12 lines from '# --- Administrator rights', joined with LF, as of commit b19dbff.
+        $adminBlockSha256 = 'c0a699741785a202c42dec700de4091aab912c898ae66800d6708502c354efa7'
+        $lines = [IO.File]::ReadAllLines($script:launcher)
+        $first = [Array]::IndexOf($lines, '# --- Administrator rights -------------------------------------------------------------')
+        $first | Should -BeGreaterThan 0
+        $block = [Text.Encoding]::ASCII.GetBytes(($lines[$first..($first + 11)] -join "`n"))
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $actual = ($sha.ComputeHash($block) | ForEach-Object { $_.ToString('x2') }) -join '' }
+        finally { $sha.Dispose() }
+        $actual | Should -BeExactly $adminBlockSha256
+    }
+
+    It 'keep the start line of Start VM.cmd as it was before the redesign' {
+        $lines = [IO.File]::ReadAllLines((Join-Path $script:repoRoot 'Start VM.cmd'))
+        $lines[-1] | Should -BeExactly 'start "" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0Launcher\Start-PortableVM.ps1"'
     }
 
     It 'give every function a comment on the line above it' {
@@ -170,8 +188,9 @@ Describe 'Launcher sources' {
 }
 
 Describe 'Static guards' {
-    It 'let the module define functions only, so importing it runs nothing' {
+    It 'let the module define functions only, so importing it runs nothing, after it sets strict mode' {
         $statements = (Get-SourceAst -Path $script:module).EndBlock.Statements
+        $statements[0].Extent.Text | Should -BeExactly 'Set-StrictMode -Version 3.0'
         $other = $statements | Where-Object {
             $_ -isnot [System.Management.Automation.Language.FunctionDefinitionAst] -and
             $_.Extent.Text -notin @('Set-StrictMode -Version 3.0', "`$ErrorActionPreference = 'Stop'")
@@ -230,32 +249,51 @@ Describe 'Static guards' {
         $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FileRedirectionAst] }, $true) | Should -BeNullOrEmpty
         # The .NET members the tool calls, all of which only read; a new one is added here on purpose.
         $allowed = 'Close', 'Create', 'Equals', 'GetAttribute', 'GetFullPath', 'GetInvalidPathChars', 'GetType', 'IndexOfAny', 'IsPathRooted',
-        'Load', 'new', 'ReadAllText', 'SelectNodes', 'ToLowerInvariant', 'Trim', 'TrimEnd'
+        'Load', 'Matches', 'new', 'ReadAllText', 'SelectNodes', 'ToLowerInvariant', 'Trim', 'TrimEnd'
         $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true) |
             ForEach-Object { $_.Member.Extent.Text } | Where-Object { $allowed -cnotcontains $_ } | Should -BeNullOrEmpty
     }
 
-    It 'keep the deploy tool from deleting anything' {
+    It 'keep the deploy tool from deleting anything: no Remove-Item, Clear-*, .Delete or -Force that replaces, and [IO.File]::Replace only to disarm a descriptor copy' {
         $ast = Get-SourceAst -Path (Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1')
         Get-SourceCommand -Ast $ast | Where-Object { $_.Name -in 'Remove-Item', 'Clear-Content', 'Clear-Item' } | Should -BeNullOrEmpty
-        $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true) |
-            Where-Object { $_.Member.Extent.Text -eq 'Delete' } | Should -BeNullOrEmpty
+        $members = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
+        $members | Where-Object { $_.Member.Extent.Text -eq 'Delete' } | Should -BeNullOrEmpty
+        # Move-Item -Force would replace, and so delete, an existing file.
+        $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandParameterAst] -and $args[0].ParameterName -eq 'Force' }, $true) |
+            Where-Object { $_.Parent.GetCommandName() -ne 'Import-Module' -and $_.Parent.GetCommandName() -ne 'New-Item' -and $_.Parent.GetCommandName() -ne 'Get-ChildItem' } |
+            ForEach-Object { "$($_.Parent.GetCommandName()) at line $($_.Extent.StartLineNumber)" } | Should -BeNullOrEmpty
+        $replaces = @($members | Where-Object {
+                $_.Member.Extent.Text -eq 'Replace' -and $_.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
+                @('IO.File', 'System.IO.File', 'File') -contains $_.Expression.TypeName.FullName
+            })
+        $replaces.Count | Should -Be 1
+        for ($parent = $replaces[0].Parent; $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
+        $parent.Name | Should -BeExactly 'Set-DeployDisarmedCopy'
     }
 }
 
 Describe 'Example settings' {
     BeforeAll {
         $script:settings = Import-PowerShellDataFile -LiteralPath $script:example
+        Import-Module $script:module -Force
+        $script:schema = @(Get-PvmSettingSchema | ForEach-Object { $_.Name })
+        Remove-Module PortableVM
     }
 
-    It 'has exactly the keys the launcher reads' {
+    It 'has exactly the keys of settings schema 2' {
+        (@($script:settings.Keys | Sort-Object) -join ', ') | Should -BeExactly (@($script:schema | Sort-Object) -join ', ')
+    }
+
+    It 'names only keys of the schema where the module reads a setting' {
         # The module reads every setting as $settings['Key'].
         $source = Get-Content -LiteralPath $script:module -Raw
         $read = @([regex]::Matches($source, "(?i)\`$settings\['(\w+)'\]") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
-        (@($script:settings.Keys | Sort-Object) -join ', ') | Should -BeExactly ($read -join ', ')
+        $read.Count | Should -BeGreaterThan 10
+        $read | Where-Object { $script:schema -notcontains $_ } | Should -BeNullOrEmpty
     }
 
-    It 'holds a signature no disk can match, so the launcher stops at its identity check' {
+    It 'holds a signature no disk can match, which the settings check refuses until real values are in' {
         # The launcher compares the setting with the disk's signature as 8 hex digits, or 'none'.
         $script:settings.StickMbrSignature | Should -Not -Match '^([0-9A-Fa-f]{8}|none)$'
     }
@@ -277,10 +315,10 @@ Describe 'privacy-scan' {
             'path.txt'               = 'log at C:/Us' + 'ers/someone/notes.txt'
             'mail.txt'               = 'write to someone' + '@' + 'mail.invalid'
             'mac.txt'                = "adapter $mac"
-            'name.txt'               = "made by $script:umlautName"
-            "$script:umlautName.txt" = 'nothing private inside'
+            'name.txt'               = "made by $script:sampleName"
+            "$script:sampleName.txt" = 'nothing private inside'
         }
-        [IO.File]::WriteAllText((Join-Path $sample '.git\info\privacy-denylist'), "# test`n  $script:umlautName  `n", $script:utf8)
+        [IO.File]::WriteAllText((Join-Path $sample '.git\info\privacy-denylist'), "# test`n  $script:sampleName  `n", $script:utf8)
         Invoke-SampleGit -Path $sample -Arguments @('add', '-A')
         $result = Invoke-PrivacyScan -Path $sample
         $result.ExitCode | Should -Be 1
@@ -290,7 +328,7 @@ Describe 'privacy-scan' {
         $text | Should -Match 'mac\.txt:1: MAC address'
         $text | Should -Match 'name\.txt:1: denylisted value'
         $text | Should -Match 'file name \d+ of the scanned paths: denylisted value'
-        $text.Contains($script:umlautName) | Should -BeFalse
+        $text.Contains($script:sampleName) | Should -BeFalse
     }
 
     It 'lets the synthetic UUID and GitHub no-reply e-mail addresses through' {
@@ -309,13 +347,13 @@ Describe 'Find-PrivateData' {
     It 'finds a denylisted name outside ASCII in contents, file names, messages and ref names, and never prints it' {
         $sample = Join-Path $TestDrive 'find-name'
         Initialize-SampleRepository -Path $sample -Files @{
-            'notes.txt'              = "made by $script:umlautName"
-            "$script:umlautName.txt" = 'nothing private inside'
+            'notes.txt'              = "made by $script:sampleName"
+            "$script:sampleName.txt" = 'nothing private inside'
         }
         Invoke-SampleGit -Path $sample -Arguments @('add', '-A')
-        Invoke-SampleGit -Path $sample -Arguments @('commit', '-q', '-m', "note for $script:umlautName")
-        Invoke-SampleGit -Path $sample -Arguments @('branch', "feat/$script:umlautName")
-        [IO.File]::WriteAllText((Join-Path $sample '.git\info\privacy-denylist'), "$script:umlautName`n", $script:utf8)
+        Invoke-SampleGit -Path $sample -Arguments @('commit', '-q', '-m', "note for $script:sampleName")
+        Invoke-SampleGit -Path $sample -Arguments @('branch', "feat/$script:sampleName")
+        [IO.File]::WriteAllText((Join-Path $sample '.git\info\privacy-denylist'), "$script:sampleName`n", $script:utf8)
         $result = Invoke-FindPrivateData -Path $sample
         $result.ExitCode | Should -Be 1
         $text = $result.Lines -join "`n"
@@ -323,7 +361,7 @@ Describe 'Find-PrivateData' {
         $text | Should -Match 'is in index path: <value>\.txt'
         $text | Should -Match 'is in message of commit [0-9a-f]+'
         $text | Should -Match 'is in a ref name'
-        $text.Contains($script:umlautName) | Should -BeFalse
+        $text.Contains($script:sampleName) | Should -BeFalse
     }
 
     It 'matches a number from the settings only as a whole number, and skips short ones' {
@@ -342,6 +380,60 @@ Describe 'Find-PrivateData' {
         $text | Should -Match 'a value of StickSectors is in index: whole\.txt'
         $text | Should -Not -Match 'longer\.txt'
         $text | Should -Not -Match 'DataPartitionStart'
+    }
+
+    It 'reads LauncherData\settings.psd1 too, and finds the VM''s and the guest''s names but not the neutral defaults' {
+        $sample = Join-Path $TestDrive 'find-names'
+        Initialize-SampleRepository -Path $sample -Files @{
+            'vm.txt'      = 'started Test Machine today'
+            'guest.txt'   = 'the guest is Sample OS'
+            'neutral.txt' = 'the VM and the guest'
+        }
+        Invoke-SampleGit -Path $sample -Arguments @('add', '-A')
+        $null = New-Item -ItemType Directory -Path (Join-Path $sample 'LauncherData')
+        [IO.File]::WriteAllText((Join-Path $sample 'LauncherData\settings.psd1'), "@{ SchemaVersion = 2; VmDisplayName = 'Test Machine'; GuestName = 'Sample OS' }", $script:utf8)
+        $result = Invoke-FindPrivateData -Path $sample
+        $result.ExitCode | Should -Be 1
+        $text = $result.Lines -join "`n"
+        $text | Should -Match 'a value of VmDisplayName is in index: vm\.txt'
+        $text | Should -Match 'a value of GuestName is in index: guest\.txt'
+        $text | Should -Not -Match 'neutral\.txt'
+
+        [IO.File]::WriteAllText((Join-Path $sample 'LauncherData\settings.psd1'), "@{ SchemaVersion = 2; VmDisplayName = 'the VM'; GuestName = 'the guest' }", $script:utf8)
+        (Invoke-FindPrivateData -Path $sample).ExitCode | Should -Be 0
+    }
+
+    It 'reads a settings file saved as UTF-8 without a byte order mark as UTF-8, so a name outside ASCII is found' {
+        $sample = Join-Path $TestDrive 'find-utf8'
+        Initialize-SampleRepository -Path $sample -Files @{ 'guest.txt' = "the guest is $script:sampleName OS" }
+        Invoke-SampleGit -Path $sample -Arguments @('add', '-A')
+        $null = New-Item -ItemType Directory -Path (Join-Path $sample 'LauncherData')
+        [IO.File]::WriteAllText((Join-Path $sample 'LauncherData\settings.psd1'), "@{ SchemaVersion = 2; GuestName = '$script:sampleName OS' }", $script:utf8)
+        $result = Invoke-FindPrivateData -Path $sample
+        $result.ExitCode | Should -Be 1
+        ($result.Lines -join "`n") | Should -Match 'a value of GuestName is in index: guest\.txt'
+    }
+
+    It 'stops with exit code 2 when -SettingsPath names a file that is not there' {
+        $sample = Join-Path $TestDrive 'find-missing'
+        Initialize-SampleRepository -Path $sample -Files @{ 'a.txt' = 'text' }
+        $tool = Join-Path $script:repoRoot 'tools\Find-PrivateData.ps1'
+        $lines = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $tool -RepositoryPath $sample -SettingsPath (Join-Path $sample 'none.psd1') 2>&1 | ForEach-Object { "$_" })
+        $LASTEXITCODE | Should -Be 2
+        ($lines -join "`n") | Should -Match '-SettingsPath names no file'
+    }
+
+    It 'reads a relative -SettingsPath from PowerShell''s location, not from the process''s folder' {
+        $sample = Join-Path $TestDrive 'find-relative'
+        Initialize-SampleRepository -Path $sample -Files @{ 'guest.txt' = 'the guest is Sample OS' }
+        Invoke-SampleGit -Path $sample -Arguments @('add', '-A')
+        # Written after the add, so the settings file stays untracked.
+        [IO.File]::WriteAllText((Join-Path $sample 's.psd1'), "@{ GuestName = 'Sample OS' }", $script:utf8)
+        $tool = Join-Path $script:repoRoot 'tools\Find-PrivateData.ps1'
+        $command = "Set-Location -LiteralPath '$sample'; & '$tool' -RepositoryPath . -SettingsPath .\s.psd1; exit `$LASTEXITCODE"
+        $lines = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command $command 2>&1 | ForEach-Object { "$_" })
+        $LASTEXITCODE | Should -Be 1
+        ($lines -join "`n") | Should -Match 'a value of GuestName is in index: guest\.txt'
     }
 
     It 'runs on its own clone when no -RepositoryPath is given, as pre-push calls it' {

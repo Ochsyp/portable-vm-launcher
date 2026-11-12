@@ -2,20 +2,22 @@
 #                   FIND PRIVATE DATA
 # -------------------------------------------------------
 #
-# Looks for the values of the real, untracked settings file, and for the strings listed in
-# .git/info/privacy-denylist, in what GitHub would show: the contents and names of the files in
-# git's index and, with -History, of every commit reachable from any ref, the commit messages
-# and the ref names. Prints the setting's name and where it was found, never the value. Run it
-# in Windows PowerShell 5.1:
+# Looks for the values of the real, untracked settings files, LauncherData\settings.psd1 and the
+# older Launcher\settings.psd1 in the clone or the files -SettingsPath names, and for the strings
+# listed in .git/info/privacy-denylist, in what GitHub would show: the contents and names of the
+# files in git's index and, with -History, of every commit reachable from any ref, the commit
+# messages and the ref names. Prints the setting's name and where it was found, never the value.
+# Run it in Windows PowerShell 5.1:
 #   powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Find-PrivateData.ps1 -History
 # .githooks/pre-push runs it like that before every push. -RepositoryPath checks another clone
-# than the one this script is in. Exits 0 when nothing is found or there is nothing to look for,
-# 1 on a match, 2 when the check cannot run.
+# than the one this script is in. -SettingsPath takes one file when the script runs with -File,
+# several from PowerShell, and each file it names must exist. Exits 0 when nothing is found or
+# there is nothing to look for, 1 on a match, 2 when the check cannot run.
 
 [CmdletBinding()]
 param(
     [string]$RepositoryPath,
-    [string]$SettingsPath,
+    [string[]]$SettingsPath,
     [switch]$History
 )
 
@@ -29,6 +31,9 @@ if (-not $RepositoryPath) { $RepositoryPath = Split-Path $PSScriptRoot -Parent }
 $IdentityKeys = @('StickMbrSignature', 'StickSectors', 'VmSectors', 'DataPartitionStart', 'VirtualBoxVmUuid')
 $PathKeys = @('VirtualBoxHome', 'VirtualBoxVbox', 'VirtualBoxDisk', 'VMwareVmx', 'VMwareDisk')
 $GenericNames = @('VirtualBox', 'VMware')
+# The names of the VM and the guest system count unless they are the neutral defaults.
+$NameKeys = @('VmDisplayName', 'GuestName')
+$NeutralNames = @('the VM', 'the guest')
 $MinimumNumberDigits = 7
 
 # Run git in the repository and return its output lines. git writes UTF-8, so the console's
@@ -59,28 +64,34 @@ function Invoke-Git {
     $output
 }
 
-# Return name/value pairs to look for: the identity settings as written, each folder and file
-# name of the path settings with and without its extension, and each denylist line. Values
-# shorter than four characters, and numbers shorter than $MinimumNumberDigits, are skipped as
-# too common to mean anything.
+# Return name/value pairs to look for: from each settings table in $Settings the identity
+# settings as written, each folder and file name of the path settings with and without its
+# extension, and the VM and guest names unless they are the neutral defaults; then each denylist
+# line. Values shorter than four characters, and numbers shorter than $MinimumNumberDigits, are
+# skipped as too common to mean anything.
 function Get-PrivateValue {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
-        [hashtable]$Settings,
+        [hashtable[]]$Settings,
         [string[]]$Denylist
     )
     $pairs = @()
-    if ($Settings) {
+    foreach ($table in @($Settings | Where-Object { $_ })) {
         foreach ($key in $IdentityKeys) {
-            if ($Settings.ContainsKey($key)) { $pairs += [pscustomobject]@{ Name = $key; Value = "$($Settings[$key])".Trim() } }
+            if ($table.ContainsKey($key)) { $pairs += [pscustomobject]@{ Name = $key; Value = "$($table[$key])".Trim() } }
         }
         foreach ($key in $PathKeys) {
-            if (-not $Settings.ContainsKey($key)) { continue }
-            foreach ($segment in ("$($Settings[$key])" -split '[\\/]')) {
+            if (-not $table.ContainsKey($key)) { continue }
+            foreach ($segment in ("$($table[$key])" -split '[\\/]')) {
                 foreach ($name in @($segment, [IO.Path]::GetFileNameWithoutExtension($segment))) {
                     if ($GenericNames -notcontains $name) { $pairs += [pscustomobject]@{ Name = $key; Value = $name.Trim() } }
                 }
+            }
+        }
+        foreach ($key in $NameKeys) {
+            if ($table.ContainsKey($key) -and $NeutralNames -notcontains "$($table[$key])".Trim()) {
+                $pairs += [pscustomobject]@{ Name = $key; Value = "$($table[$key])".Trim() }
             }
         }
     }
@@ -90,6 +101,36 @@ function Get-PrivateValue {
     $pairs | Where-Object {
         if ($_.Value -match '^\d+$') { $_.Value.Length -ge $MinimumNumberDigits } else { $_.Value.Length -ge 4 }
     } | Sort-Object Name, Value -Unique
+}
+
+# Return the hashtable in the settings file $Path, read as data without running anything in it.
+# The text is decoded by its byte order mark, else as UTF-8 when it is valid UTF-8, as editors
+# save it, else as ANSI, so that a name outside ASCII is looked for as it is written in the files.
+function Read-PrivateSetting {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param([Parameter(Mandatory)][string]$Path)
+    # .NET reads a relative path from the process's folder, not from PowerShell's location.
+    $bytes = [IO.File]::ReadAllBytes((Convert-Path -LiteralPath $Path))
+    $text = $null
+    foreach ($encoding in (New-Object System.Text.UTF8Encoding $true), (New-Object System.Text.UnicodeEncoding $false, $true), (New-Object System.Text.UnicodeEncoding $true, $true)) {
+        $preamble = $encoding.GetPreamble()
+        if ($bytes.Length -ge $preamble.Length -and [Convert]::ToBase64String($bytes, 0, $preamble.Length) -eq [Convert]::ToBase64String($preamble)) {
+            $text = $encoding.GetString($bytes, $preamble.Length, $bytes.Length - $preamble.Length)
+            break
+        }
+    }
+    if ($null -eq $text) {
+        try { $text = (New-Object System.Text.UTF8Encoding $false, $true).GetString($bytes) }
+        catch { $text = [Text.Encoding]::Default.GetString($bytes) }
+    }
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -gt 0) { throw 'The settings file is no valid PowerShell data.' }
+    $hashtable = $ast.Find({ $args[0] -is [System.Management.Automation.Language.HashtableAst] }, $false)
+    if ($null -eq $hashtable) { throw 'The settings file holds no hashtable.' }
+    $hashtable.SafeGetValue()
 }
 
 # Return whether $Text holds $Value, compared without case. A number counts only as a whole
@@ -142,11 +183,21 @@ function Find-Value {
 }
 
 try {
-    if (-not $SettingsPath) { $SettingsPath = Join-Path $RepositoryPath 'Launcher\settings.psd1' }
-    $settings = $null
-    if (Test-Path -LiteralPath $SettingsPath -PathType Leaf) {
-        $settings = Import-PowerShellDataFile -LiteralPath $SettingsPath
+    # Git runs in PowerShell's location, but a relative path is made absolute here all the same.
+    $RepositoryPath = Convert-Path -LiteralPath $RepositoryPath
+    if ($SettingsPath) {
+        # A file named on purpose must be there: the check must not pass because a path was wrong.
+        foreach ($path in $SettingsPath) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                Write-Output "Find-PrivateData: -SettingsPath names no file: $path"
+                exit 2
+            }
+        }
+    } else {
+        $SettingsPath = @((Join-Path $RepositoryPath 'LauncherData\settings.psd1'), (Join-Path $RepositoryPath 'Launcher\settings.psd1')) |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
     }
+    $settings = @($SettingsPath | Where-Object { $_ } | ForEach-Object { Read-PrivateSetting -Path $_ })
     $gitDir = @(Invoke-Git -Arguments @('rev-parse', '--absolute-git-dir'))[0]
     $denylistPath = Join-Path $gitDir 'info\privacy-denylist'
     $denylist = @()
