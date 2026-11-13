@@ -28,8 +28,9 @@ Before every start the launcher:
 - refuses the PC's own Windows disk;
 - points the VM's raw-disk descriptor (`.vmdk`) at that disk number, changing only its extent
   lines and `createType`, and stops at a descriptor it does not understand;
-- fixes the stick's drive letter in the VirtualBox files, also when the stick folder is a drive
-  root, and never moves a path on another drive;
+- fixes the stick's drive letter in the VirtualBox files: below a drive root in every quoted
+  path below the stick folder, whatever its letter, as before; when the stick folder is a drive
+  root, only in the paths on the stick's old letter, so that a path on another drive never moves;
 - checks every VM file it would change before it changes the first one, and writes each so that
   a crash or a pulled stick leaves the old or the new version, never a mix;
 - refuses to start the VM in one hypervisor while it runs in the other, or while the other
@@ -54,15 +55,18 @@ Messages and the dialog title name the VM and the guest system as `VmDisplayName
 `GuestName` in the settings say; without them they say "the VM" and "the guest". Before the
 launcher rewrites a VM file, it keeps two copies of it below `LauncherData\backups`: the first
 version, which it never replaces, and the version before the latest rewrite, with `.previous`
-in its name, which the next rewrite replaces. A copy of a raw-disk descriptor names a disarmed
-device there, so opening it by mistake reaches no disk.
+in its name, which the next rewrite replaces; a rewrite that fails leaves that copy as it was. A
+copy of a raw-disk descriptor names a disarmed device there, so opening it by mistake reaches
+no disk.
 
 A rewrite goes to `<file>.pvm-tmp` beside the file first, is forced onto the stick and read
 back, and only then takes the file's place; the replaced version stays as `<file>.pvm-old`
-until the new one reads back. A crash or a pulled stick can leave one of these two beside the
-file. The next start then stops and names the one step to take, such as removing the
-`.pvm-tmp` or renaming the `.pvm-old` back; the launcher never guesses which version to keep.
-Bytes the launcher does not mean to change stay as they were, a byte order mark too.
+until the new one reads back from there. A crash or a pulled stick can leave one of these two
+beside the file, and so can a new version that does not read back. The next start then stops
+and names the one step to take, such as removing the `.pvm-tmp` or renaming the `.pvm-old`
+back. The step always keeps the version from before that write, and the next start makes its
+change again. Bytes the launcher does not mean to change stay as they were, a byte order mark
+too.
 
 `-DryRun` takes the decisions of a real start and logs what would change, without changing a VM
 file or starting anything. It still adds its lines to the log and may move a full or old-format
@@ -235,8 +239,8 @@ What a stick, a script or a user may rely on between versions:
   lists every key with its default.
 - `Launcher` holds code only, which each deploy replaces; `LauncherData` holds what the launcher
   keeps between runs, which a deploy leaves alone.
-- `<file>.pvm-tmp` and `<file>.pvm-old` beside a file are the copies of a write that a crash
-  cut off; the launcher and the deploy tool stop at them and name the step to take.
+- `<file>.pvm-tmp` and `<file>.pvm-old` beside a file are the copies of a write that did not
+  finish; the launcher and the deploy tool stop at them and name the step to take.
 
 ## Known limits
 

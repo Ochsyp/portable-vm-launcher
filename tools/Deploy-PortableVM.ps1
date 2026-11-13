@@ -406,13 +406,16 @@ function Assert-DeployWriteAccess {
 }
 
 # Disarm the descriptor copy $Path in place (ConvertTo-PvmDisarmedDescriptorText, every other
-# byte kept) through the launcher's safe write (Write-PvmFile), and return whether it changed. A
-# copy whose earlier write a crash cut off stops it, with the step to take behind -Verbose; the
+# byte kept) through the launcher's safe write (Write-PvmFile), and return whether it changed.
+# Copies that an earlier write left beside it stop it, a disarmed copy too, as does an armed
+# version that cannot be removed after the disarm, with the step to take behind -Verbose; the
 # tool removes nothing it did not write in the same step.
 function Set-DeployDisarmedCopy {
     [CmdletBinding(SupportsShouldProcess)]
     [OutputType([bool])]
     param([Parameter(Mandatory)][string]$Path)
+    $leftover = Get-PvmLeftoverProblem -Path $Path
+    if ($leftover) { throw (Get-PvmWriteException -Code 'Leftover' -Message 'An earlier write of the file did not finish, and its copy is still beside it.' -Detail $leftover) }
     # ISO-8859-1 maps each byte to one character and back, so only the device names change.
     $latin1 = [Text.Encoding]::GetEncoding(28591)
     $bytes = [IO.File]::ReadAllBytes($Path)
@@ -420,7 +423,11 @@ function Set-DeployDisarmedCopy {
     $disarmed = ConvertTo-PvmDisarmedDescriptorText -Text $text
     if ($disarmed -ceq $text) { return $false }
     if (-not $PSCmdlet.ShouldProcess($Path, 'Disarm the descriptor copy')) { return $false }
-    $null = Write-PvmFile -Path $Path -Bytes $latin1.GetBytes($disarmed) -Expected $bytes
+    $left = Write-PvmFile -Path $Path -Bytes $latin1.GetBytes($disarmed) -Expected $bytes
+    if ($left) {
+        throw (Get-PvmWriteException -Code 'Leftover' -Message 'A copy was disarmed, but its armed version could not be removed from beside it.' -Detail (
+                "$Path was disarmed, but its armed version $left could not be removed. To set it right, remove $left."))
+    }
     $true
 }
 
@@ -624,6 +631,12 @@ function Invoke-PvmDeploy {
     if (Test-Path -LiteralPath $dataStaged) {
         throw "LauncherData.new is left from a migration whose staging did not finish, and nothing the launcher uses was changed. Remove LauncherData.new, and $leftovers if they are there, then run the same command again."
     }
+    # The copies a safe write of the staged .cmd keeps beside it; Launcher.new is new each time.
+    foreach ($copy in @((Get-PvmWriteCopyPath -Path $cmdStaged).PSObject.Properties.Value)) {
+        if (Test-Path -LiteralPath $copy) {
+            throw "'$(Split-Path $copy -Leaf)' is left from an earlier deploy whose write of '$CmdName.new' did not finish, and nothing the launcher uses was changed. Remove it, and $leftovers if they are there, then run the same command again."
+        }
+    }
 
     # Where the settings are decides what the deploy does.
     $hasOldSettings = Test-Path -LiteralPath $oldSettings -PathType Leaf
@@ -724,7 +737,14 @@ function Invoke-PvmDeploy {
     }
     if ($plan) {
         try { Move-DeployLegacyData -Target $Target -Plan $plan }
-        catch { throw "The migration stopped part way, but the launcher in Launcher still works with Launcher\settings.psd1. Run the same command again to finish it. $(Format-DeployCause -ErrorRecord $_)" }
+        catch {
+            # Running again would stop at the same copy, so the step comes first.
+            if ("$($_.Exception.Data['PvmWrite'])" -eq 'Leftover') {
+                throw ('The migration stopped part way at a copy below LauncherData\backups\legacy that needs a step by hand, but the launcher in Launcher still works with ' +
+                    "Launcher\settings.psd1. -Verbose names the copy and the step; take it, then run the same command again. $(Format-DeployCause -ErrorRecord $_)")
+            }
+            throw "The migration stopped part way, but the launcher in Launcher still works with Launcher\settings.psd1. Run the same command again to finish it. $(Format-DeployCause -ErrorRecord $_)"
+        }
     }
 
     if ($mode -eq 'Install') {

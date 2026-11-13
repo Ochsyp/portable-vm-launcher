@@ -98,10 +98,12 @@ All notable changes to this project are listed here. The format follows
   to `<file>.pvm-tmp` beside it first, is forced onto the stick and read back, and only then
   takes the file's place, the replaced version staying as `<file>.pvm-old` until the new one
   reads back. A crash or a pulled stick leaves the old or the new version, never a mix, and the
-  next start stops at a leftover copy and names the one step to take.
+  next start, in either hypervisor, stops at a leftover copy and names the one step to take,
+  which always keeps the version from before that write. A new version that does not read back
+  from its place stops the same way.
 - A copy of the version before the latest rewrite, `*.previous.orig` or
   `*.previous.launcher-backup` in `LauncherData\backups`, beside the first version, which stays
-  as it was.
+  as it was. A rewrite that fails leaves this copy as it was too.
 - Tests of the safe write, the descriptor parser, the drive-letter rule, both copies and a start
   that checks every file before it changes one. Repo checks that the module writes files only
   through the safe write, apart from its log, and deletes, moves or swaps a file only in that
@@ -170,14 +172,15 @@ Compared with the launcher on a stick before the redesign:
   on a raw disk or ZERO, extents apart from each other, `createType` set twice, a line of no
   known kind, a disk image or binary content. Before, such a file could be half rewritten.
 - The drive-letter fix ignores the case of folder names, takes a `$` in a folder name literally,
-  and works when the stick folder is a drive root: there it moves only the paths on the stick's
-  old letter, which the paths to the VM's own files show, so a path on another drive never
-  moves. A VirtualBox file that is not UTF-8 stops the start instead of being rewritten with
-  replacement characters, and a byte order mark stays.
+  matches an `&` as VirtualBox writes it (`&amp;`), and works when the stick folder is a drive
+  root: there it moves only the paths on the stick's old letter, which the paths to the VM's own
+  files show, so a path on another drive never moves. A VirtualBox file that is not UTF-8 stops
+  the start instead of being rewritten with replacement characters, and a byte order mark stays.
 - A start checks every VM file it would change before it changes the first one, so a refusal
   leaves all of them as they were. A read-only or linked VM file stops the start with a message.
 - The deploy tool writes the code, `VERSION`, `SHA256SUMS`, the migrated settings and the
-  disarmed copies through the safe write, and stops at a leftover copy of a cut-off write
-  instead of overwriting it.
+  disarmed copies through the safe write. It stops at a leftover copy instead of overwriting
+  it: before it changes anything at one beside the staged `Start VM.cmd.new`, and at one beside
+  a copy it disarms, whose step `-Verbose` names.
 
 [Unreleased]: https://github.com/Ochsyp/portable-vm-launcher/commits/main

@@ -164,6 +164,17 @@ Describe 'Deploy-PortableVM' {
         Format-DeployReport -Result $result | Should -BeExactly @('deployed v0.0.0-test (Update).', 'old launcher .cmd files moved into Launcher.previous: 1.')
     }
 
+    It 'stops before it changes anything at <Left>, which an earlier deploy left' -ForEach @(
+        @{ Left = 'Start VM.cmd.new.pvm-tmp' }
+        @{ Left = 'Start VM.cmd.new.pvm-old' }
+    ) {
+        Write-TestFile -Path (Join-Path $script:target $Left) -Text 'left'
+        $before = Get-TestTree -Root $script:target
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } | Should -Throw -ExpectedMessage ("'$Left' is left from an earlier deploy whose write of " +
+            "'Start VM.cmd.new' did not finish, and nothing the launcher uses was changed. Remove it, and Launcher.new and 'Start VM.cmd.new' if they are there, then run the same command again.")
+        Get-TestTree -Root $script:target | Should -BeExactly $before
+    }
+
     It 'installs the launcher on a stick without a Launcher folder' {
         Remove-Item -LiteralPath (Join-Path $script:target 'Launcher') -Recurse
         Remove-Item -LiteralPath (Join-Path $script:target 'Start Old.cmd')
@@ -591,10 +602,40 @@ Describe 'Deploy-PortableVM -MigrateSettings' {
         Write-TestFile -Path $copy -Text (Get-TestDescriptorText -Device '\\.\PhysicalDrive7')
         Write-TestFile -Path "$copy.pvm-tmp" -Text 'cut off'
         $thrown = try { $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings } catch { $_ }
-        $thrown.Exception.Message | Should -BeLike '*A write of the file was cut off before it finished, and its copy is still beside it (-Verbose shows the details).*'
+        $thrown.Exception.Message | Should -BeExactly ('The migration stopped part way at a copy below LauncherData\backups\legacy that needs a step by hand, but the launcher in Launcher ' +
+            'still works with Launcher\settings.psd1. -Verbose names the copy and the step; take it, then run the same command again. ' +
+            'Cause: An earlier write of the file did not finish, and its copy is still beside it (-Verbose shows the details).')
         $thrown.Exception.Message.Contains($script:target) | Should -BeFalse
         [IO.File]::ReadAllText($copy) | Should -BeExactly (Get-TestDescriptorText -Device '\\.\PhysicalDrive7')
         [IO.File]::ReadAllText("$copy.pvm-tmp") | Should -BeExactly 'cut off'
+    }
+
+    It 'stops a resume at a disarmed copy whose armed version is still beside it, and changes neither' {
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        $copy = Join-Path $script:legacy 'VMware\stick.vmdk.orig'
+        Write-TestFile -Path $copy -Text (Get-TestDescriptorText -Device '\\.\PortableVM-disarmed')
+        Write-TestFile -Path "$copy.pvm-old" -Text (Get-TestDescriptorText -Device '\\.\PhysicalDrive7')
+        $thrown = try { $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings } catch { $_ }
+        $thrown.Exception.Message | Should -BeLike 'The migration stopped part way at a copy below LauncherData\backups\legacy that needs a step by hand*'
+        $thrown.Exception.Message.Contains($script:target) | Should -BeFalse
+        [IO.File]::ReadAllText($copy) | Should -BeExactly (Get-TestDescriptorText -Device '\\.\PortableVM-disarmed')
+        [IO.File]::ReadAllText("$copy.pvm-old") | Should -BeExactly (Get-TestDescriptorText -Device '\\.\PhysicalDrive7')
+    }
+
+    It 'stops when the armed version of a copy it disarmed cannot be removed from beside it' {
+        # The module stays as loaded here, so that its mocks hold during the deploy.
+        Import-Module (Join-Path $script:clone 'src\PortableVM.psm1') -Force -Global
+        Mock Import-DeployModule {}
+        Mock -ModuleName PortableVM Remove-PvmWriteCopy { [IO.File]::Delete($Path) }
+        Mock -ModuleName PortableVM Remove-PvmWriteCopy { throw [IO.IOException]::new('The process cannot access the file.', [int]0x80070020) } -ParameterFilter {
+            $Path -like '*\backups\legacy\VMware\stick.vmdk.orig.pvm-old'
+        }
+        $thrown = try { $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings } catch { $_ }
+        $thrown.Exception.Message | Should -BeLike ('The migration stopped part way at a copy below LauncherData\backups\legacy that needs a step by hand*' +
+            'Cause: A copy was disarmed, but its armed version could not be removed from beside it (-Verbose shows the details).')
+        $copy = Join-Path $script:legacy 'VMware\stick.vmdk.orig'
+        [IO.File]::ReadAllText($copy) | Should -BeExactly (Get-TestDescriptorText -Device '\\.\PortableVM-disarmed')
+        [IO.File]::ReadAllText("$copy.pvm-old") | Should -BeLike '*"\\.\PhysicalDrive1"*'
     }
 
     It 'keeps LauncherData''s settings and names on a resume and finishes, <Case>' -ForEach @(
