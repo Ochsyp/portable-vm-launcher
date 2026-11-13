@@ -405,6 +405,18 @@ function Assert-DeployWriteAccess {
     }
 }
 
+# Return the step (Get-PvmLeftoverProblem) for each write below the folder $Folder that did not
+# finish, one per file that has a .pvm-tmp or .pvm-old beside its name.
+function Get-DeployLeftoverStep {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Folder)
+    if (-not (Test-Path -LiteralPath $Folder -PathType Container)) { return }
+    $names = @(Get-ChildItem -LiteralPath $Folder -Recurse -File -Force | Where-Object { $_.Name -like '*.pvm-tmp' -or $_.Name -like '*.pvm-old' } |
+            ForEach-Object { $_.FullName.Substring(0, $_.FullName.Length - '.pvm-tmp'.Length) } | Sort-Object -Unique)
+    foreach ($name in $names) { Get-PvmLeftoverProblem -Path $name }
+}
+
 # Disarm the descriptor copy $Path in place (ConvertTo-PvmDisarmedDescriptorText, every other
 # byte kept) through the launcher's safe write (Write-PvmFile), and return whether it changed.
 # Copies that an earlier write left beside it stop it, a disarmed copy too, as does an armed
@@ -562,6 +574,10 @@ function Move-DeployLegacyData {
     $data = Join-Path $Target 'LauncherData'
     $legacy = Join-Path $data 'backups\legacy'
     if (-not $PSCmdlet.ShouldProcess($data, 'Move the legacy log and copies')) { return }
+    # A disarm that stopped between its two renames leaves its copies without the name itself, which
+    # a copy moved now would take; so such a write's step comes before anything moves.
+    $steps = @(Get-DeployLeftoverStep -Folder $legacy)
+    if ($steps.Count) { throw (Get-PvmWriteException -Code 'Leftover' -Message 'An earlier write of the file did not finish, and its copy is still beside it.' -Detail ($steps -join ' ')) }
     $null = New-Item -ItemType Directory -Path (Join-Path $data 'logs'), (Join-Path $legacy 'Launcher') -Force
     $oldSettings = Join-Path $Target 'Launcher\settings.psd1'
     $hash = Get-DeployHash -Path $oldSettings
@@ -740,8 +756,12 @@ function Invoke-PvmDeploy {
     if ($plan) {
         try { Move-DeployLegacyData -Target $Target -Plan $plan }
         catch {
-            # Running again would stop at the same copy, so the step comes first.
-            if ("$($_.Exception.Data['PvmWrite'])" -eq 'Leftover') {
+            # Running again would stop at the same copy, so the step comes first. A write that
+            # failed between its two renames leaves such copies without saying so itself.
+            $leftover = "$($_.Exception.Data['PvmWrite'])" -eq 'Leftover'
+            $steps = @(Get-DeployLeftoverStep -Folder (Join-Path $Target 'LauncherData\backups\legacy'))
+            if (-not $leftover) { foreach ($step in $steps) { Write-Verbose $step } }
+            if ($leftover -or $steps.Count) {
                 throw ('The migration stopped part way at a copy below LauncherData\backups\legacy that needs a step by hand, but the launcher in Launcher still works with ' +
                     "Launcher\settings.psd1. -Verbose names the copy and the step; take it, then run the same command again. $(Format-DeployCause -ErrorRecord $_)")
             }

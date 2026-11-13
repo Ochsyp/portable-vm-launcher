@@ -99,12 +99,13 @@ All notable changes to this project are listed here. The format follows
   takes the file's place, the replaced version staying as `<file>.pvm-old` until the new one
   reads back. A crash or a pulled stick leaves the old or the new version, never a mix, and the
   next start, in either hypervisor, stops at a leftover copy and names the one step to take,
-  which always keeps the version from before that write. A new version that does not read back
-  from its place, and an old one that cannot be removed after three tries a second apart, stop
-  the start the same way, before the VM starts.
+  which keeps the version from before that write, or the copy itself beside a copy whose old
+  version repeats its file as it is now. A new version that does not read back from its place,
+  and an old one that cannot be removed after three tries a second apart, stop the start the
+  same way, before the VM starts.
 - A copy of the version before the latest rewrite, `*.previous.orig` or
   `*.previous.launcher-backup` in `LauncherData\backups`, beside the first version, which stays
-  as it was. A rewrite that fails leaves this copy as it was too.
+  as it was. A rewrite that fails puts back the copy it replaced.
 - Tests of the safe write, the descriptor parser, the drive-letter rule, both copies and a start
   that checks every file before it changes one. Repo checks that the module writes files only
   through the safe write, apart from its log, and deletes, moves or swaps a file only in that
@@ -178,8 +179,8 @@ Compared with the launcher on a stick before the redesign:
   files show, so a path on another drive never moves. A VirtualBox file that is not UTF-8 stops
   the start instead of being rewritten with replacement characters, and a byte order mark stays.
 - A start checks every VM file it would change before it changes the first one, so a refusal
-  leaves all of them as they were. A read-only or linked VM file, or such a copy of one below
-  `LauncherData\backups`, stops the start, a dry run too, with a message that names it.
+  leaves all of them as they were. A read-only or linked VM file, or such a copy of the version
+  before its latest rewrite, stops the start, a dry run too, with a message that names it.
 - The deploy tool writes the code, `VERSION`, `SHA256SUMS`, the migrated settings and the
   disarmed copies through the safe write. It stops at a leftover copy instead of overwriting
   it: before it changes anything at one beside the staged `Start VM.cmd.new`, and at one beside

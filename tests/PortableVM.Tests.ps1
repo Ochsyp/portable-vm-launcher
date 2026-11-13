@@ -743,6 +743,59 @@ Describe 'Raw-disk descriptors' {
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:descriptor)) | Should -BeExactly $before
         }
 
+        It 'name, after the file''s step, the step that keeps the copy put back when its old version could not be removed either' {
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3800000 FLAT "\\.\PhysicalDrive3" 0') } @script:copies
+            $kept = [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:previous))
+            Mock -ModuleName PortableVM Invoke-PvmSleep {}
+            $script:held = $false
+            Mock -ModuleName PortableVM Remove-PvmWriteCopy { [IO.File]::Delete($Path) }
+            Mock -ModuleName PortableVM Remove-PvmWriteCopy { $script:held = $true; throw [IO.IOException]::new('The process cannot access the file.', [int]0x80070020) } -ParameterFilter {
+                $Path -eq "$script:descriptor.pvm-old"
+            }
+            # The copy's own old version goes at the copy's write, but not after the copy is put back.
+            Mock -ModuleName PortableVM Remove-PvmWriteCopy {
+                if ($script:held) { throw [IO.IOException]::new('The process cannot access the file.', [int]0x80070020) }
+                [IO.File]::Delete($Path)
+            } -ParameterFilter { $Path -eq "$script:previous.pvm-old" }
+            $layout = @{ CreateType = 'fullDevice'; Extents = @('RW 3700000 FLAT "\\.\PhysicalDrive3" 0') }
+            $stop = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout $layout @script:copies } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $stop | Should -BeLike "A write of $script:descriptor did not finish.*"
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:previous)) | Should -BeExactly $kept
+            # The owner takes the file's step.
+            [IO.File]::Delete($script:descriptor)
+            [IO.File]::Move("$script:descriptor.pvm-old", $script:descriptor)
+            $stop = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout $layout @script:copies } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $stop | Should -BeExactly ("A write of $script:previous did not finish. To set it right, remove stick.vmdk.previous.orig.pvm-old, which holds a copy of the file " +
+                'as it is now; stick.vmdk.previous.orig itself is whole. Nothing was started.')
+        }
+
+        It 'stop the launcher, naming both, when the old version cannot be removed and the file is gone too' {
+            Mock -ModuleName PortableVM Invoke-PvmSleep {}
+            Mock -ModuleName PortableVM Remove-PvmWriteCopy { [IO.File]::Delete($Path) }
+            # As when the stick is pulled during the tries.
+            Mock -ModuleName PortableVM Remove-PvmWriteCopy { [IO.File]::Delete($script:descriptor); [IO.File]::Delete($Path); throw [IO.IOException]::new('The device is not ready.', [int]0x80070015) } -ParameterFilter {
+                $Path -eq "$script:descriptor.pvm-old"
+            }
+            $stop = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout @script:copies } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $stop | Should -BeExactly "The launcher could not remove $script:descriptor.pvm-old after it rewrote $script:descriptor. Check both, then start again. Nothing was started."
+        }
+
+        It 'stop the launcher with the cause when the file cannot be read any more after it was prepared' {
+            $change = Get-PvmDescriptorChange -Path $script:descriptor -Layout $script:layout @script:copies
+            $held = [IO.File]::Open($script:descriptor, 'Open', 'Read', 'None')
+            try { $stop = try { Save-PvmFileChange -Change $change -LogPath $script:log } catch { Get-PvmStopMessage -ErrorRecord $_ } }
+            finally { $held.Dispose() }
+            $stop | Should -BeExactly ("The launcher could not rewrite $script:descriptor, because it is open in another program; check the file against its copies " +
+                'below LauncherData\backups. Nothing was started.')
+            [IO.File]::ReadAllText($script:descriptor) | Should -BeExactly (Get-TestDescriptorText)
+        }
+
+        It 'stop the launcher, naming the first copy, when it cannot be written' {
+            $null = [IO.Directory]::CreateDirectory($script:backup)
+            $stop = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout @script:copies } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $stop | Should -BeExactly "The launcher could not write the copy $script:backup, because an item of that name is in the way, so it did not rewrite $script:descriptor. Nothing was started."
+        }
+
         It 'stop the launcher, a dry run too, at a read-only copy of the version before the latest rewrite, naming that copy' {
             Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3800000 FLAT "\\.\PhysicalDrive3" 0') } @script:copies
             [IO.File]::SetAttributes($script:previous, 'ReadOnly')
@@ -925,15 +978,24 @@ Describe 'Drive letters' {
             @{ Case = 'a write of its copy that did not finish'; Setup = { $null = [IO.Directory]::CreateDirectory((Split-Path $script:previous)); [IO.File]::WriteAllText("$script:previous.pvm-tmp", 'x') }
                 Message = 'A write of <copy> did not finish. To set it right, remove VirtualBox.xml.previous.launcher-backup.pvm-tmp, which may be incomplete. Nothing was started.'
             }
+            @{ Case = 'a read-only copy of the version before the latest rewrite'; Setup = {
+                    Write-TestFile -Path $script:previous -Text '<e src="P:\Portable\Stick\x.vbox"/>'
+                    [IO.File]::SetAttributes($script:previous, 'ReadOnly')
+                }
+                Message = '<copy> is read-only, so the launcher does not rewrite it. Clear that attribute, then start again. Nothing was started.'
+            }
         ) {
             & $Setup
             try {
                 $before = [IO.File]::ReadAllText($script:file)
-                $stop = try { Set-PvmDriveLetterInFile @script:change -Letter 'E' } catch { Get-PvmStopMessage -ErrorRecord $_ }
-                $stop | Should -BeExactly $Message.Replace('<file>', $script:file).Replace('<copy>', $script:previous)
+                foreach ($whatIf in $true, $false) {
+                    $stop = try { Set-PvmDriveLetterInFile @script:change -Letter 'E' -WhatIf:$whatIf } catch { Get-PvmStopMessage -ErrorRecord $_ }
+                    $stop | Should -BeExactly $Message.Replace('<file>', $script:file).Replace('<copy>', $script:previous)
+                }
                 [IO.File]::ReadAllText($script:file) | Should -BeExactly $before
             } finally {
                 [IO.File]::SetAttributes($script:file, 'Normal')
+                if ([IO.File]::Exists($script:previous)) { [IO.File]::SetAttributes($script:previous, 'Normal') }
                 Remove-Item -LiteralPath "$script:previous.pvm-tmp" -ErrorAction SilentlyContinue
             }
         }
@@ -1217,15 +1279,24 @@ Describe 'A start' {
                 }
                 Step = '<copy> did not finish. To set it right, remove stick.vmdk.previous.orig.pvm-tmp, which may be incomplete.'
             }
+            @{ Case = 'a first copy below LauncherData\backups'; Setup = {
+                    Write-TestFile -Path (Join-Path $script:stick.Backups 'VirtualBox\VirtualBox.xml.launcher-backup') -Text '<VirtualBox/>'
+                    Write-TestFile -Path (Join-Path $script:stick.Backups 'VirtualBox\VirtualBox.xml.launcher-backup.pvm-old') -Text '<VirtualBox old="1"/>'
+                }
+                Step = '<first> did not finish. To set it right, remove VirtualBox.xml.launcher-backup, then rename VirtualBox.xml.launcher-backup.pvm-old back to VirtualBox.xml.launcher-backup, which holds the version before the write.'
+            }
         ) {
             & $Setup
             $copy = Join-Path $script:stick.Backups 'VirtualBox\Test VM\stick.vmdk.previous.orig'
-            $expected = 'A write of ' + $Step.Replace('<vbox>', $script:stick.Vbox).Replace('<xml>', $script:stick.VirtualBoxXml).Replace('<copy>', $copy) + ' Nothing was started.'
+            $first = Join-Path $script:stick.Backups 'VirtualBox\VirtualBox.xml.launcher-backup'
+            $stop = 'A write of ' + $Step.Replace('<vbox>', $script:stick.Vbox).Replace('<xml>', $script:stick.VirtualBoxXml).Replace('<copy>', $copy).Replace('<first>', $first)
+            $expected = $stop + ' Nothing was started.'
             foreach ($dryRun in $false, $true) {
                 $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun
                 $result.ExitCode | Should -Be 1
                 $result.Message | Should -BeExactly $expected
             }
+            Get-TestLog -Path $script:stick.Log | Should -Contain "DRY RUN - a real start would stop here: $expected"
             Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
         }
 
@@ -1296,6 +1367,14 @@ Describe 'A start' {
                 $result.ExitCode | Should -Be 1
                 $result.Message | Should -BeExactly $message
             }
+            Should -Invoke -CommandName Invoke-PvmNative -ModuleName PortableVM -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'startvm' }
+        }
+
+        It 'stops at a write of the VMware descriptor that did not finish, although a VirtualBox start does not change it' {
+            [IO.File]::WriteAllText("$($script:stick.VMwareDisk).pvm-tmp", 'x')
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly "A write of $($script:stick.VMwareDisk) did not finish. To set it right, remove stick.vmdk.pvm-tmp; stick.vmdk itself is whole. Nothing was started."
             Should -Invoke -CommandName Invoke-PvmNative -ModuleName PortableVM -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'startvm' }
         }
 

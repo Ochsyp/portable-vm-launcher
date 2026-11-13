@@ -55,9 +55,9 @@ Messages and the dialog title name the VM and the guest system as `VmDisplayName
 `GuestName` in the settings say; without them they say "the VM" and "the guest". Before the
 launcher rewrites a VM file, it keeps two copies of it below `LauncherData\backups`: the first
 version, which it never replaces, and the version before the latest rewrite, with `.previous`
-in its name, which the next rewrite replaces; a rewrite that fails leaves that copy as it was. A
-copy of a raw-disk descriptor names a disarmed device there, so opening it by mistake reaches
-no disk.
+in its name, which the next rewrite replaces; a rewrite that fails puts back the copy it
+replaced. A copy of a raw-disk descriptor names a disarmed device there, so opening it by
+mistake reaches no disk.
 
 A rewrite goes to `<file>.pvm-tmp` beside the file first, is forced onto the stick and read
 back, and only then takes the file's place; the replaced version stays as `<file>.pvm-old`
@@ -66,9 +66,10 @@ apart. A crash or a pulled stick can leave one of these two beside the file. So 
 version that does not read back, or an old one that cannot be removed; then the start stops
 before the VM starts. The next start, in either hypervisor, stops at such a copy beside a VM
 file or beside one of its copies below `LauncherData\backups`, and names the one step to take,
-such as removing the `.pvm-tmp` or renaming the `.pvm-old` back. The step always keeps the
-version from before that write, and the next start makes its change again. Bytes the launcher
-does not mean to change stay as they were, a byte order mark too.
+such as removing the `.pvm-tmp` or renaming the `.pvm-old` back. The step keeps the version
+from before that write; only beside a copy whose `.pvm-old` repeats its file as it is now does
+it keep the copy. The next start then makes its change again. Bytes the launcher does not mean
+to change stay as they were, a byte order mark too.
 
 `-DryRun` takes the decisions of a real start and logs what would change, without changing a VM
 file or starting anything. It still adds its lines to the log and may move a full or old-format

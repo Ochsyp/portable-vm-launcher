@@ -610,6 +610,32 @@ Describe 'Deploy-PortableVM -MigrateSettings' {
         [IO.File]::ReadAllText("$copy.pvm-tmp") | Should -BeExactly 'cut off'
     }
 
+    It 'stops a resume, before it moves anything, at a legacy copy whose disarm stopped between its two renames' {
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        $copy = Join-Path $script:legacy 'VMware\stick.vmdk.orig'
+        Write-TestFile -Path "$copy.pvm-old" -Text (Get-TestDescriptorText -Device '\\.\PhysicalDrive1')
+        Write-TestFile -Path "$copy.pvm-tmp" -Text (Get-TestDescriptorText -Device '\\.\PortableVM-disarmed')
+        # VMware\stick.vmdk.orig beside the VM files stands for a copy the old launcher made since.
+        $thrown = try { $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings } catch { $_ }
+        $thrown.Exception.Message | Should -BeLike 'The migration stopped part way at a copy below LauncherData\backups\legacy that needs a step by hand*'
+        $copy | Should -Not -Exist
+        Join-Path $script:target 'VMware\stick.vmdk.orig' | Should -Exist
+        [IO.File]::ReadAllText("$copy.pvm-old") | Should -BeExactly (Get-TestDescriptorText -Device '\\.\PhysicalDrive1')
+    }
+
+    It 'names the step by hand when a disarm stops between its two renames, rather than say to run the same command again' {
+        # The module stays as loaded here, so that its mocks hold during the deploy.
+        Import-Module (Join-Path $script:clone 'src\PortableVM.psm1') -Force -Global
+        Mock Import-DeployModule {}
+        Mock -ModuleName PortableVM Switch-PvmFile { [IO.File]::Replace($Temp, $Path, $Old) }
+        Mock -ModuleName PortableVM Switch-PvmFile { [IO.File]::Move($Path, $Old); throw [IO.IOException]::new('Unable to move the replacement file.', [int]0x80070499) } -ParameterFilter {
+            $Path -like '*\backups\legacy\VMware\stick.vmdk.orig'
+        }
+        $thrown = try { $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings } catch { $_ }
+        $thrown.Exception.Message | Should -BeLike 'The migration stopped part way at a copy below LauncherData\backups\legacy that needs a step by hand*'
+        Join-Path $script:legacy 'VMware\stick.vmdk.orig.pvm-old' | Should -Exist
+    }
+
     It 'stops a resume at a copy of the old settings whose write did not finish, rather than take it for the copy' {
         Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
         Write-TestFile -Path (Join-Path $script:legacy 'Launcher\settings.psd1.pvm-tmp') -Text (Get-TestSettingsText)
