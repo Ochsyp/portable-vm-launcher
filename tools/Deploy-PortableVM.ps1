@@ -425,8 +425,8 @@ function Set-DeployDisarmedCopy {
     if (-not $PSCmdlet.ShouldProcess($Path, 'Disarm the descriptor copy')) { return $false }
     $left = Write-PvmFile -Path $Path -Bytes $latin1.GetBytes($disarmed) -Expected $bytes
     if ($left) {
-        throw (Get-PvmWriteException -Code 'Leftover' -Message 'A copy was disarmed, but its armed version could not be removed from beside it.' -Detail (
-                "$Path was disarmed, but its armed version $left could not be removed. To set it right, remove $left."))
+        # The same step as at the next run; running the command again then disarms the copy again.
+        throw (Get-PvmWriteException -Code 'Leftover' -Message 'A copy was disarmed, but its armed version could not be removed from beside it.' -Detail (Get-PvmLeftoverProblem -Path $Path))
     }
     $true
 }
@@ -565,7 +565,9 @@ function Move-DeployLegacyData {
     $null = New-Item -ItemType Directory -Path (Join-Path $data 'logs'), (Join-Path $legacy 'Launcher') -Force
     $oldSettings = Join-Path $Target 'Launcher\settings.psd1'
     $hash = Get-DeployHash -Path $oldSettings
-    if (@(Get-ChildItem -LiteralPath (Join-Path $legacy 'Launcher') -File | Where-Object { (Get-DeployHash -Path $_.FullName) -eq $hash }).Count -eq 0) {
+    # A copy that a safe write left beside the file is no copy yet; the write stops at it instead.
+    $copies = @(Get-ChildItem -LiteralPath (Join-Path $legacy 'Launcher') -File | Where-Object { $_.Name -notlike '*.pvm-tmp' -and $_.Name -notlike '*.pvm-old' })
+    if (@($copies | Where-Object { (Get-DeployHash -Path $_.FullName) -eq $hash }).Count -eq 0) {
         $null = Copy-DeployFile -Source $oldSettings -Destination (Get-DeployFreePath -Path (Join-Path $legacy 'Launcher\settings.psd1'))
     }
     if ($Plan.Log) { Move-Item -LiteralPath (Join-Path $Target 'Launcher\launcher.log') -Destination (Get-DeployFreePath -Path (Join-Path $data 'logs\launcher.log')) }

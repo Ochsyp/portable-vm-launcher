@@ -610,6 +610,14 @@ Describe 'Deploy-PortableVM -MigrateSettings' {
         [IO.File]::ReadAllText("$copy.pvm-tmp") | Should -BeExactly 'cut off'
     }
 
+    It 'stops a resume at a copy of the old settings whose write did not finish, rather than take it for the copy' {
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        Write-TestFile -Path (Join-Path $script:legacy 'Launcher\settings.psd1.pvm-tmp') -Text (Get-TestSettingsText)
+        $thrown = try { $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings } catch { $_ }
+        $thrown.Exception.Message | Should -BeLike 'The migration stopped part way at a copy below LauncherData\backups\legacy that needs a step by hand*'
+        Join-Path $script:legacy 'Launcher\settings.psd1' | Should -Not -Exist
+    }
+
     It 'stops a resume at a disarmed copy whose armed version is still beside it, and changes neither' {
         Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
         $copy = Join-Path $script:legacy 'VMware\stick.vmdk.orig'
@@ -626,6 +634,7 @@ Describe 'Deploy-PortableVM -MigrateSettings' {
         # The module stays as loaded here, so that its mocks hold during the deploy.
         Import-Module (Join-Path $script:clone 'src\PortableVM.psm1') -Force -Global
         Mock Import-DeployModule {}
+        Mock -ModuleName PortableVM Invoke-PvmSleep {}
         Mock -ModuleName PortableVM Remove-PvmWriteCopy { [IO.File]::Delete($Path) }
         Mock -ModuleName PortableVM Remove-PvmWriteCopy { throw [IO.IOException]::new('The process cannot access the file.', [int]0x80070020) } -ParameterFilter {
             $Path -like '*\backups\legacy\VMware\stick.vmdk.orig.pvm-old'
