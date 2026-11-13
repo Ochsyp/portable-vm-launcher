@@ -143,17 +143,48 @@ BeforeAll {
         $stick
     }
 
-    # Return the lines of the log $Path without their timestamps.
+    # Return the lines of the log $Path without their prefix, each of which must hold this
+    # process's ID, and without the Timings lines unless -Timings is given.
     function Get-TestLog {
-        param([string]$Path)
-        @(Get-Content -LiteralPath $Path | ForEach-Object { $_.Substring(21) })
+        param([string]$Path, [switch]$Timings)
+        $prefix = '\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d \[' + $PID + '\]  '
+        @(foreach ($line in [IO.File]::ReadAllLines($Path, [Text.Encoding]::Default)) {
+                if ($line -notmatch $prefix) { throw "A log line lacks the prefix: $line" }
+                $message = $line -replace $prefix, ''
+                if ($Timings -or -not $message.StartsWith('Timings: ')) { $message }
+            })
     }
 
-    # Return a hashtable of every file below $Root, other than launcher.log, with its SHA-256 hash.
+    # Return the error record that Get-Partition gives for a drive letter that no partition has.
+    function Get-TestNoPartitionError {
+        [System.Management.Automation.ErrorRecord]::new([Exception]::new('No MSFT_Partition objects found.'), 'CmdletizationQuery_NotFound_DriveLetter,Get-Partition', 'ObjectNotFound', $null)
+    }
+
+    # Return the decisions in the log lines $Lines of a run, so that a dry run and a real start of
+    # the same case compare equal: the dry run's lines read as the real start's, a would-stop as the
+    # stop, after which only the End line counts, and both starts as START.
+    function ConvertTo-TestDecision {
+        param([string[]]$Lines)
+        $cut = $false
+        foreach ($line in $Lines) {
+            if ($line.StartsWith('----- End')) { $line.Replace('----- End (dry run):', '----- End:'); continue }
+            if ($cut) { continue }
+            if ($line -ceq '----- Start VM (dry run) -----') { '----- Start VM -----' }
+            elseif ($line.StartsWith('DRY RUN - a real start would stop here: ')) { 'STOPPED: ' + $line.Substring(40); $cut = $true }
+            elseif ($line.StartsWith('STOPPED: ')) { $line; $cut = $true }
+            elseif ($line -match '\ADRY RUN - a real start would ask whether to resume the saved state in (\w+)\.\z') { "Resume of the saved state in $($Matches[1]) confirmed." }
+            elseif ($line.StartsWith('DRY RUN - would start ') -or $line.StartsWith('Started with ')) { 'START' }
+            elseif ($line.StartsWith('VirtualBox VM state: ')) { continue }
+            else { $line }
+        }
+    }
+
+    # Return a hashtable of every file below $Root, other than those below LauncherData\logs, with
+    # its SHA-256 hash.
     function Get-TestTreeHash {
         param([string]$Root)
         $hashes = @{}
-        foreach ($file in Get-ChildItem -LiteralPath $Root -Recurse -File | Where-Object { $_.Name -ne 'launcher.log' }) {
+        foreach ($file in Get-ChildItem -LiteralPath $Root -Recurse -File | Where-Object { $_.FullName -notlike '*\LauncherData\logs\*' }) {
             $hashes[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
         }
         $hashes
@@ -178,6 +209,9 @@ BeforeAll {
         $script:testInstalled = $Installed
         $script:testProcesses = @()
         Mock -ModuleName PortableVM Write-Host {}
+        Mock -ModuleName PortableVM Invoke-PvmTestAdministrator { $true }
+        Mock -ModuleName PortableVM Invoke-PvmEnterLock { [pscustomobject]@{ State = 'Acquired'; Mutex = $null } }
+        Mock -ModuleName PortableVM Invoke-PvmExitLock {}
         Mock -ModuleName PortableVM Invoke-PvmGetPartition { throw "No partition has the drive letter $DriveLetter." }
         Mock -ModuleName PortableVM Invoke-PvmGetPartition { Get-TestPartition } -ParameterFilter { $DriveLetter -ceq $script:testStick.Letter }
         Mock -ModuleName PortableVM Invoke-PvmGetDisk { throw "No disk has the number $Number." }
@@ -222,6 +256,9 @@ Describe 'Adapters' {
         @{ Name = 'Invoke-PvmStartProcess'; Call = { Invoke-PvmStartProcess -FilePath 'none.exe' -ArgumentList 'none' } }
         @{ Name = 'Invoke-PvmSetEnvironment'; Call = { Invoke-PvmSetEnvironment -Name 'PVM_NONE' -Value 'none' } }
         @{ Name = 'Invoke-PvmSleep'; Call = { Invoke-PvmSleep -Seconds 1 } }
+        @{ Name = 'Invoke-PvmTestAdministrator'; Call = { Invoke-PvmTestAdministrator } }
+        @{ Name = 'Invoke-PvmEnterLock'; Call = { Invoke-PvmEnterLock -Name 'Local\x' } }
+        @{ Name = 'Invoke-PvmExitLock'; Call = { Invoke-PvmExitLock -Lock ([pscustomobject]@{ State = 'Acquired'; Mutex = $null }) } }
     ) {
         $Call | Should -Throw -ExpectedMessage "$Name reached this PC during a test; mock it."
     }
@@ -606,6 +643,7 @@ Describe 'A start' {
                 'Using VMware'
                 'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'
                 "Started with VMware Workstation ($($script:stick.VMwareDir))"
+                '----- End: exit code 0 -----'
             )
         }
 
@@ -624,6 +662,7 @@ Describe 'A start' {
                 'Using VMware'
                 'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'
                 "DRY RUN - would start $($script:stick.Vmx) with VMware Workstation ($($script:stick.VMwareDir))"
+                '----- End (dry run): exit code 0 -----'
             )
         }
 
@@ -655,7 +694,7 @@ Describe 'A start' {
             $result.ExitCode | Should -Be 0
             $result.Message | Should -BeExactly 'The VM is already running.'
             $result.Icon | Should -BeExactly 'Information'
-            (Get-TestLog -Path $script:stick.Log)[-1] | Should -BeExactly 'Already running in VMware.'
+            (Get-TestLog -Path $script:stick.Log)[-2] | Should -BeExactly 'Already running in VMware.'
             Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
         }
 
@@ -683,10 +722,11 @@ Describe 'A start' {
             $result.ExitCode | Should -Be 1
             $result.Message | Should -BeExactly $message
             Get-TestLog -Path $script:stick.Log | Should -Contain 'Saved state found: saved in VirtualBox'
-            (Get-TestLog -Path $script:stick.Log)[-1] | Should -BeExactly "STOPPED: $message"
+            (Get-TestLog -Path $script:stick.Log)[-2] | Should -BeExactly "STOPPED: $message"
 
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun
-            $result.ExitCode | Should -Be 0
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly $message
             Get-TestLog -Path $script:stick.Log | Should -Contain "DRY RUN - a real start would stop here: $message"
         }
     }
@@ -726,6 +766,7 @@ Describe 'A start' {
                 'stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0'
                 'VirtualBox VM state: "poweroff"'
                 'Started with VirtualBox 7.1.4r165100'
+                '----- End: exit code 0 -----'
             )
         }
 
@@ -752,6 +793,7 @@ Describe 'A start' {
                 "VirtualBox.xml: paths moved to drive $($script:stick.Letter):"
                 'stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0'
                 "DRY RUN - would start VM {$script:uuid} with VirtualBox ($($script:stick.VirtualBoxDir))"
+                '----- End (dry run): exit code 0 -----'
             )
         }
 
@@ -760,7 +802,7 @@ Describe 'A start' {
             Mock -ModuleName PortableVM Invoke-PvmNative { [pscustomobject]@{ ExitCode = 0; Output = 'VMState="running"' } } -ParameterFilter { $ArgumentList[0] -eq 'showvminfo' }
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
             $result.Message | Should -BeExactly 'The VM is already running.'
-            (Get-TestLog -Path $script:stick.Log)[-1] | Should -BeExactly 'Already running in VirtualBox.'
+            (Get-TestLog -Path $script:stick.Log)[-2] | Should -BeExactly 'Already running in VirtualBox.'
         }
 
         It 'stops while VirtualBox is open with another VM, but a dry run carries on' {
@@ -779,6 +821,30 @@ Describe 'A start' {
             Should -Invoke -CommandName Wait-PvmProcessExit -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $Name -eq 'VBoxSVC' -and $TimeoutSeconds -eq 30 }
         }
 
+        It 'waits for VBoxSVC in a dry run as in a real start, and logs the wait' {
+            Mock -ModuleName PortableVM Wait-PvmProcessExit { $script:waits++ }
+            Mock -ModuleName PortableVM Invoke-PvmTestProcess { $true } -ParameterFilter { $Name -eq 'VBoxSVC' }
+            foreach ($dry in $false, $true) {
+                $script:waits = 0
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dry
+                $result.ExitCode | Should -Be 1
+                $result.Message | Should -BeExactly 'VirtualBox is still running in the background. Wait half a minute, then start the VM again.'
+                $script:waits | Should -Be 1
+            }
+            @(Get-TestLog -Path $script:stick.Log | Where-Object { $_ -ceq "Waiting up to 30 s for VirtualBox's background service (VBoxSVC) to end" }).Count | Should -Be 2
+        }
+
+        It 'does not wait for VBoxSVC in a dry run that found a stop before the wait' {
+            $script:testProcesses = @([pscustomobject]@{ Name = 'VirtualBox.exe'; CommandLine = $null })
+            Mock -ModuleName PortableVM Wait-PvmProcessExit { $script:waits++ }
+            Mock -ModuleName PortableVM Invoke-PvmTestProcess { $true } -ParameterFilter { $Name -eq 'VBoxSVC' }
+            $script:waits = 0
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly 'VirtualBox is already open on this PC. Close all VirtualBox windows, then start the VM again.'
+            $script:waits | Should -Be 0
+        }
+
         It 'stops when the VM list lacks the VM' {
             Mock -ModuleName PortableVM Invoke-PvmNative { [pscustomobject]@{ ExitCode = 0; Output = '"Other" {5ca1ab1e-0000-4000-8000-000000000009}' } } -ParameterFilter { $ArgumentList[0] -eq 'list' }
             (Invoke-PortableVM -LauncherPath $script:stick.Launcher).Message |
@@ -788,7 +854,7 @@ Describe 'A start' {
         It 'reports a VM that runs by the time VBoxManage asks, without the window note' {
             Mock -ModuleName PortableVM Invoke-PvmNative { [pscustomobject]@{ ExitCode = 0; Output = 'VMState="paused"' } } -ParameterFilter { $ArgumentList[0] -eq 'showvminfo' }
             (Invoke-PortableVM -LauncherPath $script:stick.Launcher).Message | Should -BeExactly 'The VM is already running.'
-            (Get-TestLog -Path $script:stick.Log)[-1] | Should -BeExactly 'VirtualBox VM state: "paused"'
+            (Get-TestLog -Path $script:stick.Log)[-2] | Should -BeExactly 'VirtualBox VM state: "paused"'
         }
 
         It 'stops with VBoxManage''s output when the start fails' {
@@ -809,11 +875,12 @@ Describe 'A start' {
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
             $result.ExitCode | Should -Be 1
             $result.Message | Should -BeExactly $message
-            (Get-TestLog -Path $script:stick.Log)[-1] | Should -BeExactly "STOPPED: $message"
+            (Get-TestLog -Path $script:stick.Log)[-2] | Should -BeExactly "STOPPED: $message"
             Should -Invoke -CommandName Invoke-PvmNative -ModuleName PortableVM -Times 0 -Exactly
 
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun
-            $result.ExitCode | Should -Be 0
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly $message
             Get-TestLog -Path $script:stick.Log | Should -Contain "DRY RUN - a real start would stop here: $message"
         }
     }
@@ -867,7 +934,7 @@ Describe 'A start' {
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
             $result.ExitCode | Should -Be 1
             $result.Message | Should -BeExactly 'This is not the expected USB stick (disk ID 5CA1AB1F, expected 5CA1AB1E). Nothing was started.'
-            (Get-TestLog -Path $script:stick.Log)[-1] | Should -BeExactly "STOPPED: $($result.Message)"
+            (Get-TestLog -Path $script:stick.Log)[-2] | Should -BeExactly "STOPPED: $($result.Message)"
         }
 
         It 'stops at once on a missing settings file, naming it' {
@@ -875,8 +942,8 @@ Describe 'A start' {
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
             $result.ExitCode | Should -Be 1
             $result.Message | Should -BeExactly "LauncherData\settings.psd1 is missing. Copy examples\settings.example.psd1 there and fill it in.`n`nNothing was started."
-            # The message spans lines, so the log is compared as text.
-            [IO.File]::ReadAllText($script:stick.Log).TrimEnd().EndsWith("  STOPPED: $($result.Message)") | Should -BeTrue
+            # The message spans lines, each with its prefix, so the log is compared as text.
+            ((Get-TestLog -Path $script:stick.Log) -join "`n").EndsWith("STOPPED: $($result.Message)`n----- End: exit code 1 -----") | Should -BeTrue
             Should -Invoke -CommandName Invoke-PvmGetPartition -ModuleName PortableVM -Times 0 -Exactly
         }
 
@@ -915,10 +982,19 @@ Describe 'A start' {
             $result.Message | Should -BeLike 'LauncherData, the folder beside Launcher that holds the settings and the log, is missing.*'
             @(Get-ChildItem -LiteralPath $script:stick.Root -Recurse -Force | ForEach-Object { $_.FullName }) | Should -BeExactly $before
             Should -Invoke -CommandName Invoke-PvmGetPartition -ModuleName PortableVM -Times 0 -Exactly
+            Should -Invoke -CommandName Invoke-PvmTestAdministrator -ModuleName PortableVM -Times 0 -Exactly
+            Should -Invoke -CommandName Invoke-PvmEnterLock -ModuleName PortableVM -Times 0 -Exactly
 
             Write-TestFile -Path (Join-Path $script:stick.Launcher 'settings.psd1') -Text (ConvertTo-TestSettingsText -Settings (Get-TestSettingTable -Change @{ SchemaVersion = $null }))
             (Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun).Message | Should -BeLike '*tools\Deploy-PortableVM.ps1 -MigrateSettings*'
             $script:stick.Data | Should -Not -Exist
+        }
+
+        It 'says so when the launcher''s own folder is gone, as when the stick was pulled' {
+            $result = Invoke-PortableVM -LauncherPath (Join-Path $script:stick.Root 'gone\Launcher')
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly 'The launcher''s own folder cannot be found any more, as when the USB stick was removed. Plug the stick in, then start the VM again. Nothing was started.'
+            Should -Invoke -CommandName Invoke-PvmTestAdministrator -ModuleName PortableVM -Times 0 -Exactly
         }
 
         It 'creates the logs folder when it is missing, also in a dry run' {
@@ -946,8 +1022,8 @@ Describe 'A start' {
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
             $result.ExitCode | Should -Be 1
             $log = Get-TestLog -Path $script:stick.Log
-            $log[-2] | Should -BeExactly 'Saved state found: suspended in VMware'
-            $log[-1] | Should -BeLike 'STOPPED: The launcher cannot tell whether the VM has a saved state in VirtualBox, because the path is a folder, not a file: VirtualBoxVbox in settings.psd1 names *'
+            $log[-3] | Should -BeExactly 'Saved state found: suspended in VMware'
+            $log[-2] | Should -BeLike 'STOPPED: The launcher cannot tell whether the VM has a saved state in VirtualBox, because the path is a folder, not a file: VirtualBoxVbox in settings.psd1 names *'
         }
 
         It 'logs the version from VERSION and the note on Memory Integrity' {
@@ -987,7 +1063,8 @@ Describe 'A start' {
             $result.Message | Should -BeLike $Message
             Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun
-            $result.ExitCode | Should -Be 0
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeLike $Message
             @(Get-TestLog -Path $script:stick.Log | Where-Object { $_ -like "DRY RUN - a real start would stop here: $Message" }).Count | Should -Be 1
         }
 
@@ -1008,7 +1085,7 @@ Describe 'A start' {
                 (Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskResume $answer).Message | Should -BeLike $notResumed
             }
             (Invoke-PortableVM -LauncherPath $script:stick.Launcher).Message | Should -BeLike $notResumed
-            (Get-TestLog -Path $script:stick.Log)[-1] | Should -BeLike "STOPPED: $notResumed"
+            (Get-TestLog -Path $script:stick.Log)[-2] | Should -BeLike "STOPPED: $notResumed"
             $script:stick = Initialize-TestStick -Name 'guard-stick' -Change @{ SavedStatePolicy = 'Refuse' }
             Write-TestFile -Path $script:stick.Vmx -Text $script:suspended
             (Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskResume { $true }).Message |
@@ -1095,5 +1172,853 @@ Describe 'A start' {
             $result.Message | Should -BeExactly 'The VM is already running.'
             $result.Caption | Should -BeExactly 'Portable VM'
         }
+    }
+}
+
+Describe 'The log' {
+    BeforeEach {
+        Mock -ModuleName PortableVM Write-Host {}
+        & (Get-Module PortableVM) { $script:PvmLogProblem = '' }
+        $script:logFolder = Join-Path $TestDrive 'log'
+        Remove-Item -LiteralPath $script:logFolder -Recurse -Force -ErrorAction SilentlyContinue
+        $null = New-Item -ItemType Directory -Path $script:logFolder
+        $script:log = Join-Path $script:logFolder 'launcher.log'
+        $script:time = [DateTimeOffset]::new(2026, 11, 12, 10, 15, 30, 123, [TimeSpan]::FromHours(1))
+    }
+
+    It 'prefixes every line of a message with the time, its UTC offset and the process ID' {
+        Format-PvmLogText -Time $script:time -ProcessId 4242 -Message "a`r`nb`nc`rd" | Should -BeExactly (@(
+                '2026-11-12T10:15:30.123+01:00 [4242]  a', '2026-11-12T10:15:30.123+01:00 [4242]  b',
+                '2026-11-12T10:15:30.123+01:00 [4242]  c', '2026-11-12T10:15:30.123+01:00 [4242]  d') -join "`r`n")
+        Format-PvmLogText -Time $script:time -ProcessId 4242 -Message '' | Should -BeExactly '2026-11-12T10:15:30.123+01:00 [4242]  '
+        Format-PvmLogText -Time ([DateTimeOffset]::new(2026, 11, 12, 10, 15, 30, 123, [TimeSpan]::FromHours(-5))) -ProcessId 4242 -Message 'x' |
+            Should -BeExactly '2026-11-12T10:15:30.123-05:00 [4242]  x'
+    }
+
+    It 'writes the same prefix under a culture with <Case>' -ForEach @(
+        @{ Case = 'another time separator'; CultureName = 'fi-FI'; LocalText = '2026 10.15.30' }
+        @{ Case = 'another calendar'; CultureName = 'th-TH'; LocalText = '2569 10:15:30' }
+    ) {
+        $previous = [Threading.Thread]::CurrentThread.CurrentCulture
+        try {
+            [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::new($CultureName)
+            $script:time.ToString('yyyy HH:mm:ss') | Should -BeExactly $LocalText
+            Format-PvmLogText -Time $script:time -ProcessId 4242 -Message 'x' | Should -BeExactly '2026-11-12T10:15:30.123+01:00 [4242]  x'
+        } finally {
+            [Threading.Thread]::CurrentThread.CurrentCulture = $previous
+        }
+    }
+
+    It 'keeps the message after the first two consecutive spaces, in the format before phase 4 too' {
+        '2026-11-12T10:15:30.123+01:00 [4242]  a  b' -replace '^.*?  ', '' | Should -BeExactly 'a  b'
+        '2026-11-12 10:15:30  a  b' -replace '^.*?  ', '' | Should -BeExactly 'a  b'
+    }
+
+    # tests\Repo.Tests.ps1 pins the one write; this test shows the lines staying together while
+    # another writer holds the log open for appending.
+    It 'appends a message with its lines together while another writer holds the log open' {
+        $other = [IO.FileStream]::new($script:log, [IO.FileMode]::Append, [Security.AccessControl.FileSystemRights]::AppendData,
+            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete), 4096, [IO.FileOptions]::None)
+        try {
+            $bytes = [Text.Encoding]::ASCII.GetBytes("other 1`r`n")
+            $other.Write($bytes, 0, $bytes.Length)
+            $other.Flush()
+            Write-PvmLog -Path $script:log -Message "x`ny"
+            $bytes = [Text.Encoding]::ASCII.GetBytes("other 2`r`n")
+            $other.Write($bytes, 0, $bytes.Length)
+            $other.Flush()
+        } finally {
+            $other.Dispose()
+        }
+        $lines = [IO.File]::ReadAllLines($script:log)
+        $lines.Count | Should -Be 4
+        $lines[0] | Should -BeExactly 'other 1'
+        $lines[1] | Should -Match ('\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d \[' + $PID + '\]  x\z')
+        $lines[2] | Should -Match ('\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d \[' + $PID + '\]  y\z')
+        $lines[3] | Should -BeExactly 'other 2'
+    }
+
+    It 'writes ANSI, as the log was before' {
+        Write-PvmLog -Path $script:log -Message "caf$([char]0xE9)"
+        $bytes = [IO.File]::ReadAllBytes($script:log)
+        $expected = [Text.Encoding]::Default.GetBytes("caf$([char]0xE9)`r`n")
+        [Convert]::ToBase64String($bytes, $bytes.Length - $expected.Length, $expected.Length) | Should -BeExactly ([Convert]::ToBase64String($expected))
+    }
+
+    It 'shows each message on the console, in the log''s format, as it writes it' {
+        Mock -ModuleName PortableVM Get-PvmNow { [DateTimeOffset]::new(2026, 11, 12, 10, 15, 30, 123, [TimeSpan]::FromHours(1)) }
+        $script:shown = Format-PvmLogText -Time $script:time -ProcessId $PID -Message "x`ny"
+        Write-PvmLog -Path $script:log -Message "x`ny"
+        Should -Invoke -CommandName Write-Host -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { "$Object" -ceq $script:shown }
+        [IO.File]::ReadAllText($script:log) | Should -BeExactly "$script:shown`r`n"
+    }
+
+    It 'names a missing part of a long file path as a path that is too long: <Case>' -ForEach @(
+        @{ Case = 'a path of 260 characters'; Length = 260; HResult = 0x80070003; Cause = 'a path is too long' }
+        @{ Case = 'a path of 259 characters'; Length = 259; HResult = 0x80070003; Cause = 'it is missing' }
+        @{ Case = 'a long path held by another program'; Length = 300; HResult = 0x80070020; Cause = 'it is open in another program' }
+    ) {
+        $record = [System.Management.Automation.ErrorRecord]::new([IO.IOException]::new('x', [int]$HResult), 'Test', 'NotSpecified', $null)
+        Get-PvmPathCause -Path ('X:\' + 'a' * ($Length - 3)) -ErrorRecord $record | Should -BeExactly $Cause
+    }
+
+    It 'words a cause for the place after "because": <Cause>' -ForEach @(
+        @{ Cause = 'it is open in another program'; Text = 'it is open in another program' }
+        @{ Cause = 'an error of type IOException'; Text = 'of an error of type IOException' }
+    ) {
+        Format-PvmBecause -Cause $Cause | Should -BeExactly $Text
+    }
+
+    It 'never throws, and says once on the console why the log cannot be written' {
+        $null = New-Item -ItemType Directory -Path $script:log
+        { foreach ($n in 1..3) { Write-PvmLog -Path $script:log -Message "line $n" } } | Should -Not -Throw
+        Get-PvmLogProblem | Should -BeExactly 'it is a folder, not a file'
+        Should -Invoke -CommandName Write-Host -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { "$Object" -ceq 'launcher.log could not be written: it is a folder, not a file' }
+    }
+}
+
+Describe 'Log rotation' {
+    BeforeEach {
+        Mock -ModuleName PortableVM Write-Host {}
+        & (Get-Module PortableVM) { $script:PvmLogProblem = '' }
+        $script:logFolder = Join-Path $TestDrive 'rotation'
+        Remove-Item -LiteralPath $script:logFolder -Recurse -Force -ErrorAction SilentlyContinue
+        $null = New-Item -ItemType Directory -Path $script:logFolder
+        $script:log = Join-Path $script:logFolder 'launcher.log'
+        $script:time = [DateTimeOffset]::new(2026, 11, 12, 10, 15, 30, 123, [TimeSpan]::FromHours(1))
+        $script:moved = Join-Path $script:logFolder 'launcher-20261112-101530.log'
+    }
+
+    It 'leaves a missing, an empty and a small log in the format alone' {
+        Move-PvmOldLog -Path $script:log -Time $script:time | Should -BeNullOrEmpty
+        [IO.File]::WriteAllText($script:log, '')
+        Move-PvmOldLog -Path $script:log -Time $script:time | Should -BeNullOrEmpty
+        [IO.File]::WriteAllText($script:log, (Format-PvmLogText -Time $script:time -ProcessId 1 -Message 'line') + "`r`n")
+        Move-PvmOldLog -Path $script:log -Time $script:time | Should -BeNullOrEmpty
+        # A time west of UTC and the longest process ID give the longest prefix, 44 characters.
+        $west = [DateTimeOffset]::new(2026, 11, 12, 10, 15, 30, 123, [TimeSpan]::FromHours(-5))
+        [IO.File]::WriteAllText($script:log, (Format-PvmLogText -Time $west -ProcessId ([int]::MaxValue) -Message 'line') + "`r`n")
+        Move-PvmOldLog -Path $script:log -Time $script:time | Should -BeNullOrEmpty
+        @(Get-ChildItem -LiteralPath $script:logFolder -Name) | Should -BeExactly @('launcher.log')
+    }
+
+    It 'moves a log of 1 MiB aside under the time, unchanged' {
+        [IO.File]::WriteAllBytes($script:log, (New-Object byte[] 1MB))
+        $hash = (Get-FileHash -LiteralPath $script:log -Algorithm SHA256).Hash
+        $result = Move-PvmOldLog -Path $script:log -Time $script:time
+        $result.Name | Should -BeExactly 'launcher-20261112-101530.log'
+        $result.Problem | Should -BeExactly ''
+        (Get-FileHash -LiteralPath $script:moved -Algorithm SHA256).Hash | Should -BeExactly $hash
+        $script:log | Should -Not -Exist
+    }
+
+    It 'moves a log in the format aside once it holds 1 MiB, and not a byte before' {
+        $head = [Text.Encoding]::ASCII.GetBytes((Format-PvmLogText -Time $script:time -ProcessId 1 -Message 'line') + "`r`n")
+        foreach ($case in @(@{ Size = 1MB - 1; Name = $null }, @{ Size = 1MB; Name = 'launcher-20261112-101530.log' })) {
+            $bytes = New-Object byte[] $case.Size
+            [Array]::Copy($head, $bytes, $head.Length)
+            [IO.File]::WriteAllBytes($script:log, $bytes)
+            $result = Move-PvmOldLog -Path $script:log -Time $script:time
+            if ($null -eq $case.Name) { $result | Should -BeNullOrEmpty } else { $result.Name | Should -BeExactly $case.Name }
+        }
+        @(Get-ChildItem -LiteralPath $script:logFolder -Name) | Should -BeExactly @('launcher-20261112-101530.log')
+    }
+
+    It 'names the moved log by the time in the Gregorian calendar under a culture with another one' {
+        $culture = [Threading.Thread]::CurrentThread.CurrentCulture
+        try {
+            [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::new('th-TH')
+            $script:time.ToString('yyyy') | Should -BeExactly '2569'
+            [IO.File]::WriteAllBytes($script:log, (New-Object byte[] 1MB))
+            (Move-PvmOldLog -Path $script:log -Time $script:time).Name | Should -BeExactly 'launcher-20261112-101530.log'
+        } finally {
+            [Threading.Thread]::CurrentThread.CurrentCulture = $culture
+        }
+    }
+
+    It 'moves a small log in the format before phase 4 aside' {
+        [IO.File]::WriteAllText($script:log, "2026-11-12 10:15:30  old line`r`n")
+        (Move-PvmOldLog -Path $script:log -Time $script:time).Name | Should -BeExactly 'launcher-20261112-101530.log'
+        [IO.File]::ReadAllText($script:moved) | Should -BeExactly "2026-11-12 10:15:30  old line`r`n"
+    }
+
+    It 'replaces no file and gives the cause when <Case>' -ForEach @(
+        @{ Case = 'a log of the new name exists already'; Cause = 'an item of that name exists already' }
+        @{ Case = 'a program holds the log'; Cause = 'it is open in another program' }
+    ) {
+        [IO.File]::WriteAllText($script:log, "2026-11-12 10:15:30  old line`r`n")
+        $holder = $null
+        if ($Case -like 'a log*') { [IO.File]::WriteAllText($script:moved, 'earlier') }
+        else { $holder = [IO.File]::Open($script:log, 'Open', 'Read', 'ReadWrite') }
+        try {
+            $result = Move-PvmOldLog -Path $script:log -Time $script:time
+            # A program that shares writing holds back the move, not the log's next line.
+            if ($holder) { Write-PvmLog -Path $script:log -Message 'still written' }
+        } finally {
+            if ($holder) { $holder.Dispose() }
+        }
+        $result.Name | Should -BeExactly ''
+        $result.Problem | Should -BeExactly $Cause
+        [IO.File]::ReadAllLines($script:log)[0] | Should -BeExactly '2026-11-12 10:15:30  old line'
+        if ($Case -like 'a log*') { [IO.File]::ReadAllText($script:moved) | Should -BeExactly 'earlier' }
+        else {
+            Get-PvmLogProblem | Should -BeExactly ''
+            [IO.File]::ReadAllLines($script:log)[-1] | Should -BeLike '*  still written'
+        }
+    }
+
+    Context 'in a run' {
+        BeforeEach {
+            $script:stick = Initialize-TestStick -Name 'rotation-stick'
+            Set-TestPc -Stick $script:stick -Installed 'VMware'
+            Mock -ModuleName PortableVM Get-PvmNow { [DateTimeOffset]::new(2026, 11, 12, 10, 15, 30, 123, [TimeSpan]::FromHours(1)) }
+            $null = New-Item -ItemType Directory -Path (Split-Path $script:stick.Log) -Force
+            # A full log in the format: a line of an earlier run, then padding up to 1 MiB.
+            $bytes = New-Object byte[] 1MB
+            $script:oldHead = (Format-PvmLogText -Time ([DateTimeOffset]::new(2026, 11, 11, 9, 0, 0, 0, [TimeSpan]::FromHours(1))) -ProcessId 7 -Message 'an earlier run') + "`r`n"
+            $head = [Text.Encoding]::ASCII.GetBytes($script:oldHead)
+            [Array]::Copy($head, $bytes, $head.Length)
+            [IO.File]::WriteAllBytes($script:stick.Log, $bytes)
+            $script:oldHash = (Get-FileHash -LiteralPath $script:stick.Log -Algorithm SHA256).Hash
+            $script:movedLog = Join-Path (Split-Path $script:stick.Log) 'launcher-20261112-101530.log'
+        }
+        AfterEach { Remove-Item -LiteralPath $script:stick.Root -Recurse -Force }
+
+        It 'moves a full log aside before its first line and says where the earlier lines are' {
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 0
+            (Get-FileHash -LiteralPath $script:movedLog -Algorithm SHA256).Hash | Should -BeExactly $script:oldHash
+            (Get-TestLog -Path $script:stick.Log)[0..2] | Should -BeExactly @(
+                '----- Start VM -----', 'Launcher version unknown', 'Note: the earlier lines of the log are in launcher-20261112-101530.log.')
+            Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
+        }
+
+        It 'moves nothing in a run that does not hold the lock: <Case>' -ForEach @(
+            @{ Case = 'another run holds it'; Admin = $true; State = 'Busy' }
+            @{ Case = 'no administrator rights'; Admin = $false; State = 'Acquired' }
+        ) {
+            $script:admin = $Admin
+            $script:state = $State
+            Mock -ModuleName PortableVM Invoke-PvmTestAdministrator { $script:admin }
+            Mock -ModuleName PortableVM Invoke-PvmEnterLock { [pscustomobject]@{ State = $script:state; Mutex = $null } }
+            (Invoke-PortableVM -LauncherPath $script:stick.Launcher).ExitCode | Should -Be 1
+            $script:movedLog | Should -Not -Exist
+            # The earlier run's line still comes first.
+            [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($script:stick.Log), 0, $script:oldHead.Length) | Should -BeExactly $script:oldHead
+        }
+
+        It 'says so and adds to the log when it cannot move it aside' {
+            $holder = [IO.File]::Open($script:stick.Log, 'Open', 'Read', 'ReadWrite')
+            try { $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher }
+            finally { $holder.Dispose() }
+            $result.ExitCode | Should -Be 0
+            $script:movedLog | Should -Not -Exist
+            [Text.Encoding]::Default.GetString([IO.File]::ReadAllBytes($script:stick.Log)) |
+                Should -BeLike '*  Note: the log could not be moved aside, because it is open in another program; this run adds to it.*'
+            Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
+        }
+    }
+}
+
+Describe 'Log failures' {
+    BeforeEach {
+        $script:stick = Initialize-TestStick -Name 'log-stick'
+        Set-TestPc -Stick $script:stick -Installed 'VMware'
+        $script:blocker = $null
+    }
+    AfterEach { Remove-Item -LiteralPath $script:stick.Root -Recurse -Force }
+
+    It 'stops before it reads the PC when the log cannot be written: <Case>' -ForEach @(
+        @{ Case = 'a program holds it'; Because = 'it is open in another program'; Hold = $true; Setup = {} }
+        @{ Case = 'a file is named logs'; Because = 'LauncherData\logs is a file, not a folder'; Hold = $false; Setup = {
+                [IO.File]::WriteAllText((Split-Path $script:stick.Log), 'not a folder')
+            }
+        }
+        @{ Case = 'a folder is named launcher.log'; Because = 'it is a folder, not a file'; Hold = $false; Setup = {
+                $null = New-Item -ItemType Directory -Path $script:stick.Log -Force
+            }
+        }
+        @{ Case = 'an error the launcher has no words for'; Because = 'of an error of type IOException'; Hold = $true; Setup = {
+                Mock -ModuleName PortableVM Get-PvmPathCause { 'an error of type IOException' }
+            }
+        }
+    ) {
+        $holder = $null
+        if ($Hold) {
+            $null = New-Item -ItemType Directory -Path (Split-Path $script:stick.Log) -Force
+            [IO.File]::WriteAllText($script:stick.Log, '')
+            $holder = [IO.File]::Open($script:stick.Log, 'Open', 'Read', 'Read')
+        }
+        & $Setup
+        try { $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher }
+        finally { if ($holder) { $holder.Dispose() } }
+        $result.ExitCode | Should -Be 1
+        $result.Message | Should -BeExactly "The launcher cannot write its log, LauncherData\logs\launcher.log, because $Because. Nothing was started."
+        Should -Invoke -CommandName Invoke-PvmGetPartition -ModuleName PortableVM -Times 0 -Exactly
+        Should -Invoke -CommandName Invoke-PvmExitLock -ModuleName PortableVM -Times 1 -Exactly
+    }
+
+    It 'takes the same decision when the log fails later, and adds that the log is incomplete' {
+        Mock -ModuleName PortableVM Invoke-PvmGetDisk {
+            $script:blocker = [IO.File]::Open($script:stick.Log, 'Open', 'Read', 'Read')
+            Get-TestDisk -Change @{ Signature = [uint32]0x5CA1AB1F }
+        } -ParameterFilter { $Number -eq 3 }
+        try { $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher }
+        finally { if ($script:blocker) { $script:blocker.Dispose() } }
+        $result.ExitCode | Should -Be 1
+        $result.Message | Should -BeExactly ("This is not the expected USB stick (disk ID 5CA1AB1F, expected 5CA1AB1E). Nothing was started.`n`n" +
+            'The launcher could not write all of this run to its log, LauncherData\logs\launcher.log, because it is open in another program.')
+        $result.Icon | Should -BeExactly 'Error'
+    }
+
+    It 'starts, and warns that the log is incomplete, when the log fails later' {
+        Mock -ModuleName PortableVM Invoke-PvmGetDisk {
+            $script:blocker = [IO.File]::Open($script:stick.Log, 'Open', 'Read', 'Read')
+            Get-TestDisk
+        } -ParameterFilter { $Number -eq 3 }
+        try { $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher }
+        finally { if ($script:blocker) { $script:blocker.Dispose() } }
+        Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
+        $result.ExitCode | Should -Be 0
+        $result.Message | Should -BeExactly "The VM was started.`n`nThe launcher could not write all of this run to its log, LauncherData\logs\launcher.log, because it is open in another program."
+        $result.Icon | Should -BeExactly 'Warning'
+    }
+
+    It 'says that a dry run found no stop, and warns that the log is incomplete, when the log fails later' {
+        Mock -ModuleName PortableVM Invoke-PvmGetDisk {
+            $script:blocker = [IO.File]::Open($script:stick.Log, 'Open', 'Read', 'Read')
+            Get-TestDisk
+        } -ParameterFilter { $Number -eq 3 }
+        try { $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun }
+        finally { if ($script:blocker) { $script:blocker.Dispose() } }
+        Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+        $result.ExitCode | Should -Be 0
+        $result.Message | Should -BeExactly "The dry run found nothing that would stop a start.`n`nThe launcher could not write all of this run to its log, LauncherData\logs\launcher.log, because it is open in another program."
+        $result.Icon | Should -BeExactly 'Warning'
+    }
+}
+
+Describe 'Single instance' {
+    BeforeEach {
+        $script:stick = Initialize-TestStick -Name 'lock-stick'
+        Set-TestPc -Stick $script:stick -Installed 'VMware'
+    }
+    AfterEach { Remove-Item -LiteralPath $script:stick.Root -Recurse -Force }
+
+    It 'takes the lock by its name before the log has a line' {
+        $script:logBefore = $null
+        Mock -ModuleName PortableVM Invoke-PvmEnterLock {
+            $script:logBefore = Test-Path -LiteralPath $script:stick.Log
+            [pscustomobject]@{ State = 'Acquired'; Mutex = $null }
+        }
+        $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+        Should -Invoke -CommandName Invoke-PvmEnterLock -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $Name -ceq 'Global\PortableVM-Launcher' }
+        $script:logBefore | Should -BeFalse
+    }
+
+    It 'releases the lock once, after the End line: <Case>' -ForEach @(
+        @{ Case = 'a start'; Dry = $false; Setup = {} }
+        @{ Case = 'a stop'; Dry = $false; Setup = { Mock -ModuleName PortableVM Invoke-PvmGetDisk { Get-TestDisk -Change @{ Signature = [uint32]0x5CA1AB1F } } -ParameterFilter { $Number -eq 3 } } }
+        @{ Case = 'an unexpected error'; Dry = $false; Setup = { Mock -ModuleName PortableVM Invoke-PvmGetDisk { throw 'boom' } -ParameterFilter { $Number -eq 3 } } }
+        @{ Case = 'a VM that runs already'; Dry = $false; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'vmware-vmx.exe'; CommandLine = "vmware-vmx.exe `"$($script:stick.Vmx)`"" }) } }
+        @{ Case = 'a dry run'; Dry = $true; Setup = {} }
+    ) {
+        & $Setup
+        $script:releases = @()
+        Mock -ModuleName PortableVM Invoke-PvmExitLock { $script:releases += @((Get-TestLog -Path $script:stick.Log)[-1]) }
+        $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$Dry
+        $script:releases.Count | Should -Be 1
+        $script:releases[0] | Should -BeLike '----- End*: exit code ? -----'
+    }
+
+    It 'notes after the End line when it cannot release the lock, and keeps the result' {
+        Mock -ModuleName PortableVM Invoke-PvmExitLock { throw 'no release' }
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+        $result.ExitCode | Should -Be 0
+        $result.Message | Should -BeExactly ''
+        $result.Icon | Should -BeExactly ''
+        $log = Get-TestLog -Path $script:stick.Log
+        $log[-2] | Should -BeExactly '----- End: exit code 0 -----'
+        $log[-1] | Should -BeExactly 'Note: the launcher could not release its lock (no release); Windows releases it when this process ends.'
+        Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
+    }
+
+    It 'keeps the lock while it asks whether to resume' {
+        Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"')
+        $script:released = $false
+        $script:releasedWhileAsking = $null
+        Mock -ModuleName PortableVM Invoke-PvmExitLock { $script:released = $true }
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskResume { $script:releasedWhileAsking = $script:released; $true }
+        $result.ExitCode | Should -Be 0
+        $script:releasedWhileAsking | Should -BeFalse
+        $script:released | Should -BeTrue
+    }
+
+    It 'stops at once while another run holds the lock, reading nothing: dry run <Dry>' -ForEach @(@{ Dry = $false }, @{ Dry = $true }) {
+        Mock -ModuleName PortableVM Invoke-PvmEnterLock { [pscustomobject]@{ State = 'Busy'; Mutex = $null } }
+        Mock -ModuleName PortableVM Import-PvmSetting { throw 'The settings must not be read.' }
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$Dry
+        $result.ExitCode | Should -Be 1
+        $result.Message | Should -BeExactly (Get-PvmBusyMessage)
+        $result.Icon | Should -BeExactly 'Error'
+        $result.Caption | Should -BeExactly 'Portable VM'
+        $run = if ($Dry) { ' (dry run)' } else { '' }
+        Get-TestLog -Path $script:stick.Log | Should -BeExactly @("----- Start VM$run -----", 'Launcher version unknown', "STOPPED: $(Get-PvmBusyMessage)", "----- End$($run): exit code 1 -----")
+        Should -Invoke -CommandName Invoke-PvmExitLock -ModuleName PortableVM -Times 0 -Exactly
+        Should -Invoke -CommandName Invoke-PvmGetPartition -ModuleName PortableVM -Times 0 -Exactly
+        Should -Invoke -CommandName Import-PvmSetting -ModuleName PortableVM -Times 0 -Exactly
+    }
+
+    It 'takes over a lock that an earlier run left, and says so' {
+        Mock -ModuleName PortableVM Invoke-PvmEnterLock { [pscustomobject]@{ State = 'Abandoned'; Mutex = $null } }
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+        $result.ExitCode | Should -Be 0
+        (Get-TestLog -Path $script:stick.Log)[2] | Should -BeExactly 'Note: an earlier run of the launcher ended without releasing its lock; this run took the lock over.'
+        Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
+        Should -Invoke -CommandName Invoke-PvmExitLock -ModuleName PortableVM -Times 1 -Exactly
+    }
+
+    It 'stops without administrator rights before it takes the lock: dry run <Dry>' -ForEach @(
+        @{ Dry = $false; Message = 'The launcher needs administrator rights, because the VM boots this USB stick directly.' }
+        @{ Dry = $true; Message = 'A dry run needs administrator rights, as a real start has them, so that its checks see what a real start sees. Run it from an elevated PowerShell. Nothing was started.' }
+    ) {
+        Mock -ModuleName PortableVM Invoke-PvmTestAdministrator { $false }
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$Dry
+        $result.ExitCode | Should -Be 1
+        $result.Message | Should -BeExactly $Message
+        $run = if ($Dry) { ' (dry run)' } else { '' }
+        Get-TestLog -Path $script:stick.Log | Should -BeExactly @("----- Start VM$run -----", 'Launcher version unknown', "STOPPED: $Message", "----- End$($run): exit code 1 -----")
+        Should -Invoke -CommandName Invoke-PvmEnterLock -ModuleName PortableVM -Times 0 -Exactly
+        Should -Invoke -CommandName Invoke-PvmGetPartition -ModuleName PortableVM -Times 0 -Exactly
+    }
+}
+
+Describe 'The lock''s mutex' {
+    BeforeAll {
+        # Run $Script with $Arguments in a runspace of its own on a new thread, wait for it and
+        # return its output. Disposing the runspace ends that thread.
+        function Invoke-TestOnOtherThread {
+            param([scriptblock]$Script, [object[]]$Arguments)
+            $runspace = [runspacefactory]::CreateRunspace()
+            $runspace.ThreadOptions = 'UseNewThread'
+            $runspace.Open()
+            $shell = [PowerShell]::Create()
+            $shell.Runspace = $runspace
+            try {
+                $null = $shell.AddScript($Script.ToString())
+                foreach ($argument in $Arguments) { $null = $shell.AddArgument($argument) }
+                $shell.Invoke()
+            } finally {
+                $shell.Dispose()
+                $runspace.Dispose()
+            }
+        }
+    }
+
+    # Only unique Local\ names, never the launcher's own lock.
+    BeforeEach { $script:name = "Local\PortableVM-Test-$([guid]::NewGuid())" }
+
+    It 'is taken when it is free, and free for another thread after its release' {
+        $lock = Enter-PvmMutex -Name $script:name
+        $lock.State | Should -BeExactly 'Acquired'
+        $lock.Mutex | Should -BeOfType ([System.Threading.Mutex])
+        # A second handle keeps the mutex while the lock's own handle closes.
+        $keep = [System.Threading.Mutex]::OpenExisting($script:name)
+        try {
+            Exit-PvmMutex -Lock $lock
+            $free = Invoke-TestOnOtherThread -Arguments $script:name -Script {
+                param($Name)
+                $mutex = [System.Threading.Mutex]::OpenExisting($Name)
+                try {
+                    $taken = $mutex.WaitOne(0)
+                    if ($taken) { $mutex.ReleaseMutex() }
+                    $taken
+                } finally {
+                    $mutex.Dispose()
+                }
+            }
+        } finally {
+            $keep.Dispose()
+        }
+        $free | Should -BeTrue
+    }
+
+    It 'is busy while another thread holds it' {
+        $ready = [System.Threading.ManualResetEvent]::new($false)
+        $done = [System.Threading.ManualResetEvent]::new($false)
+        $runspace = [runspacefactory]::CreateRunspace()
+        $runspace.ThreadOptions = 'UseNewThread'
+        $runspace.Open()
+        $shell = [PowerShell]::Create()
+        $shell.Runspace = $runspace
+        try {
+            $holder = {
+                param($Name, $Ready, $Done)
+                $mutex = [System.Threading.Mutex]::new($false, $Name)
+                $null = $mutex.WaitOne()
+                $null = $Ready.Set()
+                $null = $Done.WaitOne(10000)
+                $mutex.ReleaseMutex()
+                $mutex.Dispose()
+            }
+            $null = $shell.AddScript($holder.ToString()).AddArgument($script:name).AddArgument($ready).AddArgument($done)
+            $async = $shell.BeginInvoke()
+            $ready.WaitOne(10000) | Should -BeTrue
+            $lock = Enter-PvmMutex -Name $script:name
+            $lock.State | Should -BeExactly 'Busy'
+            $lock.Mutex | Should -BeNullOrEmpty
+        } finally {
+            $null = $done.Set()
+            if ($async) { $null = $shell.EndInvoke($async) }
+            $shell.Dispose()
+            $runspace.Dispose()
+            $ready.Dispose()
+            $done.Dispose()
+        }
+    }
+
+    It 'is busy when this process may not open it, as when an elevated run holds it' {
+        # A security descriptor that denies this user every right to the mutex, after its creation.
+        $security = [System.Security.AccessControl.MutexSecurity]::new()
+        $security.AddAccessRule([System.Security.AccessControl.MutexAccessRule]::new([System.Security.Principal.WindowsIdentity]::GetCurrent().User,
+                [System.Security.AccessControl.MutexRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Deny))
+        $created = $false
+        $holder = [System.Threading.Mutex]::new($false, $script:name, [ref]$created, $security)
+        try {
+            $created | Should -BeTrue
+            $lock = Enter-PvmMutex -Name $script:name
+            $lock.State | Should -BeExactly 'Busy'
+            $lock.Mutex | Should -BeNullOrEmpty
+        } finally {
+            $holder.Dispose()
+        }
+    }
+
+    It 'fails, rather than report busy, when an object of another kind holds its name' {
+        $squatter = [System.Threading.EventWaitHandle]::new($false, [System.Threading.EventResetMode]::ManualReset, $script:name)
+        try {
+            $thrown = $null
+            try { $null = Enter-PvmMutex -Name $script:name } catch { $thrown = $_ }
+            $thrown | Should -Not -BeNullOrEmpty
+            $exception = $thrown.Exception
+            while ($exception -is [System.Management.Automation.MethodInvocationException] -and $null -ne $exception.InnerException) { $exception = $exception.InnerException }
+            $exception | Should -BeOfType ([System.Threading.WaitHandleCannotBeOpenedException])
+        } finally {
+            $squatter.Dispose()
+        }
+    }
+
+    It 'is taken over when its holder ended without releasing it' {
+        # The test's own handle keeps the mutex, which Windows then marks abandoned.
+        $keep = [System.Threading.Mutex]::new($false, $script:name)
+        try {
+            $null = Invoke-TestOnOtherThread -Arguments $script:name -Script {
+                param($Name)
+                $mutex = [System.Threading.Mutex]::new($false, $Name)
+                $null = $mutex.WaitOne()
+            }
+            # Windows marks the mutex abandoned once the holder's thread has ended, which can come
+            # a moment after the runspace is gone on a busy PC.
+            $deadline = [DateTime]::UtcNow.AddSeconds(10)
+            do {
+                $lock = Enter-PvmMutex -Name $script:name
+                if ($lock.State -eq 'Busy') { Start-Sleep -Milliseconds 20 }
+            } while ($lock.State -eq 'Busy' -and [DateTime]::UtcNow -lt $deadline)
+            $lock.State | Should -BeExactly 'Abandoned'
+            { Exit-PvmMutex -Lock $lock } | Should -Not -Throw
+        } finally {
+            $keep.Dispose()
+        }
+    }
+}
+
+Describe 'Unexpected errors' {
+    BeforeEach {
+        $script:stick = Initialize-TestStick -Name 'error-stick'
+        Set-TestPc -Stick $script:stick -Installed 'VMware', 'VirtualBox'
+        $script:ask = { $true }
+    }
+    AfterEach { Remove-Item -LiteralPath $script:stick.Root -Recurse -Force }
+
+    It 'name the step they happened in: <Text>' -ForEach @(
+        @{ Text = 'starting the launcher'; Releases = 0; Setup = { Mock -ModuleName PortableVM Invoke-PvmEnterLock { throw 'boom' } } }
+        @{ Text = 'starting the launcher'; Releases = 0; Setup = { Mock -ModuleName PortableVM Invoke-PvmTestAdministrator { throw 'boom' } } }
+        @{ Text = 'reading the settings'; Releases = 1; Setup = { Mock -ModuleName PortableVM Import-PvmSetting { throw 'boom' } } }
+        @{ Text = 'finding the stick'; Releases = 1; Setup = { Mock -ModuleName PortableVM Invoke-PvmGetDisk { throw 'boom' } -ParameterFilter { $Number -eq 3 } } }
+        # Only the error of a missing drive letter becomes a stop; another error of Get-Partition does not.
+        @{ Text = 'finding the stick'; Releases = 1; Setup = {
+                Mock -ModuleName PortableVM Invoke-PvmGetPartition {
+                    throw ([System.Management.Automation.ErrorRecord]::new([Exception]::new('boom'), 'CmdletizationQuery_NotFound_DiskNumber,Get-Partition', 'ObjectNotFound', $null))
+                } -ParameterFilter { $DriveLetter -ceq $script:stick.Letter }
+            }
+        }
+        @{ Text = 'checking this PC and the saved states'; Releases = 1; Setup = { Mock -ModuleName PortableVM Invoke-PvmGetDeviceGuard { throw 'boom' } } }
+        @{ Text = 'checking for running VMs'; Releases = 1; Setup = { Mock -ModuleName PortableVM Invoke-PvmGetProcess { throw 'boom' } } }
+        @{ Text = 'asking whether to resume the saved state'; Releases = 1; Setup = {
+                Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"')
+                $script:ask = { throw 'boom' }
+            }
+        }
+        @{ Text = "waiting for VirtualBox's background service to end"; Releases = 1; Setup = {
+                $script:testInstalled = @('VirtualBox')
+                Mock -ModuleName PortableVM Invoke-PvmTestProcess { $true } -ParameterFilter { $Name -eq 'VBoxSVC' }
+                Mock -ModuleName PortableVM Wait-PvmProcessExit { throw 'boom' }
+            }
+        }
+        @{ Text = 'pointing the VM files at the stick'; Releases = 1; Setup = { Mock -ModuleName PortableVM Save-PvmFirstCopy { throw 'boom' } } }
+        @{ Text = 'starting the VM'; Releases = 1; Setup = { Mock -ModuleName PortableVM Invoke-PvmStartProcess { throw 'boom' } } }
+        @{ Text = 'starting the VM'; Releases = 1; Setup = {
+                $script:testInstalled = @('VirtualBox')
+                Mock -ModuleName PortableVM Invoke-PvmNative { throw 'boom' } -ParameterFilter { $ArgumentList[0] -eq 'list' }
+            }
+        }
+    ) {
+        & $Setup
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskResume $script:ask
+        $result.ExitCode | Should -Be 1
+        $result.Message | Should -BeExactly "Unexpected error while ${Text}: boom"
+        $result.Icon | Should -BeExactly 'Error'
+        $log = Get-TestLog -Path $script:stick.Log
+        # Every run begins with its start and version lines, a run that fails in its setup too.
+        $log[0] | Should -BeExactly '----- Start VM -----'
+        $log[1] | Should -BeExactly 'Launcher version unknown'
+        $log | Should -Contain "STOPPED: Unexpected error while ${Text}: boom"
+        $detail = @($log | Where-Object { $_.StartsWith('Error detail: ') })
+        $detail.Count | Should -BeGreaterOrEqual 1
+        @($detail | Where-Object { $_.EndsWith('Exception: boom') }).Count | Should -BeGreaterOrEqual 1
+        @($log | Where-Object { $_.StartsWith('Error ID: ') }).Count | Should -Be 1
+        $traces = @($log | Where-Object { $_.StartsWith('Error trace: ') }).Count
+        $traces | Should -BeGreaterOrEqual 1
+        $traces | Should -BeLessOrEqual 10
+        $log[-1] | Should -BeExactly '----- End: exit code 1 -----'
+        Should -Invoke -CommandName Invoke-PvmExitLock -ModuleName PortableVM -Times $Releases -Exactly
+    }
+
+    It 'are described by at most four of their exceptions, each on one line' {
+        $exception = [Exception]::new('level 5')
+        foreach ($level in 4, 3, 2) { $exception = [Exception]::new("level $level", $exception) }
+        $exception = [Exception]::new("level 1`r`n  second line", $exception)
+        $record = [System.Management.Automation.ErrorRecord]::new($exception, 'Test', 'NotSpecified', $null)
+        @(Format-PvmErrorDetail -ErrorRecord $record) | Should -BeExactly @(
+            'Error detail: System.Exception: level 1 second line', 'Error detail: System.Exception: level 2',
+            'Error detail: System.Exception: level 3', 'Error detail: System.Exception: level 4', 'Error ID: Test')
+    }
+
+    It 'name the innermost error of a .NET method, and log the ones around it' {
+        $script:missing = Join-Path $TestDrive 'none\x.txt'
+        Mock -ModuleName PortableVM Invoke-PvmGetDisk { [IO.File]::ReadAllText($script:missing) } -ParameterFilter { $Number -eq 3 }
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+        $result.Message | Should -BeLike 'Unexpected error while finding the stick: *'
+        $result.Message | Should -Not -BeLike '*ReadAllText*'
+        $result.Message.Contains((Split-Path $script:missing)) | Should -BeTrue
+        $detail = @(Get-TestLog -Path $script:stick.Log | Where-Object { $_.StartsWith('Error detail: ') })
+        $detail[0] | Should -BeLike 'Error detail: System.Management.Automation.MethodInvocationException: *'
+        $detail[1] | Should -BeLike 'Error detail: System.IO.DirectoryNotFoundException: *'
+    }
+
+    It 'leave a stop as it is, adding the system''s message about a settings file that cannot be opened' {
+        $holder = [IO.File]::Open($script:stick.Settings, 'Open', 'Read', 'None')
+        try { $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher }
+        finally { $holder.Dispose() }
+        $result.Message | Should -BeExactly "LauncherData\settings.psd1 cannot be read: it is open in another program.`n`nNothing was started."
+        $log = Get-TestLog -Path $script:stick.Log
+        $log[-2].StartsWith('Error detail: ') | Should -BeTrue
+        $log[-2].Contains($script:stick.Settings) | Should -BeTrue
+        @($log | Where-Object { $_.StartsWith('Error ID: ') }).Count | Should -Be 0
+    }
+}
+
+Describe 'The drive letter' {
+    It 'is the root of a path with a drive letter, in upper case: <Path>' -ForEach @(
+        @{ Path = 'X:\Launcher'; Letter = 'X' }
+        @{ Path = 'x:\Folder\Launcher'; Letter = 'X' }
+        @{ Path = '\\server\share\Launcher'; Letter = $null }
+        @{ Path = '\\?\X:\Launcher'; Letter = $null }
+        @{ Path = '\\.\X:\Launcher'; Letter = $null }
+        @{ Path = 'X:Launcher'; Letter = $null }
+    ) {
+        # String work only; no such path reaches Invoke-PortableVM.
+        Get-PvmDriveLetter -Path $Path | Should -BeExactly $Letter
+    }
+
+    Context 'in a run' {
+        BeforeEach {
+            $script:stick = Initialize-TestStick -Name 'letter-stick'
+            Set-TestPc -Stick $script:stick -Installed 'VMware'
+        }
+        AfterEach { Remove-Item -LiteralPath $script:stick.Root -Recurse -Force }
+
+        It 'stops when the launcher does not run from a drive letter' {
+            Mock -ModuleName PortableVM Get-PvmDriveLetter { $null }
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly "The launcher runs from $($script:stick.Launcher), which is not on a drive with a letter, so it cannot tell which disk is the USB stick. Start it with Start VM.cmd on the stick's own drive. Nothing was started."
+            Should -Invoke -CommandName Invoke-PvmGetPartition -ModuleName PortableVM -Times 0 -Exactly
+        }
+
+        It 'stops when no partition has the drive letter' {
+            Mock -ModuleName PortableVM Invoke-PvmGetPartition { throw (Get-TestNoPartitionError) } -ParameterFilter { $DriveLetter -ceq $script:stick.Letter }
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly "Windows has no partition with the drive letter $($script:stick.Letter):, so the launcher cannot tell which disk is the USB stick; a network drive or a drive made with subst has none. Start it with Start VM.cmd on the stick's own drive. Nothing was started."
+            Should -Invoke -CommandName Invoke-PvmGetDisk -ModuleName PortableVM -Times 0 -Exactly
+        }
+    }
+}
+
+Describe 'Timings' {
+    It 'list each step in milliseconds, and the total' {
+        Format-PvmTiming -Times ([ordered]@{ setup = 14; settings = 31; stick = 1409 }) | Should -BeExactly 'Timings: setup 14 ms, settings 31 ms, stick 1409 ms, total 1454 ms'
+    }
+
+    It 'add up the time of a step entered again, with the clock restarted for each step' {
+        # A clock that only moves when the test says so, and that Restart sets back to 0.
+        $clock = [pscustomobject]@{ ElapsedMilliseconds = [int64]0 }
+        $clock | Add-Member -MemberType ScriptMethod -Name Restart -Value { $this.ElapsedMilliseconds = [int64]0 }
+        $context = [pscustomobject]@{ Step = 'setup'; Clock = $clock; Times = [ordered]@{} }
+        foreach ($stretch in @(@{ Spent = 5; Next = 'a' }, @{ Spent = 7; Next = 'b' }, @{ Spent = 11; Next = 'a' }, @{ Spent = 13; Next = '' })) {
+            $clock.ElapsedMilliseconds += $stretch.Spent
+            Enter-PvmStep -Context $context -Name $stretch.Next
+        }
+        $context.Step | Should -BeExactly ''
+        Format-PvmTiming -Times $context.Times | Should -BeExactly 'Timings: setup 5 ms, a 20 ms, b 11 ms, total 36 ms'
+    }
+
+    Context 'in a run' {
+        BeforeEach {
+            $script:stick = Initialize-TestStick -Name 'timing-stick'
+            Set-TestPc -Stick $script:stick -Installed 'VMware', 'VirtualBox'
+        }
+        AfterEach { Remove-Item -LiteralPath $script:stick.Root -Recurse -Force }
+
+        It 'come before the End line of a start in VMware' {
+            $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $log = Get-TestLog -Path $script:stick.Log -Timings
+            $log[-2] | Should -Match '^Timings: setup \d+ ms, settings \d+ ms, stick \d+ ms, choice \d+ ms, checks \d+ ms, files \d+ ms, start \d+ ms, total \d+ ms$'
+            $log[-1] | Should -BeExactly '----- End: exit code 0 -----'
+        }
+
+        It 'show the wait and the question of a start in VirtualBox' {
+            $script:stick = Initialize-TestStick -Name 'timing-stick' -Change @{ Hypervisor = 'VirtualBox' }
+            [IO.File]::WriteAllText($script:stick.Vbox, [IO.File]::ReadAllText($script:stick.Vbox).Replace('OSType="Debian_64"', 'OSType="Debian_64" stateFile="Snapshots\x.sav"'))
+            $script:svc = 0
+            Mock -ModuleName PortableVM Invoke-PvmTestProcess { $script:svc++ -lt 1 } -ParameterFilter { $Name -eq 'VBoxSVC' }
+            Mock -ModuleName PortableVM Wait-PvmProcessExit {}
+            (Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskResume { $true }).ExitCode | Should -Be 0
+            (Get-TestLog -Path $script:stick.Log -Timings)[-2] |
+                Should -Match '^Timings: setup \d+ ms, settings \d+ ms, stick \d+ ms, choice \d+ ms, checks \d+ ms, wait \d+ ms, question \d+ ms, files \d+ ms, start \d+ ms, total \d+ ms$'
+        }
+
+        It 'end with the stick on a stop on another disk' {
+            Mock -ModuleName PortableVM Invoke-PvmGetDisk { Get-TestDisk -Change @{ Signature = [uint32]0x5CA1AB1F } } -ParameterFilter { $Number -eq 3 }
+            $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            (Get-TestLog -Path $script:stick.Log -Timings)[-2] | Should -Match '^Timings: setup \d+ ms, settings \d+ ms, stick \d+ ms, total \d+ ms$'
+        }
+    }
+}
+
+Describe 'Dry-run parity' {
+    It 'takes the decisions of a real start: <Case>' -ForEach @(
+        @{ Case = 'VMware, nothing in the way'; Installed = @('VMware'); Change = @{}; Setup = {} }
+        @{ Case = 'VirtualBox, nothing in the way'; Installed = @('VirtualBox'); Change = @{}; Setup = {} }
+        @{ Case = 'VirtualBox with HideDataPartition'; Installed = @('VirtualBox'); Change = @{ HideDataPartition = $true }; Setup = {} }
+        @{ Case = 'VMware without its descriptor'; Installed = @('VMware'); Change = @{}; Setup = { Remove-Item -LiteralPath $script:stick.VMwareDisk } }
+        @{ Case = 'VMware with the VM running in VMware'; Installed = @('VMware'); Change = @{}; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'vmware-vmx.exe'; CommandLine = "vmware-vmx.exe `"$($script:stick.Vmx)`"" }) } }
+        @{ Case = 'VMware while a VirtualBox VM may be this one'; Installed = @('VMware'); Change = @{}; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'VirtualBoxVM.exe'; CommandLine = $null }) } }
+        @{ Case = 'VMware chosen with a VirtualBox save'; Installed = @('VMware', 'VirtualBox'); Change = @{ Hypervisor = 'VMware' }; Setup = {
+                [IO.File]::WriteAllText($script:stick.Vbox, [IO.File]::ReadAllText($script:stick.Vbox).Replace('OSType="Debian_64"', 'OSType="Debian_64" stateFile="Snapshots\x.sav"'))
+            }
+        }
+        @{ Case = 'VMware .vmx without suspend.disabled'; Installed = @('VMware'); Change = @{}; Setup = { Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without 'suspend.disabled') } }
+        # A dry run carries on past its first stop, here to a later one; it returns the first.
+        @{ Case = 'VMware .vmx without suspend.disabled, and a descriptor without an extent'; Installed = @('VMware'); Change = @{}; Setup = {
+                Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without 'suspend.disabled')
+                Write-TestFile -Path $script:stick.VMwareDisk -Text 'createType="fullDevice"'
+            }
+        }
+        @{ Case = 'VMware suspend answered Yes'; Installed = @('VMware'); Change = @{}; Setup = { Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"') } }
+        @{ Case = 'VMware suspend with SavedStatePolicy Refuse'; Installed = @('VMware'); Change = @{ SavedStatePolicy = 'Refuse' }; Setup = { Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"') } }
+        @{ Case = 'VirtualBox save answered Yes'; Installed = @('VirtualBox'); Change = @{}; Setup = {
+                [IO.File]::WriteAllText($script:stick.Vbox, [IO.File]::ReadAllText($script:stick.Vbox).Replace('OSType="Debian_64"', 'OSType="Debian_64" stateFile="Snapshots\x.sav"'))
+            }
+        }
+        @{ Case = 'VirtualBox while the VM runs in VMware'; Installed = @('VirtualBox'); Change = @{}; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'vmware-vmx.exe'; CommandLine = $null }) } }
+        @{ Case = 'VirtualBox while the VM is suspended in VMware'; Installed = @('VirtualBox'); Change = @{}; Setup = { Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"') } }
+        @{ Case = 'VirtualBox open with another VM'; Installed = @('VirtualBox'); Change = @{}; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'VirtualBox.exe'; CommandLine = $null }) } }
+        @{ Case = 'VirtualBox open and the VM running'; Installed = @('VirtualBox'); Change = @{}; Setup = {
+                $script:testProcesses = @([pscustomobject]@{ Name = 'VirtualBox.exe'; CommandLine = $null })
+                Mock -ModuleName PortableVM Invoke-PvmNative { [pscustomobject]@{ ExitCode = 0; Output = 'VMState="running"' } } -ParameterFilter { $ArgumentList[0] -eq 'showvminfo' }
+            }
+        }
+        # A dry run carries on past its first stop, here to a VM that runs already; it returns the stop.
+        @{ Case = 'VirtualBox while the VM is suspended in VMware, and VirtualBox open with the VM running'; Installed = @('VirtualBox'); Change = @{}; Setup = {
+                Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"')
+                $script:testProcesses = @([pscustomobject]@{ Name = 'VirtualBox.exe'; CommandLine = $null })
+                Mock -ModuleName PortableVM Invoke-PvmNative { [pscustomobject]@{ ExitCode = 0; Output = 'VMState="running"' } } -ParameterFilter { $ArgumentList[0] -eq 'showvminfo' }
+            }
+        }
+        @{ Case = 'VBoxSVC ending during the wait'; Installed = @('VirtualBox'); Change = @{}; Setup = {
+                $script:svc = 0
+                Mock -ModuleName PortableVM Invoke-PvmTestProcess { $script:svc++ -lt 2 } -ParameterFilter { $Name -eq 'VBoxSVC' }
+            }
+        }
+        @{ Case = 'VBoxSVC still running after the wait'; Installed = @('VirtualBox'); Change = @{}; Setup = {
+                Mock -ModuleName PortableVM Wait-PvmProcessExit { $script:waits++ }
+                Mock -ModuleName PortableVM Invoke-PvmTestProcess { $true } -ParameterFilter { $Name -eq 'VBoxSVC' }
+            }
+        }
+        @{ Case = 'VirtualBox open and VBoxSVC still running'; Installed = @('VirtualBox'); Change = @{}; Setup = {
+                $script:testProcesses = @([pscustomobject]@{ Name = 'VirtualBox.exe'; CommandLine = $null })
+                Mock -ModuleName PortableVM Wait-PvmProcessExit { $script:waits++ }
+                Mock -ModuleName PortableVM Invoke-PvmTestProcess { $true } -ParameterFilter { $Name -eq 'VBoxSVC' }
+            }
+        }
+        @{ Case = 'another run holding the lock'; Installed = @('VMware'); Change = @{}; Setup = { Mock -ModuleName PortableVM Invoke-PvmEnterLock { [pscustomobject]@{ State = 'Busy'; Mutex = $null } } } }
+        @{ Case = 'a lock that an earlier run left'; Installed = @('VMware'); Change = @{}; Setup = { Mock -ModuleName PortableVM Invoke-PvmEnterLock { [pscustomobject]@{ State = 'Abandoned'; Mutex = $null } } } }
+        @{ Case = 'another disk'; Installed = @('VMware'); Change = @{}; Setup = { Mock -ModuleName PortableVM Invoke-PvmGetDisk { Get-TestDisk -Change @{ Signature = [uint32]0x5CA1AB1F } } -ParameterFilter { $Number -eq 3 } } }
+        @{ Case = 'settings with problems'; Installed = @('VMware'); Change = @{ Hypervisor = 'VBox' }; Setup = {} }
+        @{ Case = 'neither hypervisor installed'; Installed = @(); Change = @{}; Setup = {} }
+        @{ Case = 'a .vbox that is no XML'; Installed = @('VMware', 'VirtualBox'); Change = @{}; Setup = { Write-TestFile -Path $script:stick.Vbox -Text 'no XML' } }
+        @{ Case = 'no partition with the drive letter'; Installed = @('VMware'); Change = @{}; Setup = {
+                Mock -ModuleName PortableVM Invoke-PvmGetPartition { throw (Get-TestNoPartitionError) } -ParameterFilter { $DriveLetter -ceq $script:stick.Letter }
+            }
+        }
+    ) {
+        $runs = foreach ($dry in $false, $true) {
+            # The same path both times, so that messages that name a path agree.
+            $script:stick = Initialize-TestStick -Name 'parity-stick' -Change $Change
+            Set-TestPc -Stick $script:stick -Installed $Installed
+            $script:starts = 0
+            $script:startvms = 0
+            $script:waits = 0
+            Mock -ModuleName PortableVM Invoke-PvmStartProcess { $script:starts++ }
+            Mock -ModuleName PortableVM Invoke-PvmNative { $script:startvms++; [pscustomobject]@{ ExitCode = 0; Output = 'VM has been successfully started.' } } -ParameterFilter { $ArgumentList[0] -eq 'startvm' }
+            & $Setup
+            $before = Get-TestTreeHash -Root $script:stick.Root
+            $ask = if ($dry) { { throw 'A dry run must not ask.' } } else { { $true } }
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dry -AskResume $ask
+            $after = Get-TestTreeHash -Root $script:stick.Root
+            $changed = ((@($after.Keys | Sort-Object) -join '|') -cne (@($before.Keys | Sort-Object) -join '|')) -or
+                (@($before.Keys | Where-Object { $after[$_] -ne $before[$_] }).Count -gt 0)
+            [pscustomobject]@{
+                Result    = $result
+                Decisions = @(ConvertTo-TestDecision -Lines (Get-TestLog -Path $script:stick.Log))
+                Starts    = $script:starts
+                StartVms  = $script:startvms
+                Waits     = $script:waits
+                Changed   = $changed
+            }
+            Remove-Item -LiteralPath $script:stick.Root -Recurse -Force
+        }
+        $real, $dryRun = $runs
+        $dryRun.Result.ExitCode | Should -Be $real.Result.ExitCode
+        $dryRun.Result.Message | Should -BeExactly $real.Result.Message
+        $dryRun.Result.Icon | Should -BeExactly $real.Result.Icon
+        $dryRun.Result.Caption | Should -BeExactly $real.Result.Caption
+        $dryRun.Decisions | Should -BeExactly $real.Decisions
+        $dryRun.Starts | Should -Be 0
+        $dryRun.StartVms | Should -Be 0
+        $dryRun.Changed | Should -BeFalse
+        $dryRun.Waits | Should -Be $real.Waits
     }
 }

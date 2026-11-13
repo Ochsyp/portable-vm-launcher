@@ -6,11 +6,13 @@ A Windows launcher for a VM that lives on a USB stick and boots that stick as it
 the stick into a Windows PC that has VMware Workstation or VirtualBox, double-click
 `Start VM.cmd`, and the launcher starts the VM in whichever of the two is installed.
 
-> **Status:** phase 3 of a hardening redesign. The launcher's checks and start steps live in a
+> **Status:** phase 4 of a hardening redesign. The launcher's checks and start steps live in a
 > tested module; it guards against suspends and saved states, checks its settings before it
-> reads the PC, and keeps its settings, log and backups in `LauncherData`, apart from its code,
-> as *What it does* says. [CHANGELOG.md](CHANGELOG.md) lists every change. More small pull
-> requests follow. Until they land, follow the rules under [Known limits](#known-limits).
+> reads the PC, keeps its settings, log and backups in `LauncherData`, apart from its code, runs
+> one start at a time, and logs each run with milliseconds, UTC offset, process ID and step
+> timings, moving a full log aside, as *What it does* and *Log* say.
+> [CHANGELOG.md](CHANGELOG.md) lists every change. More small pull requests follow. Until they
+> land, follow the rules under [Known limits](#known-limits).
 
 ## What it does
 
@@ -34,7 +36,11 @@ Before every start the launcher:
   `SavedStatePolicy = 'Refuse'` in the settings makes the launcher stop instead;
 - stops when it cannot tell whether the VM is saved, because its `.vmx` or `.vbox` is missing or
   cannot be read, the `.vmx` lacks `config.version` or sets a safety key twice, or the `.vbox` is
-  no valid XML.
+  no valid XML;
+- runs once at a time on a PC: while a start or a dry run is in progress, another one stops and
+  says so, a second double-click before it asks for administrator rights;
+- logs every run, from the request for administrator rights to its exit code, with the time each
+  step took (see [Log](#log)).
 
 VMware always gets the stick with the Data partition blanked, because Windows keeps using that
 partition while the VM runs. For VirtualBox, the `HideDataPartition` setting decides.
@@ -45,13 +51,25 @@ launcher rewrites a VM file for the first time, it keeps that first version belo
 `LauncherData\backups`; a copy of a raw-disk descriptor names a disarmed device there, so
 opening it by mistake reaches no disk.
 
-`-DryRun` runs every check and logs what would change, without changing a VM file or starting
-anything; it still adds its lines to `LauncherData\logs\launcher.log`. Run it from an elevated
-PowerShell, so the checks see what a real start sees, with `X:` as the stick's Data partition:
+`-DryRun` takes the decisions of a real start and logs what would change, without changing a VM
+file or starting anything. It still adds its lines to the log and may move a full or old-format
+log aside (see [Log](#log)). It needs administrator rights, as a real start has them, and stops
+without them, so run it from an elevated PowerShell, with `X:` as the stick's Data partition:
 
 ```text
 powershell -NoProfile -ExecutionPolicy Bypass -File X:\Launcher\Start-PortableVM.ps1 -DryRun
 ```
+
+Where a real start would stop, a dry run logs `DRY RUN - a real start would stop here: ...`,
+carries on with the other checks, and exits with 1 and the first such message. A stop that
+leaves nothing to check after it, such as settings with problems, another disk at the drive
+letter, a missing hypervisor or another run in progress, ends a dry run with a `STOPPED:` line as
+it ends a real start; after an earlier would-stop line, the dry run still exits with that line's
+message. A dry run exits with 1 exactly when its log has such a line. It does not ask
+whether to resume a saved state; it logs that a real start would ask. It does not ask VBoxManage
+for the VM list or the VM's state after it has checked the files, since that would start
+VirtualBox's background service with the stick's files. While that service runs, it waits for it
+like a real start, up to 30 seconds.
 
 ## Layout on the stick
 
@@ -67,7 +85,7 @@ and the VM files:
 | `Launcher\PortableVM.psm1` | The launcher's checks and start steps |
 | `Launcher\VERSION`, `Launcher\SHA256SUMS` | The deployed version and the hashes of its code, written by the deploy tool |
 | `LauncherData\settings.psd1` | Your settings, copied from `examples\settings.example.psd1` |
-| `LauncherData\logs\launcher.log` | The log of every run |
+| `LauncherData\logs\launcher.log` | The log of every run (see [Log](#log)); full or older logs are kept beside it as `launcher-<date>-<time>.log` |
 | `LauncherData\backups\` | The first version of each file the launcher rewrites, at its path below the stick folder; descriptor copies are disarmed |
 | `LauncherData\backups\legacy\` | What `-MigrateSettings` moved there: the old settings file and the copies the launcher used to keep beside the VM files |
 | `Launcher.previous\` | The launcher that the last deploy replaced |
@@ -76,6 +94,51 @@ and the VM files:
 
 The table's paths can also lie in a folder below the drive's root; `Launcher` and
 `LauncherData` sit side by side in it, and the path settings start from it.
+
+## Log
+
+`LauncherData\logs\launcher.log` is ANSI text, one line per line of a message, each after a
+prefix with the local time to the millisecond, its UTC offset and the ID of the process that
+wrote it:
+
+```text
+2026-11-12T08:15:02.123+01:00 [4120]  Asking for administrator rights
+2026-11-12T08:15:06.904+01:00 [6732]  ----- Start VM -----
+2026-11-12T08:15:06.911+01:00 [6732]  Launcher version v0.4.0
+2026-11-12T08:15:08.320+01:00 [6732]  Stick found: disk 3 (\\.\PhysicalDrive3), drive X:, ID 5CA1AB1E
+2026-11-12T08:15:08.702+01:00 [6732]  Using VMware
+2026-11-12T08:15:09.115+01:00 [6732]  stick.vmdk already points at the stick
+2026-11-12T08:15:09.180+01:00 [6732]  Started with VMware Workstation (...)
+2026-11-12T08:15:09.182+01:00 [6732]  Timings: setup 14 ms, settings 31 ms, stick 1409 ms, choice 382 ms, checks 405 ms, files 21 ms, start 62 ms, total 2324 ms
+2026-11-12T08:15:09.183+01:00 [6732]  ----- End: exit code 0 -----
+```
+
+- The message starts after the first two consecutive spaces, in the lines of launchers before
+  phase 4 too (`yyyy-MM-dd HH:mm:ss` and two spaces). Every line of a message that spans lines
+  has the prefix.
+- A run starts with `----- Start VM -----`, or `----- Start VM (dry run) -----`, and ends with a
+  `Timings:` line, which gives each step's duration in milliseconds, and `----- End: exit code N
+  -----`, or `----- End (dry run): exit code N -----`. A run that has its start line but no End
+  line was ended before it finished. The End line comes before the run's dialog: a dialog that
+  fails adds a `STOPPED:` line after it, and the script then exits with 1; a lock that cannot be
+  released adds a `Note:` line after it. Lines in which a dry run differs begin with `DRY RUN - `.
+- The script logs a few stops itself, before a run begins: another run in progress at the
+  request for administrator rights, a declined or failed request, a `PortableVM.psm1` that
+  cannot be loaded, and an error that no step handles. Each is one `STOPPED:` line, with the
+  error's details where there was one, and has no start or End line. A declined or failed request
+  exits with 0, the others with 1.
+- Before Windows asks for administrator rights, the launcher logs `Asking for administrator
+  rights`; the elevated run follows under another process ID. A declined or failed request logs a
+  `STOPPED:` line with `Error detail:` lines. When the request line is the last line of
+  `launcher.log`, the elevated launcher did not run, and an elevated dry run shows why. A log
+  that was moved aside can end with the request line of the run that moved it; that run's lines
+  start the new `launcher.log`.
+- An unexpected error adds `Error detail:`, `Error ID:` and `Error trace:` lines, which can name
+  paths on the stick.
+- When `launcher.log` holds 1 MiB or more, or its first line is in the format of a launcher before
+  phase 4, the next run moves it to `launcher-<yyyyMMdd-HHmmss>.log` in the same folder and starts
+  a new one. The launcher deletes no log.
+- To compare runs, drop the prefixes and the `Timings:` lines.
 
 ## Requirements
 
@@ -142,9 +205,17 @@ still holds the old settings file, so the old launcher finds it; `Start VM.cmd` 
 What a stick, a script or a user may rely on between versions:
 
 - `Start VM.cmd` at the stick folder starts the launcher; `Launcher\Start-PortableVM.ps1
-  -DryRun` runs every check without changing or starting anything.
-- Exit codes: the launcher returns 0 when the VM started, is already running or a dry run
-  passed, else 1; `tools\Deploy-PortableVM.ps1` 0 when done, 1 when it refused or failed;
+  -DryRun` takes a real start's decisions without changing a VM file or starting anything,
+  writing only its log, and needs administrator rights.
+- While a start or a dry run runs, the launcher holds the named mutex
+  `Global\PortableVM-Launcher`.
+- Log lines start with the prefix that *Log* describes; the message follows the first two
+  consecutive spaces.
+- Exit codes: the launcher returns 0 when the VM started, is already running, or a dry run
+  passed, in which a real start would not stop; else 1, also when another run of the launcher is
+  in progress. The script that asks for administrator rights returns 0 once it has asked, also
+  when the request was declined (the log says so), and 1 when another run held the lock.
+  `tools\Deploy-PortableVM.ps1` returns 0 when done, 1 when it refused or failed;
   `tools\Get-StickInventory.ps1` 0 after its report, 2 when it cannot run;
   `tools\Find-PrivateData.ps1` 0 when clean, 1 on a finding, 2 when it cannot run.
 - The settings are `LauncherData\settings.psd1` in schema 2; `examples\settings.example.psd1`
@@ -166,6 +237,16 @@ The redesign removes these. Until then:
   it off, VirtualBox takes every volume of the stick offline, the Data partition included.
 - `HideDataPartition = $false` shows the Data partition to a VirtualBox guest. Never mount it
   inside the guest: Windows writes to it at the same time, and it holds the VM's own files.
+- A second double-click while Windows still asks for administrator rights for the first one, or
+  in the second after that, asks again. That second run then stops, saying that another run is in
+  progress, or says that the VM is already running. Right after a start in VMware, before
+  VMware's process for the VM shows, it can also find no running VM and run VMware for the VM
+  again.
+- The lock covers the launcher's checks and its start command, not the time the VM runs; once the
+  VM's process runs, the process checks find it.
+- While a run waits for the answer to its resume question, or hangs, it keeps the lock, and every
+  double-click says that another run is in progress. Answer the question, or close that run's
+  minimized PowerShell window; the run then ends, and the next one takes the lock.
 
 ## Development
 

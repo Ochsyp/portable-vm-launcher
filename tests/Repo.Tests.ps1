@@ -210,7 +210,8 @@ Describe 'Static guards' {
 
     It 'let only the adapters in the module read the PC or run programs' {
         $adapters = 'Invoke-PvmGetPartition', 'Invoke-PvmGetDisk', 'Invoke-PvmGetProcess', 'Invoke-PvmTestProcess', 'Invoke-PvmGetDeviceGuard',
-        'Invoke-PvmGetRegistryValue', 'Invoke-PvmNative', 'Invoke-PvmStartProcess', 'Invoke-PvmSetEnvironment', 'Invoke-PvmSleep'
+        'Invoke-PvmGetRegistryValue', 'Invoke-PvmNative', 'Invoke-PvmStartProcess', 'Invoke-PvmSetEnvironment', 'Invoke-PvmSleep',
+        'Invoke-PvmTestAdministrator', 'Invoke-PvmEnterLock', 'Invoke-PvmExitLock'
         $reads = 'Get-Partition', 'Get-Disk', 'Get-Volume', 'Get-PhysicalDisk', 'Get-CimInstance', 'Get-WmiObject', 'Get-Process',
         'Get-ItemProperty', 'Get-ItemPropertyValue', 'Start-Process', 'Start-Sleep', 'Invoke-CimMethod', 'Invoke-WmiMethod'
         $ast = Get-SourceAst -Path $script:module
@@ -270,6 +271,146 @@ Describe 'Static guards' {
         $replaces.Count | Should -Be 1
         for ($parent = $replaces[0].Parent; $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
         $parent.Name | Should -BeExactly 'Set-DeployDisarmedCopy'
+    }
+
+    It 'branch on -DryRun in the module only where a dry run must differ' {
+        # A new branch needs a change of this map on purpose.
+        $counts = @{}
+        foreach ($node in (Get-SourceAst -Path $script:module).FindAll({
+                    ($args[0] -is [System.Management.Automation.Language.VariableExpressionAst] -and $args[0].VariablePath.UserPath -eq 'DryRun' -and
+                    $args[0].Parent -isnot [System.Management.Automation.Language.ParameterAst]) -or
+                    ($args[0] -is [System.Management.Automation.Language.MemberExpressionAst] -and
+                    $args[0].Member -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $args[0].Member.Value -eq 'DryRun')
+                }, $true)) {
+            for ($parent = $node.Parent; $null -ne $parent -and $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
+            $name = if ($parent) { $parent.Name } else { '' }
+            $counts[$name] = 1 + [int]$counts[$name]
+        }
+        $expected = @{ 'Invoke-PvmStopUnlessDryRun' = 1; 'Confirm-PvmResume' = 1; 'Invoke-PvmVMware' = 3; 'Invoke-PvmVirtualBox' = 3; 'Invoke-PortableVM' = 4 }
+        @($counts.Keys | Sort-Object | ForEach-Object { "$_=$($counts[$_])" }) | Should -BeExactly @($expected.Keys | Sort-Object | ForEach-Object { "$_=$($expected[$_])" })
+    }
+
+    It 'keep the mutex and the rights check in their helpers' {
+        foreach ($case in @(
+                @{ Path = $script:module; Pattern = 'Threading\.Mutex|MutexRights|AbandonedMutexException'; Allowed = @('Enter-PvmMutex') }
+                @{ Path = $script:module; Pattern = 'Security\.Principal'; Allowed = @('Invoke-PvmTestAdministrator') }
+                @{ Path = $script:launcher; Pattern = 'Threading\.Mutex|MutexRights'; Allowed = @('Test-LockHeld') }
+                # '' is the administrator-rights block at the script's top level.
+                @{ Path = $script:launcher; Pattern = 'Security\.Principal'; Allowed = @('Test-Administrator', '') }
+            )) {
+            $places = foreach ($type in (Get-SourceAst -Path $case.Path).FindAll({
+                        $args[0] -is [System.Management.Automation.Language.TypeExpressionAst] -or $args[0] -is [System.Management.Automation.Language.TypeConstraintAst]
+                    }, $true)) {
+                if ($type.TypeName.FullName -notmatch $case.Pattern) { continue }
+                for ($parent = $type.Parent; $null -ne $parent -and $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
+                if ($parent) { $parent.Name } else { '' }
+            }
+            @($places).Count | Should -BeGreaterThan 0
+            @($places | Where-Object { $case.Allowed -notcontains $_ }) | Should -BeNullOrEmpty
+        }
+    }
+
+    It 'let the module delete nothing, and move a file only to put the log aside' {
+        $ast = Get-SourceAst -Path $script:module
+        Get-SourceCommand -Ast $ast | Where-Object { $_.Name -in 'Remove-Item', 'Move-Item', 'Rename-Item', 'Clear-Content', 'Clear-Item' } |
+            ForEach-Object { "$($_.Name) at line $($_.Line)" } | Should -BeNullOrEmpty
+        $members = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
+        $members | Where-Object { $_.Member.Extent.Text -in 'Delete', 'MoveTo' } | ForEach-Object { $_.Extent.Text } | Should -BeNullOrEmpty
+        $moves = @($members | Where-Object {
+                $_.Member.Extent.Text -eq 'Move' -and $_.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
+                @('IO.File', 'System.IO.File', 'File', 'IO.Directory', 'System.IO.Directory', 'Directory') -contains $_.Expression.TypeName.FullName
+            })
+        $moves.Count | Should -Be 1
+        for ($parent = $moves[0].Parent; $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
+        $parent.Name | Should -BeExactly 'Move-PvmOldLog'
+    }
+
+    It 'end in the script''s one trap, logged with its details and shown, with exit code 1, what no step of the script handles' {
+        $traps = @((Get-SourceAst -Path $script:launcher).EndBlock.Traps | Where-Object { $_ })
+        $traps.Count | Should -Be 1
+        $last = $traps[0].Body.Statements[-1]
+        $last | Should -BeOfType ([System.Management.Automation.Language.ExitStatementAst])
+        $last.Pipeline.Extent.Text | Should -BeExactly '1'
+        $traps[0].Body.Statements[0].Extent.Text | Should -BeExactly '$script:AskingForRights = $false'
+        $traps[0].Body.Statements[1].Extent.Text | Should -BeExactly '$message = "Unexpected error in Start-PortableVM.ps1: $($_.Exception.Message)"'
+        # The error is logged with its details, the message says when that failed, and a failure of
+        # the log line itself cannot end the trap before its message and exit code.
+        $traps[0].Body.Statements[2].Extent.Text | Should -BeExactly '$problem = try { Add-StopLine -Message $message -ErrorRecord $_ } catch { Get-ErrorCause -Exception $_.Exception }'
+        $traps[0].Body.Statements[3].Extent.Text | Should -BeExactly '$message = Add-LogNote -Message $message -Problem $problem'
+        $commands = @($traps[0].Body.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true))
+        @($commands | Where-Object { $_.GetCommandName() -eq 'Show-Message' }).Count | Should -Be 1
+    }
+
+    It 'word every log cause after "because" in the module through Format-PvmBecause' {
+        # A new sentence with a cause after "because" needs a change of these counts on purpose.
+        $text = [IO.File]::ReadAllText($script:module)
+        [regex]::Matches($text, 'because \$').Count | Should -Be 3
+        [regex]::Matches($text, 'because \$\(Format-PvmBecause -Cause ').Count | Should -Be 3
+    }
+
+    It 'check the lock in the script before its administrator-rights block, and end the script there when another run holds it' {
+        $statements = @((Get-SourceAst -Path $script:launcher).EndBlock.Statements)
+        $texts = @($statements | ForEach-Object { $_.Extent.Text })
+        $request = @(0..($texts.Count - 1) | Where-Object { $texts[$_] -ceq '$busy = Invoke-RightsRequest' })
+        $identity = @(0..($texts.Count - 1) | Where-Object { $texts[$_] -clike '$identity = *' })
+        $request.Count | Should -Be 1
+        $identity.Count | Should -Be 1
+        $request[0] | Should -BeLessThan $identity[0]
+        $check = $statements[$request[0] + 1]
+        $check | Should -BeOfType ([System.Management.Automation.Language.IfStatementAst])
+        $check.Clauses[0].Item1.Extent.Text | Should -BeExactly '$null -ne $busy'
+        $end = $check.Clauses[0].Item2.Statements[-1]
+        $end | Should -BeOfType ([System.Management.Automation.Language.ExitStatementAst])
+        $end.Pipeline.Extent.Text | Should -BeExactly '$busy.ExitCode'
+    }
+
+    It 'append a log text in one write that other launcher processes cannot break up: <Function>' -ForEach @(
+        @{ File = 'src\PortableVM.psm1'; Function = 'Write-PvmLog' }
+        @{ File = 'src\Start-PortableVM.ps1'; Function = 'Add-LogLine' }
+    ) {
+        $name = $Function
+        $definition = (Get-SourceAst -Path (Join-Path $script:repoRoot $File)).Find({
+                $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq $name
+            }, $true)
+        $definition | Should -Not -BeNullOrEmpty
+        $members = @($definition.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
+        $opens = @($members | Where-Object { $_.Member.Extent.Text -eq 'new' -and $_.Expression.TypeName.FullName -eq 'IO.FileStream' })
+        $opens.Count | Should -Be 1
+        $opens[0].Arguments[1].Extent.Text | Should -BeExactly '[IO.FileMode]::Append'
+        $opens[0].Arguments[2].Extent.Text | Should -BeExactly '[Security.AccessControl.FileSystemRights]::AppendData'
+        # Other writers may append, and a run may move the log aside, while the file is open.
+        $opens[0].Arguments[3].Extent.Text | Should -BeExactly '([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)'
+        $opens[0].Arguments[4].Extent.Text | Should -BeExactly '4096'
+        $opens[0].Arguments[5].Extent.Text | Should -BeExactly '[IO.FileOptions]::None'
+        $writes = @($members | Where-Object { $_.Member.Extent.Text -match '^(Write|WriteByte|BeginWrite|WriteAsync|Flush|(Append|Write)All(Text|Lines|Bytes))$' })
+        @($writes | ForEach-Object { $_.Extent.Text }) | Should -BeExactly @('$stream.Write($bytes, 0, $bytes.Length)')
+        # The one write runs once: no loop and no script block lies around it.
+        for ($parent = $writes[0].Parent; -not [object]::ReferenceEquals($parent, $definition); $parent = $parent.Parent) {
+            $parent | Should -Not -BeOfType ([System.Management.Automation.Language.LoopStatementAst])
+            $parent | Should -Not -BeOfType ([System.Management.Automation.Language.ScriptBlockExpressionAst])
+        }
+        # The text of all lines of the message becomes the bytes of that write.
+        @($members | Where-Object { $_.Member.Extent.Text -eq 'GetBytes' } | ForEach-Object { $_.Extent.Text }) | Should -BeExactly @('[Text.Encoding]::Default.GetBytes($text + "`r`n")')
+        Get-SourceCommand -Ast $definition | Where-Object { $_.Name -in 'Add-Content', 'Set-Content', 'Out-File', 'Tee-Object' } | Should -BeNullOrEmpty
+    }
+
+    It 'remove PVM_TEST in the script only at its top level, so that a test that calls one of its functions keeps it' {
+        $removes = @(Get-SourceCommand -Ast (Get-SourceAst -Path $script:launcher) | Where-Object { $_.Name -eq 'Remove-Item' })
+        $removes.Count | Should -BeGreaterThan 0
+        $removes | Where-Object { $_.Function -ne '' } | ForEach-Object { "Remove-Item in $($_.Function)" } | Should -BeNullOrEmpty
+    }
+
+    It 'show dialogs in the script only from Show-Dialog and Show-Question' {
+        $places = foreach ($node in (Get-SourceAst -Path $script:launcher).FindAll({
+                    (($args[0] -is [System.Management.Automation.Language.TypeExpressionAst] -or $args[0] -is [System.Management.Automation.Language.TypeConstraintAst]) -and
+                    $args[0].TypeName.FullName -match 'Windows\.Forms') -or
+                    ($args[0] -is [System.Management.Automation.Language.CommandAst] -and $args[0].GetCommandName() -eq 'Add-Type')
+                }, $true)) {
+            for ($parent = $node.Parent; $null -ne $parent -and $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
+            if ($parent) { $parent.Name } else { '' }
+        }
+        @($places).Count | Should -BeGreaterThan 0
+        @($places | Where-Object { $_ -notin 'Show-Dialog', 'Show-Question' }) | Should -BeNullOrEmpty
     }
 }
 

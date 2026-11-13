@@ -6,8 +6,8 @@ portable-vm-launcher has a single maintainer.
 
 Report a vulnerability privately through the repository's Security tab (*Report a
 vulnerability*). Do not open a public issue for it. Never paste a real `settings.psd1`,
-`launcher.log`, `.vmx`, `.vbox` or `VirtualBox.xml` into issues, pull requests or commits:
-they identify one stick and the PCs it was used on.
+`launcher.log`, `launcher-*.log`, `.vmx`, `.vbox` or `VirtualBox.xml` into issues, pull requests
+or commits: they identify one stick and the PCs it was used on.
 
 ## Trust model
 
@@ -21,13 +21,17 @@ they identify one stick and the PCs it was used on.
   Windows disk. The README lists the known limits of these checks.
 - Raw-disk VMs need the hypervisor to run elevated. Shared folders, drag and drop and shared
   clipboards then act on the host with administrator rights, so keep them off for this VM.
+- Any program on the PC, under any account, can create or hold the launcher's lock
+  (`Global\PortableVM-Launcher`) and so keep it from starting the VM; it cannot make the launcher
+  start anything.
 
 ## Data that stays private
 
 - `LauncherData\settings.psd1` holds the stick's disk signature, size and partition layout, the
-  VM's UUID and the names of the VM and the guest. `LauncherData\logs\launcher.log` also holds
-  disk numbers, install paths and times of use, and `LauncherData\backups` holds copies of VM
-  files. All of `LauncherData` is gitignored; only `examples\settings.example.psd1`, with
+  VM's UUID and the names of the VM and the guest. `LauncherData\logs\launcher.log`, and the
+  `launcher-<date>-<time>.log` files it moves aside, also hold disk numbers, install paths,
+  process IDs, error details with paths, and times of use, and `LauncherData\backups` holds copies
+  of VM files. All of `LauncherData` is gitignored; only `examples\settings.example.psd1`, with
   placeholders, is committed.
 - The launcher reads the settings as data: it parses the file and accepts only plain values,
   so nothing in it runs. Whoever can write to the stick still decides what runs, as the trust
