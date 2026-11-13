@@ -255,7 +255,7 @@ Describe 'Static guards' {
             ForEach-Object { $_.Member.Extent.Text } | Where-Object { $allowed -cnotcontains $_ } | Should -BeNullOrEmpty
     }
 
-    It 'keep the deploy tool from deleting anything: no Remove-Item, Clear-*, .Delete or -Force that replaces, and [IO.File]::Replace only to disarm a descriptor copy' {
+    It 'keep the deploy tool from deleting anything: no Remove-Item, Clear-*, .Delete or -Force that replaces, and files written only through the safe write' {
         $ast = Get-SourceAst -Path (Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1')
         Get-SourceCommand -Ast $ast | Where-Object { $_.Name -in 'Remove-Item', 'Clear-Content', 'Clear-Item' } | Should -BeNullOrEmpty
         $members = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
@@ -264,13 +264,13 @@ Describe 'Static guards' {
         $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandParameterAst] -and $args[0].ParameterName -eq 'Force' }, $true) |
             Where-Object { $_.Parent.GetCommandName() -ne 'Import-Module' -and $_.Parent.GetCommandName() -ne 'New-Item' -and $_.Parent.GetCommandName() -ne 'Get-ChildItem' } |
             ForEach-Object { "$($_.Parent.GetCommandName()) at line $($_.Extent.StartLineNumber)" } | Should -BeNullOrEmpty
-        $replaces = @($members | Where-Object {
-                $_.Member.Extent.Text -eq 'Replace' -and $_.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
-                @('IO.File', 'System.IO.File', 'File') -contains $_.Expression.TypeName.FullName
-            })
-        $replaces.Count | Should -Be 1
-        for ($parent = $replaces[0].Parent; $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
-        $parent.Name | Should -BeExactly 'Set-DeployDisarmedCopy'
+        # The tool writes files only through the module's safe write, which swaps a file itself.
+        $members | Where-Object {
+            $_.Member.Extent.Text -match '^(Replace|Copy|Create|CreateText|OpenWrite)$|^(Write|Append)All(Text|Lines|Bytes)$' -and
+            $_.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and $_.Expression.TypeName.FullName -match 'File$'
+        } | ForEach-Object { $_.Extent.Text } | Should -BeNullOrEmpty
+        Get-SourceCommand -Ast $ast | Where-Object { $_.Name -in 'Copy-Item', 'Set-Content', 'Add-Content', 'Out-File' } | ForEach-Object { $_.Name } | Should -BeNullOrEmpty
+        @(Get-SourceCommand -Ast $ast | Where-Object { $_.Name -eq 'Write-PvmFile' }).Count | Should -BeGreaterThan 0
     }
 
     It 'branch on -DryRun in the module only where a dry run must differ' {
@@ -286,7 +286,7 @@ Describe 'Static guards' {
             $name = if ($parent) { $parent.Name } else { '' }
             $counts[$name] = 1 + [int]$counts[$name]
         }
-        $expected = @{ 'Invoke-PvmStopUnlessDryRun' = 1; 'Confirm-PvmResume' = 1; 'Invoke-PvmVMware' = 3; 'Invoke-PvmVirtualBox' = 3; 'Invoke-PortableVM' = 4 }
+        $expected = @{ 'Invoke-PvmStopUnlessDryRun' = 1; 'Confirm-PvmResume' = 1; 'Invoke-PvmVMware' = 3; 'Invoke-PvmVirtualBox' = 2; 'Invoke-PortableVM' = 4 }
         @($counts.Keys | Sort-Object | ForEach-Object { "$_=$($counts[$_])" }) | Should -BeExactly @($expected.Keys | Sort-Object | ForEach-Object { "$_=$($expected[$_])" })
     }
 
@@ -310,19 +310,37 @@ Describe 'Static guards' {
         }
     }
 
-    It 'let the module delete nothing, and move a file only to put the log aside' {
+    It 'let the module delete only the copies of its safe writes, and move or swap a file only to put the log aside and in the safe write' {
         $ast = Get-SourceAst -Path $script:module
         Get-SourceCommand -Ast $ast | Where-Object { $_.Name -in 'Remove-Item', 'Move-Item', 'Rename-Item', 'Clear-Content', 'Clear-Item' } |
             ForEach-Object { "$($_.Name) at line $($_.Line)" } | Should -BeNullOrEmpty
         $members = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
-        $members | Where-Object { $_.Member.Extent.Text -in 'Delete', 'MoveTo' } | ForEach-Object { $_.Extent.Text } | Should -BeNullOrEmpty
-        $moves = @($members | Where-Object {
-                $_.Member.Extent.Text -eq 'Move' -and $_.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
-                @('IO.File', 'System.IO.File', 'File', 'IO.Directory', 'System.IO.Directory', 'Directory') -contains $_.Expression.TypeName.FullName
-            })
-        $moves.Count | Should -Be 1
-        for ($parent = $moves[0].Parent; $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
-        $parent.Name | Should -BeExactly 'Move-PvmOldLog'
+        $members | Where-Object { $_.Member.Extent.Text -eq 'MoveTo' } | ForEach-Object { $_.Extent.Text } | Should -BeNullOrEmpty
+        # A new place that deletes, moves or swaps a file needs a change of this map on purpose.
+        $places = foreach ($member in $members) {
+            $name = $member.Member.Extent.Text
+            if ($name -notin 'Delete', 'Move', 'Replace' -or $member.Expression -isnot [System.Management.Automation.Language.TypeExpressionAst]) { continue }
+            if (@('IO.File', 'System.IO.File', 'File', 'IO.Directory', 'System.IO.Directory', 'Directory') -notcontains $member.Expression.TypeName.FullName) { continue }
+            for ($parent = $member.Parent; $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
+            "$name in $($parent.Name)"
+        }
+        @($places | Sort-Object) | Should -BeExactly @('Delete in Remove-PvmWriteCopy', 'Move in Move-PvmOldLog', 'Move in Write-PvmFile', 'Replace in Switch-PvmFile')
+    }
+
+    It 'let the module write files only through Write-PvmFile, the log aside' {
+        $ast = Get-SourceAst -Path $script:module
+        Get-SourceCommand -Ast $ast | Where-Object { $_.Name -in 'Set-Content', 'Add-Content', 'Out-File', 'Copy-Item', 'Tee-Object', 'Export-Clixml', 'Export-Csv' } |
+            ForEach-Object { "$($_.Name) at line $($_.Line)" } | Should -BeNullOrEmpty
+        $members = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
+        $members | Where-Object { $_.Member.Extent.Text -match '^(Write|Append)All(Text|Lines|Bytes)$|^(Copy|Create|CreateText|AppendText|OpenWrite)$' -and
+            $_.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and $_.Expression.TypeName.FullName -match 'File$' } |
+            ForEach-Object { $_.Extent.Text } | Should -BeNullOrEmpty
+        $streams = foreach ($member in $members) {
+            if ($member.Member.Extent.Text -ne 'new' -or $member.Expression.TypeName.FullName -ne 'IO.FileStream') { continue }
+            for ($parent = $member.Parent; $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
+            $parent.Name
+        }
+        @($streams | Sort-Object -Unique) | Should -BeExactly @('Test-PvmLogFormat', 'Write-PvmFile', 'Write-PvmLog')
     }
 
     It 'end in the script''s one trap, logged with its details and shown, with exit code 1, what no step of the script handles' {

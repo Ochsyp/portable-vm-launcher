@@ -113,8 +113,9 @@ function Find-DeployLauncherCmd {
     }
 }
 
-# Copy the file $Source to $Destination and throw when the copy's SHA-256 differs from the
-# source's. Returns the hash.
+# Copy the file $Source to $Destination through the launcher's safe write (Write-PvmFile), which
+# forces the copy onto the stick and never replaces a file, and throw when the copy's SHA-256
+# differs from the source's. Returns the hash.
 function Copy-DeployFile {
     [CmdletBinding()]
     [OutputType([string])]
@@ -122,7 +123,7 @@ function Copy-DeployFile {
         [Parameter(Mandatory)][string]$Source,
         [Parameter(Mandatory)][string]$Destination
     )
-    Copy-Item -LiteralPath $Source -Destination $Destination
+    $null = Write-PvmFile -Path $Destination -Bytes ([IO.File]::ReadAllBytes($Source))
     $hash = Get-DeployHash -Path $Source
     if ((Get-DeployHash -Path $Destination) -ne $hash) { throw "The copy of $(Split-Path $Source -Leaf) does not match the clone." }
     $hash
@@ -405,24 +406,21 @@ function Assert-DeployWriteAccess {
 }
 
 # Disarm the descriptor copy $Path in place (ConvertTo-PvmDisarmedDescriptorText, every other
-# byte kept) and return whether it changed. The new bytes go to <Path>.pvm-tmp and are read back
-# and compared, and [IO.File]::Replace then puts them in place on the same volume: Windows
-# PowerShell 5.1 has no rename that replaces a file, and this tool deletes nothing. A .pvm-tmp
-# left by an earlier run is overwritten.
+# byte kept) through the launcher's safe write (Write-PvmFile), and return whether it changed. A
+# copy whose earlier write a crash cut off stops it, with the step to take behind -Verbose; the
+# tool removes nothing it did not write in the same step.
 function Set-DeployDisarmedCopy {
     [CmdletBinding(SupportsShouldProcess)]
     [OutputType([bool])]
     param([Parameter(Mandatory)][string]$Path)
     # ISO-8859-1 maps each byte to one character and back, so only the device names change.
     $latin1 = [Text.Encoding]::GetEncoding(28591)
-    $text = $latin1.GetString([IO.File]::ReadAllBytes($Path))
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $text = $latin1.GetString($bytes)
     $disarmed = ConvertTo-PvmDisarmedDescriptorText -Text $text
     if ($disarmed -ceq $text) { return $false }
     if (-not $PSCmdlet.ShouldProcess($Path, 'Disarm the descriptor copy')) { return $false }
-    $temporary = "$Path.pvm-tmp"
-    [IO.File]::WriteAllBytes($temporary, $latin1.GetBytes($disarmed))
-    if ($latin1.GetString([IO.File]::ReadAllBytes($temporary)) -cne $disarmed) { throw 'A disarmed descriptor copy did not read back as written.' }
-    [IO.File]::Replace($temporary, $Path, [NullString]::Value)
+    $null = Write-PvmFile -Path $Path -Bytes $latin1.GetBytes($disarmed) -Expected $bytes
     $true
 }
 
@@ -702,14 +700,14 @@ function Invoke-PvmDeploy {
         if (-not $reuseCode) {
             $null = New-Item -ItemType Directory -Path $staged
             foreach ($source in $sources) { $null = Copy-DeployFile -Source $source -Destination (Join-Path $staged (Split-Path $source -Leaf)) }
-            [IO.File]::WriteAllText((Join-Path $staged 'SHA256SUMS'), $sums, [Text.Encoding]::ASCII)
-            [IO.File]::WriteAllText((Join-Path $staged 'VERSION'), "$version`n", [Text.Encoding]::ASCII)
+            $null = Write-PvmFile -Path (Join-Path $staged 'SHA256SUMS') -Bytes ([Text.Encoding]::ASCII.GetBytes($sums))
+            $null = Write-PvmFile -Path (Join-Path $staged 'VERSION') -Bytes ([Text.Encoding]::ASCII.GetBytes("$version`n"))
         }
         if (-not $reuseCmd) { $null = Copy-DeployFile -Source $cmdSource -Destination $cmdStaged }
         if ($mode -eq 'Migrate') {
             $null = New-Item -ItemType Directory -Path (Join-Path $dataStaged 'logs'), (Join-Path $dataStaged 'backups\legacy\Launcher')
             $newSettings = Join-Path $dataStaged 'settings.psd1'
-            [IO.File]::WriteAllBytes($newSettings, $plan.Bytes)
+            $null = Write-PvmFile -Path $newSettings -Bytes $plan.Bytes
             if (-not (Test-DeploySameValue -Left (Import-PvmDataFile -Path $newSettings) -Right $plan.Values)) { throw 'The new settings.psd1 did not read back as written.' }
             $null = Copy-DeployFile -Source $oldSettings -Destination (Join-Path $dataStaged 'backups\legacy\Launcher\settings.psd1')
         }

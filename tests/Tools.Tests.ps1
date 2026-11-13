@@ -585,6 +585,18 @@ Describe 'Deploy-PortableVM -MigrateSettings' {
         Join-Path $script:target 'VMware\stick.vmdk.orig' | Should -Not -Exist
     }
 
+    It 'stops a resume at a copy whose disarm was cut off, naming no path, and changes that copy not' {
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        $copy = Join-Path $script:legacy 'VMware\stick.vmdk.orig'
+        Write-TestFile -Path $copy -Text (Get-TestDescriptorText -Device '\\.\PhysicalDrive7')
+        Write-TestFile -Path "$copy.pvm-tmp" -Text 'cut off'
+        $thrown = try { $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings } catch { $_ }
+        $thrown.Exception.Message | Should -BeLike '*A write of the file was cut off before it finished, and its copy is still beside it (-Verbose shows the details).*'
+        $thrown.Exception.Message.Contains($script:target) | Should -BeFalse
+        [IO.File]::ReadAllText($copy) | Should -BeExactly (Get-TestDescriptorText -Device '\\.\PhysicalDrive7')
+        [IO.File]::ReadAllText("$copy.pvm-tmp") | Should -BeExactly 'cut off'
+    }
+
     It 'keeps LauncherData''s settings and names on a resume and finishes, <Case>' -ForEach @(
         @{ Case = 'with the same name given again'; Extra = @{ GuestName = 'Test OS' } }
         @{ Case = 'without names'; Extra = @{} }
