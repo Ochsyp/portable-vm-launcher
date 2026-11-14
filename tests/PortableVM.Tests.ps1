@@ -1315,6 +1315,18 @@ Describe 'A start' {
             }
         }
 
+        It 'names, a dry run too, the step for a copy whose step needs no look at its missing file' {
+            $copy = Join-Path $script:stick.Backups 'VMware\stick.vmdk.previous.orig'
+            Write-TestFile -Path "$copy.pvm-old" -Text 'RW 2 FLAT "\\.\PortableVM-disarmed" 0'
+            Remove-Item -LiteralPath $script:stick.VMwareDisk
+            $expected = "A write of $copy did not finish. To set it right, rename stick.vmdk.previous.orig.pvm-old back to stick.vmdk.previous.orig. Nothing was started."
+            foreach ($dryRun in $false, $true) {
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun
+                $result.ExitCode | Should -Be 1
+                $result.Message | Should -BeExactly $expected
+            }
+        }
+
         It 'keeps, a dry run too, the descriptor''s copy put back whose swap stopped between its renames, comparing the disarmed descriptor' {
             $copy = Join-Path $script:stick.Backups 'VMware\stick.vmdk.previous.orig'
             Write-TestFile -Path "$copy.pvm-old" -Text (Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', '\\.\PortableVM-disarmed')

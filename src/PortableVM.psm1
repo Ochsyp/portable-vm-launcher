@@ -1509,9 +1509,10 @@ function Get-PvmCopyNow {
 
 # Return the step for a write that did not finish of the copy $Path of the file $Of below the
 # backups (Get-PvmLeftoverProblem, with the copy that would be made of $Of now, disarmed with
-# -Disarm), or '' when there is none. $Of is read only when an old version is beside the copy;
-# when it is missing, a folder or cannot be read then, the step asks for the file rather than
-# guess which version of the copy to keep.
+# -Disarm), or '' when there is none. $Of is read only where it decides the step: an old version
+# beside the copy, with the copy there and no new one, or the other way round. When it is
+# missing, a folder or cannot be read then, the step asks for the file rather than guess which
+# version of the copy to keep.
 function Get-PvmCopyLeftoverProblem {
     [CmdletBinding()]
     [OutputType([string])]
@@ -1520,7 +1521,8 @@ function Get-PvmCopyLeftoverProblem {
         [Parameter(Mandatory)][string]$Of,
         [switch]$Disarm
     )
-    if (-not [IO.File]::Exists((Get-PvmWriteCopyPath -Path $Path).Old)) { return (Get-PvmLeftoverProblem -Path $Path) }
+    $copies = Get-PvmWriteCopyPath -Path $Path
+    if (-not [IO.File]::Exists($copies.Old) -or [IO.File]::Exists($Path) -eq [IO.File]::Exists($copies.Temp)) { return (Get-PvmLeftoverProblem -Path $Path) }
     $now = Get-PvmCopyNow -Path $Of -Disarm:$Disarm
     switch ($now.Reason) {
         'Missing' {
