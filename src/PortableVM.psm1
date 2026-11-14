@@ -1480,9 +1480,9 @@ function Assert-PvmNoLeftover {
 }
 
 # Return what a copy of the file $Path made now would hold, as Save-PvmPreviousCopy makes it
-# (disarmed with -Disarm), for Get-PvmLeftoverProblem -Current: Readable and the Bytes, or Readable
-# $false when the file is missing, a folder or cannot be read. A descriptor of 1 MiB or more, which
-# the launcher refuses, is not read and gets an empty copy.
+# (disarmed with -Disarm), for Get-PvmLeftoverProblem -Current: the Bytes, or a Reason why there
+# are none: Missing, Folder (a folder has the name) or Unreadable. A descriptor of 1 MiB or more,
+# which the launcher refuses, is not read and gets an empty copy.
 function Get-PvmCopyNow {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -1492,24 +1492,26 @@ function Get-PvmCopyNow {
     )
     [byte[]]$bytes = @()
     try {
+        if ([IO.Directory]::Exists($Path)) { return [pscustomobject]@{ Reason = 'Folder'; Bytes = $bytes } }
         $file = [IO.FileInfo]::new($Path)
-        if (-not $file.Exists) { return [pscustomobject]@{ Readable = $false; Bytes = $bytes } }
-        if ($Disarm -and $file.Length -ge 1MB) { return [pscustomobject]@{ Readable = $true; Bytes = $bytes } }
+        if (-not $file.Exists) { return [pscustomobject]@{ Reason = 'Missing'; Bytes = $bytes } }
+        if ($Disarm -and $file.Length -ge 1MB) { return [pscustomobject]@{ Reason = ''; Bytes = $bytes } }
         $bytes = [IO.File]::ReadAllBytes($Path)
     } catch {
-        return [pscustomobject]@{ Readable = $false; Bytes = [byte[]]@() }
+        return [pscustomobject]@{ Reason = 'Unreadable'; Bytes = [byte[]]@() }
     }
     if ($Disarm) {
         $latin1 = [Text.Encoding]::GetEncoding(28591)
         $bytes = $latin1.GetBytes((ConvertTo-PvmDisarmedDescriptorText -Text $latin1.GetString($bytes)))
     }
-    [pscustomobject]@{ Readable = $true; Bytes = $bytes }
+    [pscustomobject]@{ Reason = ''; Bytes = $bytes }
 }
 
 # Return the step for a write that did not finish of the copy $Path of the file $Of below the
 # backups (Get-PvmLeftoverProblem, with the copy that would be made of $Of now, disarmed with
 # -Disarm), or '' when there is none. $Of is read only when an old version is beside the copy;
-# when it cannot be read then, the step says so rather than guess which version to keep.
+# when it is missing, a folder or cannot be read then, the step asks for the file rather than
+# guess which version of the copy to keep.
 function Get-PvmCopyLeftoverProblem {
     [CmdletBinding()]
     [OutputType([string])]
@@ -1520,9 +1522,19 @@ function Get-PvmCopyLeftoverProblem {
     )
     if (-not [IO.File]::Exists((Get-PvmWriteCopyPath -Path $Path).Old)) { return (Get-PvmLeftoverProblem -Path $Path) }
     $now = Get-PvmCopyNow -Path $Of -Disarm:$Disarm
-    if (-not $now.Readable) {
-        return ("A write of $Path did not finish, and the launcher cannot read $Of to tell which version of the copy to keep. " +
-            "Make $Of readable again, for example by closing the program that holds it, then start again.")
+    switch ($now.Reason) {
+        'Missing' {
+            return ("A write of $Path did not finish, and $Of, which it is a copy of, is missing, so the launcher cannot tell which version of the copy to keep. " +
+                "Put $Of back, for example from its copies below LauncherData\backups, then start again.")
+        }
+        'Folder' {
+            return ("A write of $Path did not finish, and a folder has the name of $Of, which it is a copy of, so the launcher cannot tell which version of the copy " +
+                "to keep. Move that folder away and put $Of back, then start again.")
+        }
+        'Unreadable' {
+            return ("A write of $Path did not finish, and the launcher cannot read $Of to tell which version of the copy to keep. " +
+                "Make $Of readable again, for example by closing the program that holds it, then start again.")
+        }
     }
     Get-PvmLeftoverProblem -Path $Path -Current $now.Bytes
 }

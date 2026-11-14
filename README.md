@@ -68,7 +68,8 @@ before the VM starts. The next start, in either hypervisor, stops at such a copy
 file or beside one of its copies below `LauncherData\backups`, and names the one step to take,
 such as removing the `.pvm-tmp` or renaming the `.pvm-old` back. The step keeps the version
 from before that write; only beside a copy whose `.pvm-old` repeats its file as it is now does
-it keep the copy, and when that file cannot be read, it asks for that first rather than guess.
+it keep the copy, and when that file is missing or cannot be read, it asks for the file first
+rather than guess.
 The next start then makes its change again. Bytes the launcher does not mean
 to change stay as they were, a byte order mark too.
 

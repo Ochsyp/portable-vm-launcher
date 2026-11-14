@@ -1293,6 +1293,41 @@ Describe 'A start' {
             }
         }
 
+        It 'asks, a dry run too, for the file of a copy with its version before beside it to be put back when <Case>' -ForEach @(
+            @{ Case = 'it is missing'; Folder = $false
+                Message = ('A write of <copy> did not finish, and <file>, which it is a copy of, is missing, so the launcher cannot tell which version of the copy to keep. ' +
+                    'Put <file> back, for example from its copies below LauncherData\backups, then start again. Nothing was started.')
+            }
+            @{ Case = 'a folder has its name'; Folder = $true
+                Message = ('A write of <copy> did not finish, and a folder has the name of <file>, which it is a copy of, so the launcher cannot tell which version of the copy ' +
+                    'to keep. Move that folder away and put <file> back, then start again. Nothing was started.')
+            }
+        ) {
+            $copy = Join-Path $script:stick.Backups 'VMware\stick.vmdk.previous.orig'
+            Write-TestFile -Path $copy -Text 'RW 1 FLAT "\\.\PortableVM-disarmed" 0'
+            Write-TestFile -Path "$copy.pvm-old" -Text 'RW 2 FLAT "\\.\PortableVM-disarmed" 0'
+            Remove-Item -LiteralPath $script:stick.VMwareDisk
+            if ($Folder) { $null = New-Item -ItemType Directory -Path $script:stick.VMwareDisk }
+            foreach ($dryRun in $false, $true) {
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun
+                $result.ExitCode | Should -Be 1
+                $result.Message | Should -BeExactly $Message.Replace('<copy>', $copy).Replace('<file>', $script:stick.VMwareDisk)
+            }
+        }
+
+        It 'keeps, a dry run too, the descriptor''s copy put back whose swap stopped between its renames, comparing the disarmed descriptor' {
+            $copy = Join-Path $script:stick.Backups 'VMware\stick.vmdk.previous.orig'
+            Write-TestFile -Path "$copy.pvm-old" -Text (Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', '\\.\PortableVM-disarmed')
+            Write-TestFile -Path "$copy.pvm-tmp" -Text (Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', '\\.\PortableVM-disarmed').Replace('3900000', '3800000')
+            $expected = ("A write of $copy did not finish. To set it right, rename stick.vmdk.previous.orig.pvm-tmp to stick.vmdk.previous.orig and remove " +
+                'stick.vmdk.previous.orig.pvm-old, which holds a copy of the file as it is now. Nothing was started.')
+            foreach ($dryRun in $false, $true) {
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun
+                $result.ExitCode | Should -Be 1
+                $result.Message | Should -BeExactly $expected
+            }
+        }
+
         It 'names the step, in a start and a dry run, when a write of the .vbox did not finish and left it missing, and starts nothing' {
             Rename-Item -LiteralPath $script:stick.Vbox -NewName 'Test VM.vbox.pvm-old'
             [IO.File]::WriteAllText("$($script:stick.Vbox).pvm-tmp", '<VirtualBox/>')
