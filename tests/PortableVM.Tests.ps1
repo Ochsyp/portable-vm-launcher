@@ -302,6 +302,198 @@ Describe 'Stick identity' {
     }
 }
 
+Describe 'Safe writes' {
+    BeforeAll {
+        # Return the names in the test folder, hidden ones included.
+        function Get-TestName { @(Get-ChildItem -LiteralPath $script:folder -Force -Name | Sort-Object) }
+
+        # Return the code a refusal of Write-PvmFile carries, or the exception's type for another
+        # error, from the script block $Write.
+        function Get-TestWriteError {
+            param([scriptblock]$Write)
+            try { $null = & $Write; '' }
+            catch {
+                if ($_.Exception.Data['PvmWrite']) { $_.Exception.Data['PvmWrite'] } else { $_.Exception.GetType().Name }
+            }
+        }
+    }
+
+    BeforeEach {
+        $script:folder = Join-Path $TestDrive 'writes'
+        if (Test-Path -LiteralPath $script:folder) {
+            Get-ChildItem -LiteralPath $script:folder -Force | ForEach-Object { $_.Attributes = 'Normal' }
+            Remove-Item -LiteralPath $script:folder -Recurse -Force
+        }
+        $null = [IO.Directory]::CreateDirectory($script:folder)
+        $script:file = Join-Path $script:folder 'stick.vmdk'
+        $script:oldBytes = [Text.Encoding]::ASCII.GetBytes("old`r`n")
+        $script:newBytes = [Text.Encoding]::ASCII.GetBytes("new text`r`n")
+    }
+
+    It 'create a new file with exactly the bytes, and leave nothing beside it' {
+        Write-PvmFile -Path $script:file -Bytes $script:newBytes | Should -BeExactly ''
+        Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($script:file)) -Right $script:newBytes | Should -BeTrue
+        Get-TestName | Should -BeExactly @('stick.vmdk')
+    }
+
+    It 'never replace an item in create mode: <Case>' -ForEach @(
+        @{ Case = 'a file'; Setup = { [IO.File]::WriteAllBytes($script:file, $script:oldBytes) } }
+        @{ Case = 'a folder'; Setup = { $null = [IO.Directory]::CreateDirectory($script:file) } }
+    ) {
+        & $Setup
+        Get-TestWriteError { Write-PvmFile -Path $script:file -Bytes $script:newBytes } | Should -BeExactly 'Exists'
+        Get-TestName | Should -BeExactly @('stick.vmdk')
+    }
+
+    It 'replace a file that still holds the bytes read, keeping its attributes and creation time, and leave nothing beside it' {
+        [IO.File]::WriteAllBytes($script:file, $script:oldBytes)
+        $created = [DateTime]::new(2020, 1, 2, 3, 4, 5, [DateTimeKind]::Utc)
+        [IO.File]::SetCreationTimeUtc($script:file, $created)
+        [IO.File]::SetAttributes($script:file, [IO.FileAttributes]'Hidden, Archive')
+        Write-PvmFile -Path $script:file -Bytes $script:newBytes -Expected $script:oldBytes | Should -BeExactly ''
+        Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($script:file)) -Right $script:newBytes | Should -BeTrue
+        [IO.File]::GetAttributes($script:file) -band [IO.FileAttributes]::Hidden | Should -Be ([IO.FileAttributes]::Hidden)
+        [IO.File]::GetCreationTimeUtc($script:file) | Should -Be $created
+        Get-TestName | Should -BeExactly @('stick.vmdk')
+    }
+
+    It 'replace an empty file and write an empty one' {
+        [IO.File]::WriteAllBytes($script:file, [byte[]]@())
+        Write-PvmFile -Path $script:file -Bytes $script:newBytes -Expected ([byte[]]@()) | Should -BeExactly ''
+        Write-PvmFile -Path $script:file -Bytes ([byte[]]@()) -Expected $script:newBytes | Should -BeExactly ''
+        [IO.File]::ReadAllBytes($script:file).Length | Should -Be 0
+    }
+
+    It 'refuse <Case>, and change nothing' -ForEach @(
+        @{ Case = 'a missing file in replace mode'; Code = 'Missing'; Names = @(); Setup = {} }
+        @{ Case = 'a folder in replace mode'; Code = 'NotAFile'; Names = @('stick.vmdk'); Setup = { $null = [IO.Directory]::CreateDirectory($script:file) } }
+        @{ Case = 'a read-only file'; Code = 'ReadOnly'; Names = @('stick.vmdk'); Setup = {
+                [IO.File]::WriteAllBytes($script:file, $script:oldBytes)
+                [IO.File]::SetAttributes($script:file, [IO.FileAttributes]::ReadOnly)
+            }
+        }
+        @{ Case = 'a file that changed since it was read'; Code = 'Changed'; Names = @('stick.vmdk'); Setup = {
+                [IO.File]::WriteAllBytes($script:file, [Text.Encoding]::ASCII.GetBytes("changed`r`n"))
+            }
+        }
+    ) {
+        & $Setup
+        $before = if ([IO.File]::Exists($script:file)) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:file)) } else { '' }
+        Get-TestWriteError { Write-PvmFile -Path $script:file -Bytes $script:newBytes -Expected $script:oldBytes } | Should -BeExactly $Code
+        Get-TestName | Should -BeExactly $Names
+        $after = if ([IO.File]::Exists($script:file)) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:file)) } else { '' }
+        $after | Should -BeExactly $before
+    }
+
+    It 'stop at a write that was cut off, with <Left> beside the file, and change nothing' -ForEach @(
+        @{ Left = 'stick.vmdk.pvm-tmp' }
+        @{ Left = 'stick.vmdk.pvm-old' }
+    ) {
+        [IO.File]::WriteAllBytes($script:file, $script:oldBytes)
+        [IO.File]::WriteAllBytes((Join-Path $script:folder $Left), $script:newBytes)
+        Get-TestWriteError { Write-PvmFile -Path $script:file -Bytes $script:newBytes -Expected $script:oldBytes } | Should -BeExactly 'Leftover'
+        Get-TestWriteError { Write-PvmFile -Path (Join-Path $script:folder 'other.vmdk') -Bytes $script:newBytes } | Should -BeExactly ''
+        Get-TestName | Should -BeExactly @(@('other.vmdk', 'stick.vmdk', $Left) | Sort-Object)
+        Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($script:file)) -Right $script:oldBytes | Should -BeTrue
+    }
+
+    It 'give its refusals a message that names no path, with the path in the details' {
+        $thrown = try { Write-PvmFile -Path $script:file -Bytes $script:newBytes -Expected $script:oldBytes } catch { $_ }
+        $thrown.Exception | Should -BeOfType ([System.Management.Automation.RuntimeException])
+        $thrown.Exception.InnerException | Should -BeNullOrEmpty
+        $thrown.Exception.Message.Contains($script:folder) | Should -BeFalse
+        "$($thrown.Exception.Data['PvmDetail'])".Contains($script:file) | Should -BeTrue
+    }
+
+    It 'leave the file and remove its own new copy when the swap fails' {
+        [IO.File]::WriteAllBytes($script:file, $script:oldBytes)
+        Mock -ModuleName PortableVM Switch-PvmFile { throw [IO.IOException]::new('The process cannot access the file.', [int]0x80070020) }
+        Get-TestWriteError { Write-PvmFile -Path $script:file -Bytes $script:newBytes -Expected $script:oldBytes } | Should -BeExactly 'IOException'
+        Get-TestName | Should -BeExactly @('stick.vmdk')
+        Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($script:file)) -Right $script:oldBytes | Should -BeTrue
+    }
+
+    It 'keep both versions when the swap leaves the file missing, for the step by hand' {
+        [IO.File]::WriteAllBytes($script:file, $script:oldBytes)
+        # Windows' error 1177: the file went to its old name, but the new copy did not take its place.
+        Mock -ModuleName PortableVM Switch-PvmFile { [IO.File]::Move($Path, $Old); throw [IO.IOException]::new('Unable to move the replacement file.', [int]0x80070499) }
+        Get-TestWriteError { Write-PvmFile -Path $script:file -Bytes $script:newBytes -Expected $script:oldBytes } | Should -BeExactly 'IOException'
+        Get-TestName | Should -BeExactly @('stick.vmdk.pvm-old', 'stick.vmdk.pvm-tmp')
+        Get-PvmLeftoverProblem -Path $script:file | Should -BeLike '*rename stick.vmdk.pvm-old back to stick.vmdk and remove stick.vmdk.pvm-tmp*'
+    }
+
+    It 'try three times, a second apart, to remove the old version, and return its name when it cannot, keeping the new one' {
+        [IO.File]::WriteAllBytes($script:file, $script:oldBytes)
+        Mock -ModuleName PortableVM Invoke-PvmSleep {}
+        Mock -ModuleName PortableVM Remove-PvmWriteCopy { throw [IO.IOException]::new('The process cannot access the file.', [int]0x80070020) } -ParameterFilter { $Path -like '*.pvm-old' }
+        Write-PvmFile -Path $script:file -Bytes $script:newBytes -Expected $script:oldBytes | Should -BeExactly "$script:file.pvm-old"
+        Should -Invoke -CommandName Remove-PvmWriteCopy -ModuleName PortableVM -Times 3 -Exactly
+        Should -Invoke -CommandName Invoke-PvmSleep -ModuleName PortableVM -Times 2 -Exactly -ParameterFilter { $Seconds -eq 1 }
+        Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($script:file)) -Right $script:newBytes | Should -BeTrue
+        Get-TestName | Should -BeExactly @('stick.vmdk', 'stick.vmdk.pvm-old')
+    }
+
+    It 'remove the old version at a later try when something held it for a moment' {
+        [IO.File]::WriteAllBytes($script:file, $script:oldBytes)
+        Mock -ModuleName PortableVM Invoke-PvmSleep {}
+        $script:tries = 0
+        Mock -ModuleName PortableVM Remove-PvmWriteCopy {
+            $script:tries++
+            if ($script:tries -eq 1) { throw [IO.IOException]::new('The process cannot access the file.', [int]0x80070020) }
+            [IO.File]::Delete($Path)
+        }
+        Write-PvmFile -Path $script:file -Bytes $script:newBytes -Expected $script:oldBytes | Should -BeExactly ''
+        Get-TestName | Should -BeExactly @('stick.vmdk')
+    }
+
+    It 'keep both versions when the new one does not read back from its place, with the step that puts the version before back' {
+        [IO.File]::WriteAllBytes($script:file, $script:oldBytes)
+        # The swap works, but something changes the file before it is read back.
+        Mock -ModuleName PortableVM Switch-PvmFile { [IO.File]::Replace($Temp, $Path, $Old); [IO.File]::AppendAllText($Path, 'changed') }
+        $thrown = try { Write-PvmFile -Path $script:file -Bytes $script:newBytes -Expected $script:oldBytes } catch { $_ }
+        $thrown.Exception.Data['PvmWrite'] | Should -BeExactly 'ReadBack'
+        "$($thrown.Exception.Data['PvmDetail'])" | Should -BeExactly ("$script:file did not read back as written after it took the file's place. A write of $script:file did not finish. " +
+            'To set it right, remove stick.vmdk, then rename stick.vmdk.pvm-old back to stick.vmdk, which holds the version before the write.')
+        Get-TestName | Should -BeExactly @('stick.vmdk', 'stick.vmdk.pvm-old')
+        Test-PvmSameContent -Left ([IO.File]::ReadAllBytes("$script:file.pvm-old")) -Right $script:oldBytes | Should -BeTrue
+    }
+
+    It 'name, beside a copy put back whose swap stopped between its renames, the step that keeps the copy put back' {
+        # The copy's name is free, its version before repeats the file as it is now, and the new copy is the one put back.
+        [IO.File]::WriteAllBytes("$script:file.pvm-old", $script:newBytes)
+        [IO.File]::WriteAllBytes("$script:file.pvm-tmp", $script:oldBytes)
+        Get-PvmLeftoverProblem -Path $script:file -Current $script:newBytes | Should -BeExactly ("A write of $script:file did not finish. To set it right, rename stick.vmdk.pvm-tmp " +
+            'to stick.vmdk and remove stick.vmdk.pvm-old, which holds a copy of the file as it is now.')
+        Get-PvmLeftoverProblem -Path $script:file -Current $script:oldBytes |
+            Should -BeExactly "A write of $script:file did not finish. To set it right, rename stick.vmdk.pvm-old back to stick.vmdk and remove stick.vmdk.pvm-tmp."
+    }
+
+    It 'name a step that needs no guess when the version before beside a copy cannot be read' {
+        [IO.File]::WriteAllBytes($script:file, $script:oldBytes)
+        [IO.File]::WriteAllBytes("$script:file.pvm-old", $script:newBytes)
+        $held = [IO.File]::Open("$script:file.pvm-old", 'Open', 'Read', 'None')
+        try { $problem = Get-PvmLeftoverProblem -Path $script:file -Current $script:newBytes }
+        finally { $held.Dispose() }
+        $problem | Should -BeExactly "A write of $script:file did not finish, and stick.vmdk.pvm-old beside it cannot be read. Close the program that holds it, then start again."
+    }
+
+    It 'name the one step that sets right a write that did not finish: <Case>' -ForEach @(
+        @{ Case = 'nothing left'; Names = @('stick.vmdk'); Step = '' }
+        @{ Case = 'a new copy beside the file'; Names = @('stick.vmdk', 'stick.vmdk.pvm-tmp'); Step = 'remove stick.vmdk.pvm-tmp; stick.vmdk itself is whole' }
+        @{ Case = 'the version before beside the file'; Names = @('stick.vmdk', 'stick.vmdk.pvm-old')
+            Step = 'remove stick.vmdk, then rename stick.vmdk.pvm-old back to stick.vmdk, which holds the version before the write'
+        }
+        @{ Case = 'both beside the file'; Names = @('stick.vmdk', 'stick.vmdk.pvm-old', 'stick.vmdk.pvm-tmp'); Step = 'remove stick.vmdk.pvm-tmp and stick.vmdk.pvm-old; stick.vmdk itself is whole' }
+        @{ Case = 'the version before alone'; Names = @('stick.vmdk.pvm-old'); Step = 'rename stick.vmdk.pvm-old back to stick.vmdk' }
+        @{ Case = 'the version before and a new copy'; Names = @('stick.vmdk.pvm-old', 'stick.vmdk.pvm-tmp'); Step = 'rename stick.vmdk.pvm-old back to stick.vmdk and remove stick.vmdk.pvm-tmp' }
+        @{ Case = 'a new copy alone'; Names = @('stick.vmdk.pvm-tmp'); Step = 'remove stick.vmdk.pvm-tmp, which may be incomplete' }
+    ) {
+        foreach ($name in $Names) { [IO.File]::WriteAllBytes((Join-Path $script:folder $name), $script:oldBytes) }
+        $problem = Get-PvmLeftoverProblem -Path $script:file
+        if ($Step) { $problem | Should -BeExactly "A write of $script:file did not finish. To set it right, $Step." } else { $problem | Should -BeExactly '' }
+    }
+}
+
 Describe 'Raw-disk descriptors' {
     It 'map the whole VM range when the Data partition is shown' {
         $layout = Get-PvmDiskLayout -Drive '\\.\PhysicalDrive3' -VmSectors 3900000 -DataPartitionStart 2500000 -HideData $false
@@ -323,21 +515,73 @@ Describe 'Raw-disk descriptors' {
                 '# The Disk Data Base', '#DDB', '', 'ddb.adapterType = "lsilogic"', '') -join "`r`n")
     }
 
-    It 'write all new extents where the first old one was, in any case, and keep LF' {
-        $text = "createType=`"x`"`nrw 10 flat `"a`" 0`nmiddle`nRDONLY 5 ZERO`nNOACCESS 2 FLAT `"b`" 0`nend"
+    It 'write all new extents where the old ones were, read in any case, and keep LF' {
+        $text = "createType=`"x`"`nrw 10 flat `"\\.\PhysicalDrive1`" 0`nRDONLY 5 ZERO`nNOACCESS 2 FLAT `"\\?\PhysicalDrive2`" 7`nddb.x = `"1`""
         $layout = @{ CreateType = 'fullDevice'; Extents = @('RW 17 FLAT "\\.\PhysicalDrive3" 0') }
         ConvertTo-PvmDescriptorText -Text $text -Layout $layout |
-            Should -BeExactly "createType=`"fullDevice`"`nRW 17 FLAT `"\\.\PhysicalDrive3`" 0`nmiddle`nend"
+            Should -BeExactly "createType=`"fullDevice`"`nRW 17 FLAT `"\\.\PhysicalDrive3`" 0`nddb.x = `"1`""
     }
 
-    It 'return nothing for a descriptor without a FLAT or ZERO extent, such as a sparse one' {
-        $layout = @{ CreateType = 'fullDevice'; Extents = @('RW 17 FLAT "\\.\PhysicalDrive3" 0') }
-        ConvertTo-PvmDescriptorText -Text "createType=`"monolithicSparse`"`nRW 17 SPARSE `"disk.vmdk`"" -Layout $layout | Should -BeNullOrEmpty
+    It 'keep the ending of each line, and give new lines the ending of the old extents' {
+        $text = "version=1`r`ncreateType=`"fullDevice`"`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n# end`n"
+        $layout = @{ CreateType = 'partitionedDevice'; Extents = @('RW 2 FLAT "\\.\PhysicalDrive3" 0', 'RW 7 ZERO') }
+        ConvertTo-PvmDescriptorText -Text $text -Layout $layout |
+            Should -BeExactly "version=1`r`ncreateType=`"partitionedDevice`"`nRW 2 FLAT `"\\.\PhysicalDrive3`" 0`r`nRW 7 ZERO`r`n# end`n"
     }
 
-    It 'add no createType line to a descriptor that has none (known issue, phase 5)' {
+    It 'refuse a descriptor the launcher does not understand: <Case>' -ForEach @(
+        @{ Case = 'no extent'; Text = "createType=`"fullDevice`""; Reason = 'no disk extent found' }
+        @{ Case = 'a sparse extent'; Text = "createType=`"monolithicSparse`"`nRW 17 SPARSE `"disk.vmdk`""; Reason = 'line 2 has a SPARSE extent, and the launcher rewrites only FLAT and ZERO extents' }
+        @{ Case = 'an extent line it cannot read'; Text = "RW 17 FLAT"; Reason = 'line 1 is an extent line the launcher cannot read' }
+        @{ Case = 'a FLAT extent that names a file'; Text = "RW 63 FLAT `"stick-pt.vmdk`" 0"; Reason = 'line 1 has a FLAT extent that names a file, not a raw disk' }
+        @{ Case = 'a FLAT extent without an offset'; Text = "RW 63 FLAT `"\\.\PhysicalDrive1`""; Reason = 'line 1 has a FLAT extent without an offset' }
+        @{ Case = 'a ZERO extent with a target'; Text = "RW 63 ZERO `"\\.\PhysicalDrive1`" 0"; Reason = 'line 1 has a ZERO extent that names a target' }
+        @{ Case = 'extents apart'; Text = "RW 9 FLAT `"\\.\PhysicalDrive1`" 0`n# between`nRW 2 ZERO"; Reason = 'line 3 is an extent apart from the others' }
+        @{ Case = 'createType twice'; Text = "createType=`"fullDevice`"`ncreateType=`"fullDevice`"`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0"; Reason = 'line 2 sets createType a second time' }
+        @{ Case = 'a line of no known kind'; Text = "RW 9 FLAT `"\\.\PhysicalDrive1`" 0`nthis is no descriptor"; Reason = 'line 2 is no descriptor line' }
+    ) {
         $layout = @{ CreateType = 'fullDevice'; Extents = @('RW 17 FLAT "\\.\PhysicalDrive3" 0') }
-        ConvertTo-PvmDescriptorText -Text "RW 9 FLAT `"x`" 0" -Layout $layout | Should -BeExactly 'RW 17 FLAT "\\.\PhysicalDrive3" 0'
+        $thrown = try { $null = ConvertTo-PvmDescriptorText -Text $Text -Layout $layout } catch { $_ }
+        $thrown.Exception | Should -BeOfType ([FormatException])
+        $thrown.Exception.Message | Should -BeExactly $Reason
+    }
+
+    It 'insert a createType line where a descriptor has none: <Case>' -ForEach @(
+        @{ Case = 'without a header'; Text = "RW 9 FLAT `"\\.\PhysicalDrive1`" 0"; New = "createType=`"fullDevice`"`nRW 17 FLAT `"\\.\PhysicalDrive3`" 0" }
+        @{ Case = 'after the last header line'
+            Text = "# Disk DescriptorFile`r`nversion=1`r`nCID=fffffffe`r`nparentCID=ffffffff`r`n`r`n# Extent description`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n"
+            New = "# Disk DescriptorFile`r`nversion=1`r`nCID=fffffffe`r`nparentCID=ffffffff`r`ncreateType=`"fullDevice`"`r`n`r`n# Extent description`r`nRW 17 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+        }
+    ) {
+        $layout = @{ CreateType = 'fullDevice'; Extents = @('RW 17 FLAT "\\.\PhysicalDrive3" 0') }
+        ConvertTo-PvmDescriptorText -Text $Text -Layout $layout | Should -BeExactly $New
+    }
+
+    It 'read descriptor bytes one character per byte, so a rewrite keeps every other byte' {
+        $bytes = [byte[]](@(0xEF, 0xBB, 0xBF) + [Text.Encoding]::ASCII.GetBytes("# caf") + @(0xE9) + [Text.Encoding]::ASCII.GetBytes("`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n"))
+        $text = ConvertFrom-PvmDescriptorData -Bytes $bytes
+        $text.Length | Should -Be $bytes.Length
+        $layout = @{ CreateType = 'fullDevice'; Extents = @('RW 9 FLAT "\\.\PhysicalDrive3" 0') }
+        $new = [Text.Encoding]::GetEncoding(28591).GetBytes((ConvertTo-PvmDescriptorText -Text $text -Layout $layout))
+        $expected = [byte[]](@(0xEF, 0xBB, 0xBF) + [Text.Encoding]::ASCII.GetBytes("# caf") + @(0xE9) +
+            [Text.Encoding]::ASCII.GetBytes("`r`ncreateType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"))
+        [Convert]::ToBase64String($new) | Should -BeExactly ([Convert]::ToBase64String($expected))
+    }
+
+    It 'refuse descriptor bytes that are no descriptor text: <Case>' -ForEach @(
+        @{ Case = 'a sparse disk'; Bytes = [byte[]][char[]]'KDMV....'; Reason = 'it is a disk image, not a descriptor' }
+        @{ Case = 'an old sparse disk'; Bytes = [byte[]][char[]]'COWD....'; Reason = 'it is a disk image, not a descriptor' }
+        @{ Case = 'UTF-16 text'; Bytes = [byte[]](0xFF, 0xFE, 0x52, 0x00); Reason = 'it is UTF-16 or UTF-32 text, not descriptor text' }
+        @{ Case = 'a NUL byte'; Bytes = [byte[]](0x52, 0x57, 0x00, 0x20); Reason = 'it holds a NUL byte, which descriptor text never has' }
+    ) {
+        $thrown = try { $null = ConvertFrom-PvmDescriptorData -Bytes $Bytes } catch { $_ }
+        $thrown.Exception | Should -BeOfType ([FormatException])
+        $thrown.Exception.Message | Should -BeExactly $Reason
+    }
+
+    It 'refuse descriptor bytes of 1 MiB or more' {
+        $thrown = try { $null = ConvertFrom-PvmDescriptorData -Bytes (New-Object byte[] 1MB) } catch { $_ }
+        $thrown.Exception.Message | Should -BeExactly 'it holds 1 MiB or more, which no descriptor does'
     }
 
     It 'are created for VMware with a fixed IDE disk database and CRLF' {
@@ -371,42 +615,256 @@ Describe 'Raw-disk descriptors' {
             Mock -ModuleName PortableVM Write-Host {}
             $script:descriptor = Join-Path $TestDrive 'descriptor\stick.vmdk'
             $script:backup = Join-Path $TestDrive 'descriptor\backups\VMware\stick.vmdk.orig'
+            $script:previous = Join-Path $TestDrive 'descriptor\backups\VMware\stick.vmdk.previous.orig'
             $script:log = Join-Path $TestDrive 'descriptor\launcher.log'
+            if (Test-Path -LiteralPath $script:descriptor) { [IO.File]::SetAttributes($script:descriptor, 'Normal') }
             Write-TestFile -Path $script:descriptor -Text (Get-TestDescriptorText)
             Remove-Item -LiteralPath (Join-Path $TestDrive 'descriptor\backups') -Recurse -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath "$script:descriptor.orig", $script:log, (Join-Path $TestDrive 'descriptor\new.vmdk') -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath "$script:descriptor.orig", "$script:descriptor.pvm-tmp", "$script:descriptor.pvm-old", $script:log, (Join-Path $TestDrive 'descriptor\new.vmdk') -ErrorAction SilentlyContinue
             $script:layout = @{ CreateType = 'fullDevice'; Extents = @('RW 3900000 FLAT "\\.\PhysicalDrive3" 0') }
+            $script:latin1 = [Text.Encoding]::GetEncoding(28591)
+            $script:copies = @{ BackupPath = $script:backup; PreviousPath = $script:previous; LogPath = $script:log }
         }
 
-        It 'are rewritten as UTF-8 without a BOM, with the first version kept, disarmed, at the backup path' {
-            Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout -BackupPath $script:backup -LogPath $script:log
+        It 'are rewritten byte for byte, with the first version and the version before the latest rewrite kept, disarmed' {
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout @script:copies
             [IO.File]::ReadAllText($script:descriptor) | Should -BeExactly ((Get-TestDescriptorText).Replace('PhysicalDrive1', 'PhysicalDrive3'))
-            [IO.File]::ReadAllBytes($script:descriptor)[0] | Should -Be ([byte][char]'#')
-            [IO.File]::ReadAllText($script:backup) | Should -BeExactly ((Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', '\\.\PortableVM-disarmed'))
-            "$script:descriptor.orig" | Should -Not -Exist
+            $disarmed = (Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', '\\.\PortableVM-disarmed')
+            [IO.File]::ReadAllText($script:backup) | Should -BeExactly $disarmed
+            [IO.File]::ReadAllText($script:previous) | Should -BeExactly $disarmed
             Get-TestLog -Path $script:log | Should -BeExactly @('stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0')
 
-            Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3900000 FLAT "\\.\PhysicalDrive4" 0') } -BackupPath $script:backup -LogPath $script:log
-            [IO.File]::ReadAllText($script:backup) | Should -BeExactly ((Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', '\\.\PortableVM-disarmed'))
+            # A change made between two rewrites is in the version before the latest one, not in the first.
+            [IO.File]::AppendAllText($script:descriptor, "ddb.comment = `"edited`"`r`n")
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3900000 FLAT "\\.\PhysicalDrive4" 0') } @script:copies
+            [IO.File]::ReadAllText($script:backup) | Should -BeExactly $disarmed
+            [IO.File]::ReadAllText($script:previous) | Should -BeExactly ($disarmed + "ddb.comment = `"edited`"`r`n")
+            @(Get-ChildItem -LiteralPath (Split-Path $script:descriptor) -Force -Name) | Should -BeExactly @('backups', 'launcher.log', 'stick.vmdk')
+        }
+
+        It 'keep every byte that does not change, a windows-1252 one and a byte order mark too' {
+            $bytes = [byte[]](@(0xEF, 0xBB, 0xBF) + $script:latin1.GetBytes("# caf$([char]0xE9)`r`ncreateType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n"))
+            [IO.File]::WriteAllBytes($script:descriptor, $bytes)
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 9 FLAT "\\.\PhysicalDrive3" 0') } @script:copies
+            $expected = [byte[]](@(0xEF, 0xBB, 0xBF) + $script:latin1.GetBytes("# caf$([char]0xE9)`r`ncreateType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"))
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:descriptor)) | Should -BeExactly ([Convert]::ToBase64String($expected))
         }
 
         It 'are left alone when they already point at the stick' {
-            Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3900000 FLAT "\\.\PhysicalDrive1" 0') } -BackupPath $script:backup -LogPath $script:log
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3900000 FLAT "\\.\PhysicalDrive1" 0') } @script:copies
             $script:backup | Should -Not -Exist
+            $script:previous | Should -Not -Exist
             Get-TestLog -Path $script:log | Should -BeExactly @('stick.vmdk already points at the stick')
         }
 
         It 'are only logged under -WhatIf' {
-            Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout -BackupPath $script:backup -LogPath $script:log -WhatIf
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout @script:copies -WhatIf
             [IO.File]::ReadAllText($script:descriptor) | Should -BeExactly (Get-TestDescriptorText)
             $script:backup | Should -Not -Exist
+            $script:previous | Should -Not -Exist
             Get-TestLog -Path $script:log | Should -BeExactly @('stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0')
         }
 
         It 'stop the launcher when they hold no extent' {
             Write-TestFile -Path $script:descriptor -Text 'createType="fullDevice"'
-            $message = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout -BackupPath $script:backup -LogPath $script:log } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $message = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout @script:copies } catch { Get-PvmStopMessage -ErrorRecord $_ }
             $message | Should -BeExactly "Unexpected content in $script:descriptor - no disk extent found. Nothing was started."
+        }
+
+        It 'stop the launcher, changing nothing, at <Case>' -ForEach @(
+            @{ Case = 'a sparse extent'; Setup = { Write-TestFile -Path $script:descriptor -Text "createType=`"monolithicSparse`"`nRW 17 SPARSE `"disk.vmdk`"" }
+                Message = 'Unexpected content in {0} - line 2 has a SPARSE extent, and the launcher rewrites only FLAT and ZERO extents. Nothing was started.'
+            }
+            @{ Case = 'a disk image'; Setup = { [IO.File]::WriteAllBytes($script:descriptor, [byte[]][char[]]'KDMV....') }
+                Message = 'Unexpected content in {0} - it is a disk image, not a descriptor. Nothing was started.'
+            }
+            @{ Case = 'a read-only descriptor'; Setup = { [IO.File]::SetAttributes($script:descriptor, 'ReadOnly') }
+                Message = '{0} is read-only, so the launcher does not rewrite it. Clear that attribute, then start again. Nothing was started.'
+            }
+            @{ Case = 'a cut-off write of it'; Setup = { [IO.File]::WriteAllText("$script:descriptor.pvm-tmp", 'x') }
+                Message = 'A write of {0} did not finish. To set it right, remove stick.vmdk.pvm-tmp; stick.vmdk itself is whole. Nothing was started.'
+            }
+            @{ Case = 'a cut-off write of a copy'; Setup = { $null = [IO.Directory]::CreateDirectory((Split-Path $script:previous)); [IO.File]::WriteAllText("$script:previous.pvm-tmp", 'x') }
+                Message = 'A write of {1} did not finish. To set it right, remove stick.vmdk.previous.orig.pvm-tmp, which may be incomplete. Nothing was started.'
+            }
+        ) {
+            & $Setup
+            $before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:descriptor))
+            $message = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout @script:copies } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $message | Should -BeExactly ($Message -f $script:descriptor, $script:previous)
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:descriptor)) | Should -BeExactly $before
+            $script:backup | Should -Not -Exist
+        }
+
+        It 'stop the launcher when the rewrite fails, naming the cause, with the file unchanged and the details logged' {
+            Mock -ModuleName PortableVM Switch-PvmFile { throw [IO.IOException]::new('The process cannot access the file because it is being used by another process.', [int]0x80070020) }
+            $thrown = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout @script:copies } catch { $_ }
+            Get-PvmStopMessage -ErrorRecord $thrown | Should -BeExactly "The launcher could not rewrite $script:descriptor, because it is open in another program; the file is unchanged. Nothing was started."
+            Get-PvmStopDetail -ErrorRecord $thrown | Should -BeLike '*being used by another process*'
+            [IO.File]::ReadAllText($script:descriptor) | Should -BeExactly (Get-TestDescriptorText)
+            @(Get-ChildItem -LiteralPath (Split-Path $script:descriptor) -Force -Name -Filter 'stick.vmdk*') | Should -BeExactly @('stick.vmdk')
+        }
+
+        It 'stop the launcher with the step that puts the version before back when the rewrite does not read back from its place' {
+            Mock -ModuleName PortableVM Switch-PvmFile { [IO.File]::Replace($Temp, $Path, $Old); [IO.File]::AppendAllText($Path, 'changed') }
+            $thrown = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout @script:copies } catch { $_ }
+            Get-PvmStopMessage -ErrorRecord $thrown | Should -BeExactly ("A write of $script:descriptor did not finish. To set it right, remove stick.vmdk, then rename stick.vmdk.pvm-old back to stick.vmdk, " +
+                'which holds the version before the write. Nothing was started.')
+            Get-PvmStopDetail -ErrorRecord $thrown | Should -BeLike "$script:descriptor did not read back as written after it took the file's place.*"
+            [IO.File]::ReadAllText("$script:descriptor.pvm-old") | Should -BeExactly (Get-TestDescriptorText)
+        }
+
+        It 'stop the launcher at a descriptor that another program changed after it was read, and leave that program''s version' {
+            $change = Get-PvmDescriptorChange -Path $script:descriptor -Layout $script:layout @script:copies
+            Write-TestFile -Path $script:descriptor -Text 'written by another program'
+            $message = try { Save-PvmFileChange -Change $change -LogPath $script:log } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $message | Should -BeExactly ("The launcher could not rewrite $script:descriptor, because another program changed it after the launcher read it; " +
+                'the launcher left it as that program wrote it. Close that program, then start again. Nothing was started.')
+            [IO.File]::ReadAllText($script:descriptor) | Should -BeExactly 'written by another program'
+        }
+
+        It 'keep the copy of the version before the latest rewrite as it was when a later rewrite fails' {
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout @script:copies
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3800000 FLAT "\\.\PhysicalDrive3" 0') } @script:copies
+            $kept = [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:previous))
+            # Only the descriptor's own swap fails; the copy's goes through.
+            Mock -ModuleName PortableVM Switch-PvmFile { [IO.File]::Replace($Temp, $Path, $Old) }
+            Mock -ModuleName PortableVM Switch-PvmFile { throw [IO.IOException]::new('The process cannot access the file because it is being used by another process.', [int]0x80070020) } -ParameterFilter {
+                $Path -eq $script:descriptor
+            }
+            $message = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3700000 FLAT "\\.\PhysicalDrive3" 0') } @script:copies } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $message | Should -BeExactly "The launcher could not rewrite $script:descriptor, because it is open in another program; the file is unchanged. Nothing was started."
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:previous)) | Should -BeExactly $kept
+            @(Get-ChildItem -LiteralPath (Split-Path $script:previous) -Force -Name | Sort-Object) | Should -BeExactly @('stick.vmdk.orig', 'stick.vmdk.previous.orig')
+        }
+
+        It 'stop the launcher, with the step that puts the version before back, when the old version cannot be removed after the rewrite' {
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3800000 FLAT "\\.\PhysicalDrive3" 0') } @script:copies
+            $kept = [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:previous))
+            Mock -ModuleName PortableVM Invoke-PvmSleep {}
+            Mock -ModuleName PortableVM Remove-PvmWriteCopy { [IO.File]::Delete($Path) }
+            Mock -ModuleName PortableVM Remove-PvmWriteCopy { throw [IO.IOException]::new('The process cannot access the file.', [int]0x80070020) } -ParameterFilter { $Path -eq "$script:descriptor.pvm-old" }
+            $stop = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3700000 FLAT "\\.\PhysicalDrive3" 0') } @script:copies } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $stop | Should -BeExactly ("A write of $script:descriptor did not finish. To set it right, remove stick.vmdk, then rename stick.vmdk.pvm-old back to stick.vmdk, " +
+                'which holds the version before the write. Nothing was started.')
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:previous)) | Should -BeExactly $kept
+        }
+
+        It 'stop the launcher before the rewrite, with the step for the copy, when the copy''s own old version cannot be removed' {
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3800000 FLAT "\\.\PhysicalDrive3" 0') } @script:copies
+            $before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:descriptor))
+            Mock -ModuleName PortableVM Invoke-PvmSleep {}
+            Mock -ModuleName PortableVM Remove-PvmWriteCopy { [IO.File]::Delete($Path) }
+            Mock -ModuleName PortableVM Remove-PvmWriteCopy { throw [IO.IOException]::new('The process cannot access the file.', [int]0x80070020) } -ParameterFilter { $Path -eq "$script:previous.pvm-old" }
+            $stop = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3700000 FLAT "\\.\PhysicalDrive3" 0') } @script:copies } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $stop | Should -BeExactly ("A write of $script:previous did not finish. To set it right, remove stick.vmdk.previous.orig, then rename stick.vmdk.previous.orig.pvm-old back to " +
+                'stick.vmdk.previous.orig, which holds the version before the write. Nothing was started.')
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:descriptor)) | Should -BeExactly $before
+        }
+
+        It 'name, after the file''s step, the step that keeps the copy put back when its old version could not be removed either' {
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3800000 FLAT "\\.\PhysicalDrive3" 0') } @script:copies
+            $kept = [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:previous))
+            Mock -ModuleName PortableVM Invoke-PvmSleep {}
+            $script:held = $false
+            Mock -ModuleName PortableVM Remove-PvmWriteCopy { [IO.File]::Delete($Path) }
+            Mock -ModuleName PortableVM Remove-PvmWriteCopy { $script:held = $true; throw [IO.IOException]::new('The process cannot access the file.', [int]0x80070020) } -ParameterFilter {
+                $Path -eq "$script:descriptor.pvm-old"
+            }
+            # The copy's own old version goes at the copy's write, but not after the copy is put back.
+            Mock -ModuleName PortableVM Remove-PvmWriteCopy {
+                if ($script:held) { throw [IO.IOException]::new('The process cannot access the file.', [int]0x80070020) }
+                [IO.File]::Delete($Path)
+            } -ParameterFilter { $Path -eq "$script:previous.pvm-old" }
+            $layout = @{ CreateType = 'fullDevice'; Extents = @('RW 3700000 FLAT "\\.\PhysicalDrive3" 0') }
+            $stop = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout $layout @script:copies } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $stop | Should -BeLike "A write of $script:descriptor did not finish.*"
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:previous)) | Should -BeExactly $kept
+            # The owner takes the file's step.
+            [IO.File]::Delete($script:descriptor)
+            [IO.File]::Move("$script:descriptor.pvm-old", $script:descriptor)
+            $stop = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout $layout @script:copies } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $stop | Should -BeExactly ("A write of $script:previous did not finish. To set it right, remove stick.vmdk.previous.orig.pvm-old, which holds a copy of the file " +
+                'as it is now; stick.vmdk.previous.orig itself is whole. Nothing was started.')
+        }
+
+        It 'stop the launcher, naming both, when the old version cannot be removed and the file is gone too' {
+            Mock -ModuleName PortableVM Invoke-PvmSleep {}
+            Mock -ModuleName PortableVM Remove-PvmWriteCopy { [IO.File]::Delete($Path) }
+            # As when the stick is pulled during the tries.
+            Mock -ModuleName PortableVM Remove-PvmWriteCopy { [IO.File]::Delete($script:descriptor); [IO.File]::Delete($Path); throw [IO.IOException]::new('The device is not ready.', [int]0x80070015) } -ParameterFilter {
+                $Path -eq "$script:descriptor.pvm-old"
+            }
+            $stop = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout @script:copies } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $stop | Should -BeExactly "The launcher could not remove $script:descriptor.pvm-old after it rewrote $script:descriptor. Check both, then start again. Nothing was started."
+        }
+
+        It 'stop the launcher with the cause when the file cannot be read any more after it was prepared' {
+            $change = Get-PvmDescriptorChange -Path $script:descriptor -Layout $script:layout @script:copies
+            $held = [IO.File]::Open($script:descriptor, 'Open', 'Read', 'None')
+            try { $stop = try { Save-PvmFileChange -Change $change -LogPath $script:log } catch { Get-PvmStopMessage -ErrorRecord $_ } }
+            finally { $held.Dispose() }
+            $stop | Should -BeExactly ("The launcher could not rewrite $script:descriptor, because it is open in another program; check the file against its copies " +
+                'below LauncherData\backups. Nothing was started.')
+            [IO.File]::ReadAllText($script:descriptor) | Should -BeExactly (Get-TestDescriptorText)
+        }
+
+        It 'stop the launcher, naming the first copy, when it cannot be written' {
+            $null = [IO.Directory]::CreateDirectory($script:backup)
+            $stop = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout @script:copies } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $stop | Should -BeExactly "The launcher could not write the copy $script:backup, because an item of that name is in the way, so it did not rewrite $script:descriptor. Nothing was started."
+        }
+
+        It 'stop the launcher, a dry run too, at a read-only copy of the version before the latest rewrite, naming that copy' {
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3800000 FLAT "\\.\PhysicalDrive3" 0') } @script:copies
+            [IO.File]::SetAttributes($script:previous, 'ReadOnly')
+            try {
+                foreach ($whatIf in $true, $false) {
+                    $stop = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3700000 FLAT "\\.\PhysicalDrive3" 0') } @script:copies -WhatIf:$whatIf } catch { Get-PvmStopMessage -ErrorRecord $_ }
+                    $stop | Should -BeExactly "$script:previous is read-only, so the launcher does not rewrite it. Clear that attribute, then start again. Nothing was started."
+                }
+            } finally {
+                [IO.File]::SetAttributes($script:previous, 'Normal')
+            }
+        }
+
+        It 'stop the launcher, naming the copy, when a copy cannot be written, and leave the file as it was' {
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3800000 FLAT "\\.\PhysicalDrive3" 0') } @script:copies
+            $before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:descriptor))
+            Mock -ModuleName PortableVM Switch-PvmFile { [IO.File]::Replace($Temp, $Path, $Old) }
+            Mock -ModuleName PortableVM Switch-PvmFile { throw [IO.IOException]::new('The process cannot access the file because it is being used by another process.', [int]0x80070020) } -ParameterFilter {
+                $Path -eq $script:previous
+            }
+            $stop = try { Set-PvmDiskDescriptor -Path $script:descriptor -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3700000 FLAT "\\.\PhysicalDrive3" 0') } @script:copies } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $stop | Should -BeExactly "The launcher could not write the copy $script:previous, because it is open in another program, so it did not rewrite $script:descriptor. Nothing was started."
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:descriptor)) | Should -BeExactly $before
+        }
+
+        It 'stop the launcher with the cause or the step also when the path holds braces: <Case>' -ForEach @(
+            @{ Case = 'a failed swap'; Swap = { throw [IO.IOException]::new('The process cannot access the file because it is being used by another process.', [int]0x80070020) }
+                Message = 'The launcher could not rewrite <path>, because it is open in another program; the file is unchanged. Nothing was started.'
+            }
+            @{ Case = 'a swap that left the file missing'; Swap = { [IO.File]::Move($Path, $Old); throw [IO.IOException]::new('Unable to move the replacement file.', [int]0x80070499) }
+                Message = 'A write of <path> did not finish. To set it right, rename stick.vmdk.pvm-old back to stick.vmdk and remove stick.vmdk.pvm-tmp. Nothing was started.'
+            }
+        ) {
+            $folder = Join-Path $TestDrive "braces {$([guid]::NewGuid().ToString('N').Substring(0, 8))}"
+            $path = Join-Path $folder 'stick.vmdk'
+            Write-TestFile -Path $path -Text (Get-TestDescriptorText)
+            Mock -ModuleName PortableVM Switch-PvmFile $Swap
+            $copies = @{ BackupPath = (Join-Path $folder 'backups\stick.vmdk.orig'); PreviousPath = (Join-Path $folder 'backups\stick.vmdk.previous.orig'); LogPath = $script:log }
+            # Not $message: variable names ignore case, so it would be the row's Message.
+            $stop = try { Set-PvmDiskDescriptor -Path $path -Layout $script:layout @copies } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $stop | Should -BeExactly $Message.Replace('<path>', $path)
+        }
+
+        It 'are not created in a missing folder, which the stop names as the cause, under -WhatIf too' {
+            $new = Join-Path $TestDrive 'descriptor\missing\new.vmdk'
+            foreach ($whatIf in $true, $false) {
+                $message = try { New-PvmVMwareDescriptor -Path $new -Layout $script:layout -LogPath $script:log -WhatIf:$whatIf } catch { Get-PvmStopMessage -ErrorRecord $_ }
+                $message | Should -BeExactly "The launcher could not create $new, because its folder is missing. Nothing was started."
+            }
+            Split-Path $new | Should -Not -Exist
         }
 
         It 'are created for VMware as ASCII without a BOM, but not under -WhatIf' {
@@ -421,6 +879,43 @@ Describe 'Raw-disk descriptors' {
     }
 }
 
+Describe 'Backups of rewritten files' {
+    BeforeEach {
+        $script:folder = Join-Path $TestDrive 'copies'
+        Remove-Item -LiteralPath $script:folder -Recurse -Force -ErrorAction SilentlyContinue
+        $script:first = Join-Path $script:folder 'backups\VMware\stick.vmdk.orig'
+        $script:previous = Join-Path $script:folder 'backups\VMware\stick.vmdk.previous.orig'
+        $script:latin1 = [Text.Encoding]::GetEncoding(28591)
+        $script:one = $script:latin1.GetBytes("RW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n")
+        $script:two = $script:latin1.GetBytes("RW 9 FLAT `"\\.\PhysicalDrive2`" 0`r`n")
+        $script:disarmed = $script:latin1.GetBytes("RW 9 FLAT `"\\.\PortableVM-disarmed`" 0`r`n")
+    }
+
+    It 'keep the first version once, disarmed, creating its folder, and never replace it' {
+        Save-PvmFirstCopy -Bytes $script:one -BackupPath $script:first -Disarm
+        Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($script:first)) -Right $script:disarmed | Should -BeTrue
+        Save-PvmFirstCopy -Bytes ([Text.Encoding]::ASCII.GetBytes('other')) -BackupPath $script:first -Disarm
+        Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($script:first)) -Right $script:disarmed | Should -BeTrue
+    }
+
+    It 'keep the version before the latest rewrite, replaced at each rewrite' {
+        Save-PvmPreviousCopy -Bytes $script:one -BackupPath $script:previous
+        Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($script:previous)) -Right $script:one | Should -BeTrue
+        Save-PvmPreviousCopy -Bytes $script:two -BackupPath $script:previous
+        Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($script:previous)) -Right $script:two | Should -BeTrue
+        @(Get-ChildItem -LiteralPath (Split-Path $script:previous) -Force -Name) | Should -BeExactly @('stick.vmdk.previous.orig')
+    }
+
+    It 'leave the previous version alone when it holds the bytes already, and disarm a descriptor''s' {
+        Save-PvmPreviousCopy -Bytes $script:one -BackupPath $script:previous -Disarm
+        $written = [IO.File]::GetLastWriteTimeUtc($script:previous)
+        [IO.File]::SetLastWriteTimeUtc($script:previous, $written.AddDays(-1))
+        Save-PvmPreviousCopy -Bytes $script:two -BackupPath $script:previous -Disarm
+        Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($script:previous)) -Right $script:disarmed | Should -BeTrue
+        [IO.File]::GetLastWriteTimeUtc($script:previous) | Should -Be $written.AddDays(-1)
+    }
+}
+
 Describe 'Drive letters' {
     It 'move every quoted path below the root to the new letter, for both separators' {
         $text = '<a src="Q:\Portable\Stick\VirtualBox\x.vbox"/><b location="Q:/Portable/Stick/VirtualBox/x.vmdk"/><c path="Q:\Other\x"/>'
@@ -428,16 +923,38 @@ Describe 'Drive letters' {
             Should -BeExactly '<a src="E:\Portable\Stick\VirtualBox\x.vbox"/><b location="E:/Portable/Stick/VirtualBox/x.vmdk"/><c path="Q:\Other\x"/>'
     }
 
-    It 'change nothing when the root is a drive root (known issue, phase 5)' {
-        ConvertTo-PvmDriveLetterText -Text '<a src="Q:\VirtualBox\x.vbox"/>' -Root 'D:\' -Letter 'E' | Should -BeExactly '<a src="Q:\VirtualBox\x.vbox"/>'
+    It 'move, at a drive root, only the paths on the stick''s old letter, which the paths to the VM''s own files show' {
+        $text = '<a src="Q:\VirtualBox\x.vbox"/><b src="C:\ISOs\y.iso"/><c src="q:/Other/z"/><d src="C:\VirtualBox\g.iso"/>'
+        ConvertTo-PvmDriveLetterText -Text $text -Root 'D:\' -Letter 'E' -Known 'D:\virtualbox\X.vbox' |
+            Should -BeExactly '<a src="E:\VirtualBox\x.vbox"/><b src="C:\ISOs\y.iso"/><c src="E:/Other/z"/><d src="C:\VirtualBox\g.iso"/>'
     }
 
-    It 'change nothing when the case of the folders differs (known issue, phase 5)' {
-        ConvertTo-PvmDriveLetterText -Text '<a src="Q:\portable\stick\x.vbox"/>' -Root 'D:\Portable\Stick' -Letter 'E' | Should -BeExactly '<a src="Q:\portable\stick\x.vbox"/>'
+    It 'move nothing at a drive root when no path to the VM''s own files shows the old letter' {
+        $text = '<a src="Q:\VirtualBox\x.vbox"/><b location="disk.vmdk"/>'
+        ConvertTo-PvmDriveLetterText -Text $text -Root 'D:\' -Letter 'E' -Known 'D:\VirtualBox\Test VM\disk.vmdk' | Should -BeExactly $text
+        ConvertTo-PvmDriveLetterText -Text $text -Root 'D:\' -Letter 'E' | Should -BeExactly $text
     }
 
-    It 'read a $ in a folder name as a substitution (known issue, phase 5)' {
-        ConvertTo-PvmDriveLetterText -Text '<a src="Q:\A$&B\x"/>' -Root 'D:\A$&B' -Letter 'E' | Should -BeExactly '<a src="E:\A"Q:\A$&B\B\x"/>'
+    It 'match the folders in any case and keep their spelling' {
+        ConvertTo-PvmDriveLetterText -Text '<a src="Q:\portable\stick\x.vbox"/>' -Root 'D:\Portable\Stick' -Letter 'E' | Should -BeExactly '<a src="E:\portable\stick\x.vbox"/>'
+    }
+
+    It 'take a $ in a folder name literally, and match an & only as XML writes it' {
+        ConvertTo-PvmDriveLetterText -Text '<a src="Q:\A$&amp;B\x"/>' -Root 'D:\A$&B' -Letter 'E' | Should -BeExactly '<a src="E:\A$&amp;B\x"/>'
+        # A folder named x&amp;y is written as x&amp;amp;y, so a host folder x&y stays.
+        $text = '<a src="Q:\x&amp;y\host.iso"/><b src="Q:\x&amp;amp;y\stick.vmdk"/>'
+        ConvertTo-PvmDriveLetterText -Text $text -Root 'D:\x&amp;y' -Letter 'E' | Should -BeExactly '<a src="Q:\x&amp;y\host.iso"/><b src="E:\x&amp;amp;y\stick.vmdk"/>'
+    }
+
+    It 'learn the old letter at a drive root from a path to the VM''s own files with an &, as XML writes it' {
+        $text = '<MachineEntry src="G:\VMs &amp; Co\VM.vbox"/><Image location="G:\ISOs\a.iso"/><Image location="C:\ISOs\b.iso"/>'
+        ConvertTo-PvmDriveLetterText -Text $text -Root 'E:\' -Letter 'F' -Known 'E:\VMs & Co\VM.vbox' |
+            Should -BeExactly '<MachineEntry src="F:\VMs &amp; Co\VM.vbox"/><Image location="F:\ISOs\a.iso"/><Image location="C:\ISOs\b.iso"/>'
+    }
+
+    It 'leave a folder whose name only starts like the stick folder' {
+        $text = '<a src="Q:\Portable\StickOld\x"/><b src="Q:\Portable\Stick"/>'
+        ConvertTo-PvmDriveLetterText -Text $text -Root 'D:\Portable\Stick' -Letter 'E' | Should -BeExactly $text
     }
 
     Context 'in a file' {
@@ -445,21 +962,75 @@ Describe 'Drive letters' {
             Mock -ModuleName PortableVM Write-Host {}
             $script:file = Join-Path $TestDrive 'letters\VirtualBox.xml'
             $script:backup = Join-Path $TestDrive 'letters\backups\VirtualBox\VirtualBox.xml.launcher-backup'
+            $script:previous = Join-Path $TestDrive 'letters\backups\VirtualBox\VirtualBox.xml.previous.launcher-backup'
             $script:log = Join-Path $TestDrive 'letters\launcher.log'
             Write-TestFile -Path $script:file -Text '<e src="Q:\Portable\Stick\x.vbox"/>'
             Remove-Item -LiteralPath (Join-Path $TestDrive 'letters\backups') -Recurse -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $script:log -ErrorAction SilentlyContinue
-            $script:change = @{ Path = $script:file; Root = 'D:\Portable\Stick'; BackupPath = $script:backup; LogPath = $script:log }
+            $script:change = @{ Path = $script:file; Root = 'D:\Portable\Stick'; BackupPath = $script:backup; PreviousPath = $script:previous; LogPath = $script:log }
         }
 
-        It 'are rewritten, with a copy of the first version kept at the backup path' {
+        It 'are rewritten, with copies of the first version and of the version before the latest rewrite' {
             Set-PvmDriveLetterInFile @script:change -Letter 'E'
             [IO.File]::ReadAllText($script:file) | Should -BeExactly '<e src="E:\Portable\Stick\x.vbox"/>'
             Set-PvmDriveLetterInFile @script:change -Letter 'F'
             [IO.File]::ReadAllText($script:file) | Should -BeExactly '<e src="F:\Portable\Stick\x.vbox"/>'
             [IO.File]::ReadAllText($script:backup) | Should -BeExactly '<e src="Q:\Portable\Stick\x.vbox"/>'
+            [IO.File]::ReadAllText($script:previous) | Should -BeExactly '<e src="E:\Portable\Stick\x.vbox"/>'
             "$script:file.launcher-backup" | Should -Not -Exist
             Get-TestLog -Path $script:log | Should -BeExactly @('VirtualBox.xml: paths moved to drive E:', 'VirtualBox.xml: paths moved to drive F:')
+        }
+
+        It 'keep a byte order mark and every byte but the letter' {
+            $utf8 = New-Object System.Text.UTF8Encoding $false
+            $bytes = [byte[]](@(0xEF, 0xBB, 0xBF) + $utf8.GetBytes("<e src=`"Q:\Portable\Stick\caf$([char]0xE9).vbox`"/>`r`n"))
+            [IO.File]::WriteAllBytes($script:file, $bytes)
+            Set-PvmDriveLetterInFile @script:change -Letter 'E'
+            $expected = [byte[]](@(0xEF, 0xBB, 0xBF) + $utf8.GetBytes("<e src=`"E:\Portable\Stick\caf$([char]0xE9).vbox`"/>`r`n"))
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:file)) | Should -BeExactly ([Convert]::ToBase64String($expected))
+        }
+
+        It 'stop the launcher, changing nothing, at <Case>' -ForEach @(
+            @{ Case = 'a read-only file'; Setup = { [IO.File]::SetAttributes($script:file, 'ReadOnly') }
+                Message = '<file> is read-only, so the launcher does not rewrite it. Clear that attribute, then start again. Nothing was started.'
+            }
+            @{ Case = 'a write of its copy that did not finish'; Setup = { $null = [IO.Directory]::CreateDirectory((Split-Path $script:previous)); [IO.File]::WriteAllText("$script:previous.pvm-tmp", 'x') }
+                Message = 'A write of <copy> did not finish. To set it right, remove VirtualBox.xml.previous.launcher-backup.pvm-tmp, which may be incomplete. Nothing was started.'
+            }
+            @{ Case = 'a read-only copy of the version before the latest rewrite'; Setup = {
+                    Write-TestFile -Path $script:previous -Text '<e src="P:\Portable\Stick\x.vbox"/>'
+                    [IO.File]::SetAttributes($script:previous, 'ReadOnly')
+                }
+                Message = '<copy> is read-only, so the launcher does not rewrite it. Clear that attribute, then start again. Nothing was started.'
+            }
+        ) {
+            & $Setup
+            try {
+                $before = [IO.File]::ReadAllText($script:file)
+                foreach ($whatIf in $true, $false) {
+                    $stop = try { Set-PvmDriveLetterInFile @script:change -Letter 'E' -WhatIf:$whatIf } catch { Get-PvmStopMessage -ErrorRecord $_ }
+                    $stop | Should -BeExactly $Message.Replace('<file>', $script:file).Replace('<copy>', $script:previous)
+                }
+                [IO.File]::ReadAllText($script:file) | Should -BeExactly $before
+            } finally {
+                [IO.File]::SetAttributes($script:file, 'Normal')
+                if ([IO.File]::Exists($script:previous)) { [IO.File]::SetAttributes($script:previous, 'Normal') }
+                Remove-Item -LiteralPath "$script:previous.pvm-tmp" -ErrorAction SilentlyContinue
+            }
+        }
+
+        It 'stop the launcher at a file that is not UTF-8, and change nothing' {
+            $bytes = [byte[]]([Text.Encoding]::ASCII.GetBytes('<e src="Q:\Portable\Stick\caf') + @(0xE9) + [Text.Encoding]::ASCII.GetBytes('.vbox"/>'))
+            [IO.File]::WriteAllBytes($script:file, $bytes)
+            $message = try { Set-PvmDriveLetterInFile @script:change -Letter 'E' } catch { Get-PvmStopMessage -ErrorRecord $_ }
+            $message | Should -BeExactly "$script:file is not UTF-8 text, as VirtualBox writes it, so the launcher does not change its drive letters. Nothing was started."
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:file)) | Should -BeExactly ([Convert]::ToBase64String($bytes))
+        }
+
+        It 'move the stick''s old letter at a drive root, which a path to the VM''s own file shows' {
+            Write-TestFile -Path $script:file -Text '<e src="Q:\VirtualBox\x.vbox"/><f src="C:\ISOs\y.iso"/>'
+            Set-PvmDriveLetterInFile -Path $script:file -Root 'D:\' -Known 'D:\VirtualBox\x.vbox' -BackupPath $script:backup -PreviousPath $script:previous -LogPath $script:log -Letter 'E'
+            [IO.File]::ReadAllText($script:file) | Should -BeExactly '<e src="E:\VirtualBox\x.vbox"/><f src="C:\ISOs\y.iso"/>'
         }
 
         It 'are left alone when the letter already fits, also in another case' {
@@ -688,6 +1259,146 @@ Describe 'A start' {
             Get-TestLog -Path $script:stick.Log | Should -Contain 'Creating stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'
         }
 
+        It 'stops, rather than create a descriptor, when a rewrite of it was cut off, and starts nothing' {
+            Rename-Item -LiteralPath $script:stick.VMwareDisk -NewName 'stick.vmdk.pvm-old'
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly "A write of $($script:stick.VMwareDisk) did not finish. To set it right, rename stick.vmdk.pvm-old back to stick.vmdk. Nothing was started."
+            $script:stick.VMwareDisk | Should -Not -Exist
+            Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+        }
+
+        It 'stops without guessing, a dry run too, when <Case>' -ForEach @(
+            @{ Case = 'the version before beside a copy cannot be read'; Held = 'old'
+                Message = 'A write of <copy> did not finish, and Test VM.vbox.previous.launcher-backup.pvm-old beside it cannot be read. Close the program that holds it, then start again. Nothing was started.'
+            }
+            @{ Case = 'the file of a copy with its version before beside it cannot be read'; Held = 'file'
+                Message = ('A write of <copy> did not finish, and the launcher cannot read <vbox> to tell which version of the copy to keep. Make <vbox> readable again, ' +
+                    'for example by closing the program that holds it, then start again. Nothing was started.')
+            }
+        ) {
+            $copy = Join-Path $script:stick.Backups 'VirtualBox\Test VM\Test VM.vbox.previous.launcher-backup'
+            Write-TestFile -Path $copy -Text '<VirtualBox old="1"/>'
+            [IO.File]::Copy($script:stick.Vbox, "$copy.pvm-old")
+            $target = if ($Held -eq 'old') { "$copy.pvm-old" } else { $script:stick.Vbox }
+            $handle = [IO.File]::Open($target, 'Open', 'Read', 'None')
+            try {
+                foreach ($dryRun in $false, $true) {
+                    $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun
+                    $result.ExitCode | Should -Be 1
+                    $result.Message | Should -BeExactly $Message.Replace('<copy>', $copy).Replace('<vbox>', $script:stick.Vbox)
+                }
+            } finally {
+                $handle.Dispose()
+            }
+        }
+
+        It 'asks, a dry run too, for the file of a copy with its version before beside it to be put back when <Case>' -ForEach @(
+            @{ Case = 'it is missing'; Folder = $false
+                Message = ('A write of <copy> did not finish, and <file>, which it is a copy of, is missing, so the launcher cannot tell which version of the copy to keep. ' +
+                    'Put <file> back, for example from its copies below LauncherData\backups, then start again. Nothing was started.')
+            }
+            @{ Case = 'a folder has its name'; Folder = $true
+                Message = ('A write of <copy> did not finish, and a folder has the name of <file>, which it is a copy of, so the launcher cannot tell which version of the copy ' +
+                    'to keep. Move that folder away and put <file> back, then start again. Nothing was started.')
+            }
+        ) {
+            $copy = Join-Path $script:stick.Backups 'VMware\stick.vmdk.previous.orig'
+            Write-TestFile -Path $copy -Text 'RW 1 FLAT "\\.\PortableVM-disarmed" 0'
+            Write-TestFile -Path "$copy.pvm-old" -Text 'RW 2 FLAT "\\.\PortableVM-disarmed" 0'
+            Remove-Item -LiteralPath $script:stick.VMwareDisk
+            if ($Folder) { $null = New-Item -ItemType Directory -Path $script:stick.VMwareDisk }
+            foreach ($dryRun in $false, $true) {
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun
+                $result.ExitCode | Should -Be 1
+                $result.Message | Should -BeExactly $Message.Replace('<copy>', $copy).Replace('<file>', $script:stick.VMwareDisk)
+            }
+        }
+
+        It 'names, a dry run too, the step for a copy whose step needs no look at its missing file' {
+            $copy = Join-Path $script:stick.Backups 'VMware\stick.vmdk.previous.orig'
+            Write-TestFile -Path "$copy.pvm-old" -Text 'RW 2 FLAT "\\.\PortableVM-disarmed" 0'
+            Remove-Item -LiteralPath $script:stick.VMwareDisk
+            $expected = "A write of $copy did not finish. To set it right, rename stick.vmdk.previous.orig.pvm-old back to stick.vmdk.previous.orig. Nothing was started."
+            foreach ($dryRun in $false, $true) {
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun
+                $result.ExitCode | Should -Be 1
+                $result.Message | Should -BeExactly $expected
+            }
+        }
+
+        It 'keeps, a dry run too, the descriptor''s copy put back whose swap stopped between its renames, comparing the disarmed descriptor' {
+            $copy = Join-Path $script:stick.Backups 'VMware\stick.vmdk.previous.orig'
+            Write-TestFile -Path "$copy.pvm-old" -Text (Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', '\\.\PortableVM-disarmed')
+            Write-TestFile -Path "$copy.pvm-tmp" -Text (Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', '\\.\PortableVM-disarmed').Replace('3900000', '3800000')
+            $expected = ("A write of $copy did not finish. To set it right, rename stick.vmdk.previous.orig.pvm-tmp to stick.vmdk.previous.orig and remove " +
+                'stick.vmdk.previous.orig.pvm-old, which holds a copy of the file as it is now. Nothing was started.')
+            foreach ($dryRun in $false, $true) {
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun
+                $result.ExitCode | Should -Be 1
+                $result.Message | Should -BeExactly $expected
+            }
+        }
+
+        It 'names the step, in a start and a dry run, when a write of the .vbox did not finish and left it missing, and starts nothing' {
+            Rename-Item -LiteralPath $script:stick.Vbox -NewName 'Test VM.vbox.pvm-old'
+            [IO.File]::WriteAllText("$($script:stick.Vbox).pvm-tmp", '<VirtualBox/>')
+            $message = "A write of $($script:stick.Vbox) did not finish. To set it right, rename Test VM.vbox.pvm-old back to Test VM.vbox and remove Test VM.vbox.pvm-tmp. Nothing was started."
+            foreach ($dryRun in $false, $true) {
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun
+                $result.ExitCode | Should -Be 1
+                $result.Message | Should -BeExactly $message
+            }
+            Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+        }
+
+        It 'stops, a dry run too, at a write that did not finish of <Case>, although a VMware start does not change it' -ForEach @(
+            @{ Case = 'the .vbox, which it left unreadable'; Setup = {
+                    Copy-Item -LiteralPath $script:stick.Vbox -Destination "$($script:stick.Vbox).pvm-old"
+                    [IO.File]::WriteAllBytes($script:stick.Vbox, (New-Object byte[] 64))
+                }
+                Step = '<vbox> did not finish. To set it right, remove Test VM.vbox, then rename Test VM.vbox.pvm-old back to Test VM.vbox, which holds the version before the write.'
+            }
+            @{ Case = 'VirtualBox.xml'; Setup = {
+                    Rename-Item -LiteralPath $script:stick.VirtualBoxXml -NewName 'VirtualBox.xml.pvm-old'
+                    [IO.File]::WriteAllText("$($script:stick.VirtualBoxXml).pvm-tmp", '<VirtualBox/>')
+                }
+                Step = '<xml> did not finish. To set it right, rename VirtualBox.xml.pvm-old back to VirtualBox.xml and remove VirtualBox.xml.pvm-tmp.'
+            }
+            @{ Case = 'a copy below LauncherData\backups'; Setup = {
+                    Write-TestFile -Path (Join-Path $script:stick.Backups 'VirtualBox\Test VM\stick.vmdk.previous.orig.pvm-tmp') -Text 'x'
+                }
+                Step = '<copy> did not finish. To set it right, remove stick.vmdk.previous.orig.pvm-tmp, which may be incomplete.'
+            }
+            @{ Case = 'a first copy below LauncherData\backups'; Setup = {
+                    Write-TestFile -Path (Join-Path $script:stick.Backups 'VirtualBox\VirtualBox.xml.launcher-backup') -Text '<VirtualBox/>'
+                    Write-TestFile -Path (Join-Path $script:stick.Backups 'VirtualBox\VirtualBox.xml.launcher-backup.pvm-old') -Text '<VirtualBox old="1"/>'
+                }
+                Step = '<first> did not finish. To set it right, remove VirtualBox.xml.launcher-backup, then rename VirtualBox.xml.launcher-backup.pvm-old back to VirtualBox.xml.launcher-backup, which holds the version before the write.'
+            }
+        ) {
+            & $Setup
+            $copy = Join-Path $script:stick.Backups 'VirtualBox\Test VM\stick.vmdk.previous.orig'
+            $first = Join-Path $script:stick.Backups 'VirtualBox\VirtualBox.xml.launcher-backup'
+            $stop = 'A write of ' + $Step.Replace('<vbox>', $script:stick.Vbox).Replace('<xml>', $script:stick.VirtualBoxXml).Replace('<copy>', $copy).Replace('<first>', $first)
+            $expected = $stop + ' Nothing was started.'
+            foreach ($dryRun in $false, $true) {
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun
+                $result.ExitCode | Should -Be 1
+                $result.Message | Should -BeExactly $expected
+            }
+            Get-TestLog -Path $script:stick.Log | Should -Contain "DRY RUN - a real start would stop here: $expected"
+            Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+        }
+
+        It 'keeps the first version of the descriptor and the version before the latest rewrite below LauncherData\backups' {
+            $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $folder = Join-Path $script:stick.Backups 'VMware'
+            @(Get-ChildItem -LiteralPath $folder -Name | Sort-Object) | Should -BeExactly @('stick.vmdk.orig', 'stick.vmdk.previous.orig')
+            [IO.File]::ReadAllText((Join-Path $folder 'stick.vmdk.previous.orig')) | Should -BeLike '*"\\.\PortableVM-disarmed"*'
+            @(Get-ChildItem -LiteralPath (Split-Path $script:stick.VMwareDisk) -Name -Filter '*.pvm-*') | Should -BeNullOrEmpty
+        }
+
         It 'reports a VM that already runs in VMware' {
             $script:testProcesses = @([pscustomobject]@{ Name = 'vmware-vmx.exe'; CommandLine = "vmware-vmx.exe `"$($script:stick.Vmx)`"" })
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
@@ -737,6 +1448,66 @@ Describe 'A start' {
             Set-TestPc -Stick $script:stick -Installed 'VirtualBox'
         }
         AfterEach { Remove-Item -LiteralPath $script:stick.Root -Recurse -Force }
+
+        It 'names the step, in a start and a dry run, when a write of the .vbox did not finish and left it missing, and starts nothing' {
+            Rename-Item -LiteralPath $script:stick.Vbox -NewName 'Test VM.vbox.pvm-old'
+            [IO.File]::WriteAllText("$($script:stick.Vbox).pvm-tmp", '<VirtualBox/>')
+            $message = "A write of $($script:stick.Vbox) did not finish. To set it right, rename Test VM.vbox.pvm-old back to Test VM.vbox and remove Test VM.vbox.pvm-tmp. Nothing was started."
+            foreach ($dryRun in $false, $true) {
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun
+                $result.ExitCode | Should -Be 1
+                $result.Message | Should -BeExactly $message
+            }
+            Should -Invoke -CommandName Invoke-PvmNative -ModuleName PortableVM -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'startvm' }
+        }
+
+        It 'stops at a write of the VMware descriptor that did not finish, although a VirtualBox start does not change it' {
+            [IO.File]::WriteAllText("$($script:stick.VMwareDisk).pvm-tmp", 'x')
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly "A write of $($script:stick.VMwareDisk) did not finish. To set it right, remove stick.vmdk.pvm-tmp; stick.vmdk itself is whole. Nothing was started."
+            Should -Invoke -CommandName Invoke-PvmNative -ModuleName PortableVM -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'startvm' }
+        }
+
+        It 'starts nothing when the old version of a rewritten file cannot be removed, and names the step that puts it back' {
+            Mock -ModuleName PortableVM Remove-PvmWriteCopy { [IO.File]::Delete($Path) }
+            Mock -ModuleName PortableVM Remove-PvmWriteCopy { throw [IO.IOException]::new('The process cannot access the file.', [int]0x80070020) } -ParameterFilter { $Path -like '*\Test VM.vbox.pvm-old' }
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly ("A write of $($script:stick.Vbox) did not finish. To set it right, remove Test VM.vbox, then rename Test VM.vbox.pvm-old back to Test VM.vbox, " +
+                'which holds the version before the write. Nothing was started.')
+            Should -Invoke -CommandName Invoke-PvmNative -ModuleName PortableVM -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'startvm' }
+        }
+
+        It 'gives the drive-letter rule the paths to the VM''s own files, which a stick folder at a drive root needs' {
+            Mock -ModuleName PortableVM Get-PvmDriveLetterChange { $null }
+            $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            Should -Invoke -CommandName Get-PvmDriveLetterChange -ModuleName PortableVM -Times 2 -Exactly -ParameterFilter {
+                ($Known -join '|') -ceq "$($script:stick.Vbox)|$($script:stick.VirtualBoxDisk)"
+            }
+        }
+
+        It 'leaves the .vbox as it was when VirtualBox.xml is read-only' {
+            $vbox = [IO.File]::ReadAllText($script:stick.Vbox)
+            [IO.File]::SetAttributes($script:stick.VirtualBoxXml, 'ReadOnly')
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly "$($script:stick.VirtualBoxXml) is read-only, so the launcher does not rewrite it. Clear that attribute, then start again. Nothing was started."
+            [IO.File]::ReadAllText($script:stick.Vbox) | Should -BeExactly $vbox
+        }
+
+        It 'checks every file before it changes the first one, so a refused descriptor leaves the others as they were' {
+            Write-TestFile -Path $script:stick.VirtualBoxDisk -Text "createType=`"monolithicSparse`"`r`nRW 17 SPARSE `"disk.vmdk`"`r`n"
+            $before = Get-TestTreeHash -Root $script:stick.Root
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeLike "Unexpected content in $($script:stick.VirtualBoxDisk) - line 2 has a SPARSE extent*"
+            $after = Get-TestTreeHash -Root $script:stick.Root
+            @($before.Keys | Where-Object { $after[$_] -ne $before[$_] }) | Should -BeNullOrEmpty
+            @($after.Keys).Count | Should -Be @($before.Keys).Count
+            $log = Get-TestLog -Path $script:stick.Log
+            $log | Should -Contain ('Test VM.vbox: paths moved to drive ' + $script:stick.Letter + ':')
+        }
 
         It 'fixes the drive letter, points the descriptor at the stick, starts the VM and logs each step' {
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher

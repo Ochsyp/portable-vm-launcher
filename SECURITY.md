@@ -54,5 +54,7 @@ or commits: they identify one stick and the PCs it was used on.
 - `.github/workflows/ci.yml` runs PSScriptAnalyzer, the Pester tests and the privacy scan on
   `windows-latest`. The tests mock every read of the PC, and `tests\Repo.Tests.ps1` checks that
   no source calls a Storage command other than a read, or a CIM or WMI method, that the
-  inventory tool calls nothing that writes, and that the deploy tool deletes nothing.
+  inventory tool calls nothing that writes, that the module writes files only through its safe
+  write, the log aside, and deletes only the copies that write makes, and that the deploy tool
+  deletes nothing and writes files only through that safe write.
 - Dependabot keeps the pinned GitHub Actions up to date.

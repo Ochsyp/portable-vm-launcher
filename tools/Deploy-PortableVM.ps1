@@ -113,8 +113,9 @@ function Find-DeployLauncherCmd {
     }
 }
 
-# Copy the file $Source to $Destination and throw when the copy's SHA-256 differs from the
-# source's. Returns the hash.
+# Copy the file $Source to $Destination through the launcher's safe write (Write-PvmFile), which
+# forces the copy onto the stick and never replaces a file, and throw when the copy's SHA-256
+# differs from the source's. Returns the hash.
 function Copy-DeployFile {
     [CmdletBinding()]
     [OutputType([string])]
@@ -122,7 +123,7 @@ function Copy-DeployFile {
         [Parameter(Mandatory)][string]$Source,
         [Parameter(Mandatory)][string]$Destination
     )
-    Copy-Item -LiteralPath $Source -Destination $Destination
+    $null = Write-PvmFile -Path $Destination -Bytes ([IO.File]::ReadAllBytes($Source))
     $hash = Get-DeployHash -Path $Source
     if ((Get-DeployHash -Path $Destination) -ne $hash) { throw "The copy of $(Split-Path $Source -Leaf) does not match the clone." }
     $hash
@@ -404,25 +405,41 @@ function Assert-DeployWriteAccess {
     }
 }
 
+# Return the step (Get-PvmLeftoverProblem) for each write below the folder $Folder that did not
+# finish, one per file that has a .pvm-tmp or .pvm-old beside its name.
+function Get-DeployLeftoverStep {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Folder)
+    if (-not (Test-Path -LiteralPath $Folder -PathType Container)) { return }
+    $names = @(Get-ChildItem -LiteralPath $Folder -Recurse -File -Force | Where-Object { $_.Name -like '*.pvm-tmp' -or $_.Name -like '*.pvm-old' } |
+            ForEach-Object { $_.FullName.Substring(0, $_.FullName.Length - '.pvm-tmp'.Length) } | Sort-Object -Unique)
+    foreach ($name in $names) { Get-PvmLeftoverProblem -Path $name }
+}
+
 # Disarm the descriptor copy $Path in place (ConvertTo-PvmDisarmedDescriptorText, every other
-# byte kept) and return whether it changed. The new bytes go to <Path>.pvm-tmp and are read back
-# and compared, and [IO.File]::Replace then puts them in place on the same volume: Windows
-# PowerShell 5.1 has no rename that replaces a file, and this tool deletes nothing. A .pvm-tmp
-# left by an earlier run is overwritten.
+# byte kept) through the launcher's safe write (Write-PvmFile), and return whether it changed.
+# Copies that an earlier write left beside it stop it, a disarmed copy too, as does an armed
+# version that cannot be removed after the disarm, with the step to take behind -Verbose; the
+# tool removes nothing it did not write in the same step.
 function Set-DeployDisarmedCopy {
     [CmdletBinding(SupportsShouldProcess)]
     [OutputType([bool])]
     param([Parameter(Mandatory)][string]$Path)
+    $leftover = Get-PvmLeftoverProblem -Path $Path
+    if ($leftover) { throw (Get-PvmWriteException -Code 'Leftover' -Message 'An earlier write of the file did not finish, and its copy is still beside it.' -Detail $leftover) }
     # ISO-8859-1 maps each byte to one character and back, so only the device names change.
     $latin1 = [Text.Encoding]::GetEncoding(28591)
-    $text = $latin1.GetString([IO.File]::ReadAllBytes($Path))
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $text = $latin1.GetString($bytes)
     $disarmed = ConvertTo-PvmDisarmedDescriptorText -Text $text
     if ($disarmed -ceq $text) { return $false }
     if (-not $PSCmdlet.ShouldProcess($Path, 'Disarm the descriptor copy')) { return $false }
-    $temporary = "$Path.pvm-tmp"
-    [IO.File]::WriteAllBytes($temporary, $latin1.GetBytes($disarmed))
-    if ($latin1.GetString([IO.File]::ReadAllBytes($temporary)) -cne $disarmed) { throw 'A disarmed descriptor copy did not read back as written.' }
-    [IO.File]::Replace($temporary, $Path, [NullString]::Value)
+    $left = Write-PvmFile -Path $Path -Bytes $latin1.GetBytes($disarmed) -Expected $bytes
+    if ($left) {
+        # The same step as at the next run; running the command again then disarms the copy again.
+        throw (Get-PvmWriteException -Code 'Leftover' -Message 'A copy was disarmed, but its armed version could not be removed from beside it.' -Detail (Get-PvmLeftoverProblem -Path $Path))
+    }
     $true
 }
 
@@ -557,10 +574,16 @@ function Move-DeployLegacyData {
     $data = Join-Path $Target 'LauncherData'
     $legacy = Join-Path $data 'backups\legacy'
     if (-not $PSCmdlet.ShouldProcess($data, 'Move the legacy log and copies')) { return }
+    # A disarm that stopped between its two renames leaves its copies without the name itself, which
+    # a copy moved now would take; so such a write's step comes before anything moves.
+    $steps = @(Get-DeployLeftoverStep -Folder $legacy)
+    if ($steps.Count) { throw (Get-PvmWriteException -Code 'Leftover' -Message 'An earlier write of the file did not finish, and its copy is still beside it.' -Detail ($steps -join ' ')) }
     $null = New-Item -ItemType Directory -Path (Join-Path $data 'logs'), (Join-Path $legacy 'Launcher') -Force
     $oldSettings = Join-Path $Target 'Launcher\settings.psd1'
     $hash = Get-DeployHash -Path $oldSettings
-    if (@(Get-ChildItem -LiteralPath (Join-Path $legacy 'Launcher') -File | Where-Object { (Get-DeployHash -Path $_.FullName) -eq $hash }).Count -eq 0) {
+    # A copy that a safe write left beside the file is no copy yet; the write stops at it instead.
+    $copies = @(Get-ChildItem -LiteralPath (Join-Path $legacy 'Launcher') -File | Where-Object { $_.Name -notlike '*.pvm-tmp' -and $_.Name -notlike '*.pvm-old' })
+    if (@($copies | Where-Object { (Get-DeployHash -Path $_.FullName) -eq $hash }).Count -eq 0) {
         $null = Copy-DeployFile -Source $oldSettings -Destination (Get-DeployFreePath -Path (Join-Path $legacy 'Launcher\settings.psd1'))
     }
     if ($Plan.Log) { Move-Item -LiteralPath (Join-Path $Target 'Launcher\launcher.log') -Destination (Get-DeployFreePath -Path (Join-Path $data 'logs\launcher.log')) }
@@ -625,6 +648,12 @@ function Invoke-PvmDeploy {
     }
     if (Test-Path -LiteralPath $dataStaged) {
         throw "LauncherData.new is left from a migration whose staging did not finish, and nothing the launcher uses was changed. Remove LauncherData.new, and $leftovers if they are there, then run the same command again."
+    }
+    # The copies a safe write of the staged .cmd keeps beside it; Launcher.new is new each time.
+    foreach ($copy in @((Get-PvmWriteCopyPath -Path $cmdStaged).PSObject.Properties.Value)) {
+        if (Test-Path -LiteralPath $copy) {
+            throw "'$(Split-Path $copy -Leaf)' is left from an earlier deploy whose write of '$CmdName.new' did not finish, and nothing the launcher uses was changed. Remove it, and $leftovers if they are there, then run the same command again."
+        }
     }
 
     # Where the settings are decides what the deploy does.
@@ -702,14 +731,14 @@ function Invoke-PvmDeploy {
         if (-not $reuseCode) {
             $null = New-Item -ItemType Directory -Path $staged
             foreach ($source in $sources) { $null = Copy-DeployFile -Source $source -Destination (Join-Path $staged (Split-Path $source -Leaf)) }
-            [IO.File]::WriteAllText((Join-Path $staged 'SHA256SUMS'), $sums, [Text.Encoding]::ASCII)
-            [IO.File]::WriteAllText((Join-Path $staged 'VERSION'), "$version`n", [Text.Encoding]::ASCII)
+            $null = Write-PvmFile -Path (Join-Path $staged 'SHA256SUMS') -Bytes ([Text.Encoding]::ASCII.GetBytes($sums))
+            $null = Write-PvmFile -Path (Join-Path $staged 'VERSION') -Bytes ([Text.Encoding]::ASCII.GetBytes("$version`n"))
         }
         if (-not $reuseCmd) { $null = Copy-DeployFile -Source $cmdSource -Destination $cmdStaged }
         if ($mode -eq 'Migrate') {
             $null = New-Item -ItemType Directory -Path (Join-Path $dataStaged 'logs'), (Join-Path $dataStaged 'backups\legacy\Launcher')
             $newSettings = Join-Path $dataStaged 'settings.psd1'
-            [IO.File]::WriteAllBytes($newSettings, $plan.Bytes)
+            $null = Write-PvmFile -Path $newSettings -Bytes $plan.Bytes
             if (-not (Test-DeploySameValue -Left (Import-PvmDataFile -Path $newSettings) -Right $plan.Values)) { throw 'The new settings.psd1 did not read back as written.' }
             $null = Copy-DeployFile -Source $oldSettings -Destination (Join-Path $dataStaged 'backups\legacy\Launcher\settings.psd1')
         }
@@ -726,7 +755,18 @@ function Invoke-PvmDeploy {
     }
     if ($plan) {
         try { Move-DeployLegacyData -Target $Target -Plan $plan }
-        catch { throw "The migration stopped part way, but the launcher in Launcher still works with Launcher\settings.psd1. Run the same command again to finish it. $(Format-DeployCause -ErrorRecord $_)" }
+        catch {
+            # Running again would stop at the same copy, so the step comes first. A write that
+            # failed between its two renames leaves such copies without saying so itself.
+            $leftover = "$($_.Exception.Data['PvmWrite'])" -eq 'Leftover'
+            $steps = @(Get-DeployLeftoverStep -Folder (Join-Path $Target 'LauncherData\backups\legacy'))
+            if (-not $leftover) { foreach ($step in $steps) { Write-Verbose $step } }
+            if ($leftover -or $steps.Count) {
+                throw ('The migration stopped part way at a copy below LauncherData\backups\legacy that needs a step by hand, but the launcher in Launcher still works with ' +
+                    "Launcher\settings.psd1. -Verbose names the copy and the step; take it, then run the same command again. $(Format-DeployCause -ErrorRecord $_)")
+            }
+            throw "The migration stopped part way, but the launcher in Launcher still works with Launcher\settings.psd1. Run the same command again to finish it. $(Format-DeployCause -ErrorRecord $_)"
+        }
     }
 
     if ($mode -eq 'Install') {

@@ -38,6 +38,60 @@ BeforeAll {
         [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$parseErrors)
     }
 
+    # Return the name of the innermost function around the syntax tree node $Ast, or '' at the top
+    # level.
+    function Get-SourceFunctionName {
+        param($Ast)
+        for ($parent = $Ast.Parent; $null -ne $parent; $parent = $parent.Parent) {
+            if ($parent -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $parent.Name }
+        }
+        ''
+    }
+
+    # Return where the syntax tree $Ast deletes, moves, copies or swaps a file or folder by itself,
+    # as '<member> in <function>': a member named Delete, MoveTo, CopyTo, Encrypt or Decrypt on
+    # anything, as on an item from Get-Item, and Move, Copy or Replace on a File or Directory type.
+    function Get-SourceFileChange {
+        param($Ast)
+        foreach ($member in $Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
+            $name = $member.Member.Extent.Text
+            $type = if ($member.Expression -is [System.Management.Automation.Language.TypeExpressionAst]) { $member.Expression.TypeName.FullName } else { '' }
+            $anywhere = @('Delete', 'MoveTo', 'CopyTo', 'Encrypt', 'Decrypt') -contains $name
+            $onType = $type -match '(?i)(^|\.)(File|Directory|FileInfo|DirectoryInfo)$' -and @('Move', 'Copy', 'Replace') -contains $name
+            if ($anywhere -or $onType) { "$name in $(Get-SourceFunctionName -Ast $member)" }
+        }
+    }
+
+    # Return where the syntax tree $Ast writes a file other than through the module's safe write,
+    # as '<what> in <function>': a member of a File or FileInfo type that writes or opens a file, a
+    # FileStream, StreamWriter or BinaryWriter made with ::new or New-Object, the cmdlets that write
+    # files, and a redirection to a file.
+    function Get-SourceFileWrite {
+        param($Ast)
+        foreach ($member in $Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
+            $name = $member.Member.Extent.Text
+            $type = if ($member.Expression -is [System.Management.Automation.Language.TypeExpressionAst]) { $member.Expression.TypeName.FullName } else { '' }
+            if ($type -match '(?i)(^|\.)(File|FileInfo)$' -and $name -match '(?i)^((Write|Append)All(Text|Lines|Bytes)|Create|CreateText|AppendText|OpenWrite|Open|Copy)$') {
+                "$name in $(Get-SourceFunctionName -Ast $member)"
+            } elseif ($name -eq 'new' -and $type -match '(?i)(^|\.)(FileStream|StreamWriter|BinaryWriter)$') {
+                "$($Matches[2]) in $(Get-SourceFunctionName -Ast $member)"
+            }
+        }
+        foreach ($command in $Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+            $name = $command.GetCommandName()
+            if (@('Set-Content', 'Add-Content', 'Out-File', 'Copy-Item', 'Tee-Object', 'Export-Clixml', 'Export-Csv') -contains $name) {
+                "$name in $(Get-SourceFunctionName -Ast $command)"
+            } elseif ($name -eq 'New-Object' -and $command.Extent.Text -match '(?i)\b(FileStream|StreamWriter|BinaryWriter)\b') {
+                "$($Matches[1]) in $(Get-SourceFunctionName -Ast $command)"
+            }
+        }
+        foreach ($redirection in $Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FileRedirectionAst] }, $true)) {
+            $target = $redirection.Location
+            if ($target -is [System.Management.Automation.Language.VariableExpressionAst] -and $target.VariablePath.UserPath -eq 'null') { continue }
+            "redirection in $(Get-SourceFunctionName -Ast $redirection)"
+        }
+    }
+
     # Return the commands that the syntax tree $Ast calls, each with its Name, Line and Function,
     # the innermost function around the call ('' at the top level).
     function Get-SourceCommand {
@@ -255,22 +309,38 @@ Describe 'Static guards' {
             ForEach-Object { $_.Member.Extent.Text } | Where-Object { $allowed -cnotcontains $_ } | Should -BeNullOrEmpty
     }
 
-    It 'keep the deploy tool from deleting anything: no Remove-Item, Clear-*, .Delete or -Force that replaces, and [IO.File]::Replace only to disarm a descriptor copy' {
+    It 'keep the deploy tool from deleting anything: no Remove-Item, Clear-*, .Delete or -Force that replaces, and files written only through the safe write' {
         $ast = Get-SourceAst -Path (Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1')
         Get-SourceCommand -Ast $ast | Where-Object { $_.Name -in 'Remove-Item', 'Clear-Content', 'Clear-Item' } | Should -BeNullOrEmpty
-        $members = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
-        $members | Where-Object { $_.Member.Extent.Text -eq 'Delete' } | Should -BeNullOrEmpty
+        # A rename is the one change of a file or folder that the tool makes by itself.
+        @(Get-SourceFileChange -Ast $ast) | Should -BeExactly @('Move in Rename-DeployItem')
         # Move-Item -Force would replace, and so delete, an existing file.
         $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandParameterAst] -and $args[0].ParameterName -eq 'Force' }, $true) |
             Where-Object { $_.Parent.GetCommandName() -ne 'Import-Module' -and $_.Parent.GetCommandName() -ne 'New-Item' -and $_.Parent.GetCommandName() -ne 'Get-ChildItem' } |
             ForEach-Object { "$($_.Parent.GetCommandName()) at line $($_.Extent.StartLineNumber)" } | Should -BeNullOrEmpty
-        $replaces = @($members | Where-Object {
-                $_.Member.Extent.Text -eq 'Replace' -and $_.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
-                @('IO.File', 'System.IO.File', 'File') -contains $_.Expression.TypeName.FullName
-            })
-        $replaces.Count | Should -Be 1
-        for ($parent = $replaces[0].Parent; $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
-        $parent.Name | Should -BeExactly 'Set-DeployDisarmedCopy'
+        # The tool writes files only through the module's safe write; the one stream it opens checks access.
+        @(Get-SourceFileWrite -Ast $ast | Sort-Object -Unique) | Should -BeExactly @('FileStream in Assert-DeployWriteAccess')
+        @(Get-SourceCommand -Ast $ast | Where-Object { $_.Name -eq 'Write-PvmFile' }).Count | Should -BeGreaterThan 0
+    }
+
+    It 'catch the ways a source could change or write a file past the safe write: <Code>' -ForEach @(
+        @{ Code = 'function F { ([IO.FileInfo]$p).Delete() }'; Change = 'Delete in F'; Write = '' }
+        @{ Code = 'function F { (Get-Item -LiteralPath $p).Delete() }'; Change = 'Delete in F'; Write = '' }
+        @{ Code = 'function F { $item.MoveTo($q) }'; Change = 'MoveTo in F'; Write = '' }
+        @{ Code = 'function F { [IO.Directory]::Move($p, $q) }'; Change = 'Move in F'; Write = '' }
+        @{ Code = 'function F { [System.IO.File]::Replace($a, $b, $c) }'; Change = 'Replace in F'; Write = '' }
+        @{ Code = 'function F { [IO.File]::Open($p, ''Create'') }'; Change = ''; Write = 'Open in F' }
+        @{ Code = 'function F { [System.IO.File]::WriteAllText($p, ''x'') }'; Change = ''; Write = 'WriteAllText in F' }
+        @{ Code = 'function F { New-Object IO.FileStream $p, Create }'; Change = ''; Write = 'FileStream in F' }
+        @{ Code = 'function F { [System.IO.FileStream]::new($p, ''Create'') }'; Change = ''; Write = 'FileStream in F' }
+        @{ Code = 'function F { [IO.StreamWriter]::new($p) }'; Change = ''; Write = 'StreamWriter in F' }
+        @{ Code = 'function F { ''x'' > $p }'; Change = ''; Write = 'redirection in F' }
+        @{ Code = 'function F { ''x'' | Set-Content -LiteralPath $p }'; Change = ''; Write = 'Set-Content in F' }
+        @{ Code = 'function F { ''x'' > $null; $text.Replace(''a'', ''b'') }'; Change = ''; Write = '' }
+    ) {
+        $ast = [System.Management.Automation.Language.Parser]::ParseInput($Code, [ref]$null, [ref]$null)
+        @(Get-SourceFileChange -Ast $ast) | Should -BeExactly @(@($Change) | Where-Object { $_ })
+        @(Get-SourceFileWrite -Ast $ast) | Should -BeExactly @(@($Write) | Where-Object { $_ })
     }
 
     It 'branch on -DryRun in the module only where a dry run must differ' {
@@ -286,7 +356,7 @@ Describe 'Static guards' {
             $name = if ($parent) { $parent.Name } else { '' }
             $counts[$name] = 1 + [int]$counts[$name]
         }
-        $expected = @{ 'Invoke-PvmStopUnlessDryRun' = 1; 'Confirm-PvmResume' = 1; 'Invoke-PvmVMware' = 3; 'Invoke-PvmVirtualBox' = 3; 'Invoke-PortableVM' = 4 }
+        $expected = @{ 'Invoke-PvmStopUnlessDryRun' = 1; 'Confirm-PvmResume' = 1; 'Invoke-PvmVMware' = 3; 'Invoke-PvmVirtualBox' = 2; 'Invoke-PortableVM' = 4 }
         @($counts.Keys | Sort-Object | ForEach-Object { "$_=$($counts[$_])" }) | Should -BeExactly @($expected.Keys | Sort-Object | ForEach-Object { "$_=$($expected[$_])" })
     }
 
@@ -310,19 +380,18 @@ Describe 'Static guards' {
         }
     }
 
-    It 'let the module delete nothing, and move a file only to put the log aside' {
+    It 'let the module delete only the copies of its safe writes, and move or swap a file only to put the log aside and in the safe write' {
         $ast = Get-SourceAst -Path $script:module
         Get-SourceCommand -Ast $ast | Where-Object { $_.Name -in 'Remove-Item', 'Move-Item', 'Rename-Item', 'Clear-Content', 'Clear-Item' } |
             ForEach-Object { "$($_.Name) at line $($_.Line)" } | Should -BeNullOrEmpty
-        $members = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
-        $members | Where-Object { $_.Member.Extent.Text -in 'Delete', 'MoveTo' } | ForEach-Object { $_.Extent.Text } | Should -BeNullOrEmpty
-        $moves = @($members | Where-Object {
-                $_.Member.Extent.Text -eq 'Move' -and $_.Expression -is [System.Management.Automation.Language.TypeExpressionAst] -and
-                @('IO.File', 'System.IO.File', 'File', 'IO.Directory', 'System.IO.Directory', 'Directory') -contains $_.Expression.TypeName.FullName
-            })
-        $moves.Count | Should -Be 1
-        for ($parent = $moves[0].Parent; $parent -isnot [System.Management.Automation.Language.FunctionDefinitionAst]; $parent = $parent.Parent) {}
-        $parent.Name | Should -BeExactly 'Move-PvmOldLog'
+        # A new place that deletes, moves, copies or swaps a file needs a change of this map on purpose.
+        @(Get-SourceFileChange -Ast $ast | Sort-Object) | Should -BeExactly @('Delete in Remove-PvmWriteCopy', 'Move in Move-PvmOldLog', 'Move in Write-PvmFile', 'Replace in Switch-PvmFile')
+    }
+
+    It 'let the module write files only through Write-PvmFile, the log aside' {
+        # The streams of the log, of the check of its format and of the safe write itself.
+        @(Get-SourceFileWrite -Ast (Get-SourceAst -Path $script:module) | Sort-Object -Unique) |
+            Should -BeExactly @('FileStream in Test-PvmLogFormat', 'FileStream in Write-PvmFile', 'FileStream in Write-PvmLog')
     }
 
     It 'end in the script''s one trap, logged with its details and shown, with exit code 1, what no step of the script handles' {
@@ -343,9 +412,10 @@ Describe 'Static guards' {
 
     It 'word every log cause after "because" in the module through Format-PvmBecause' {
         # A new sentence with a cause after "because" needs a change of these counts on purpose.
+        # Get-PvmWriteCause words a cause of Windows through Format-PvmBecause too.
         $text = [IO.File]::ReadAllText($script:module)
-        [regex]::Matches($text, 'because \$').Count | Should -Be 3
-        [regex]::Matches($text, 'because \$\(Format-PvmBecause -Cause ').Count | Should -Be 3
+        [regex]::Matches($text, 'because \$').Count | Should -Be 4
+        [regex]::Matches($text, 'because \$\((Format-PvmBecause -Cause|Get-PvmWriteCause -ErrorRecord) ').Count | Should -Be 4
     }
 
     It 'check the lock in the script before its administrator-rights block, and end the script there when another run holds it' {

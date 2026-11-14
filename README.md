@@ -6,11 +6,12 @@ A Windows launcher for a VM that lives on a USB stick and boots that stick as it
 the stick into a Windows PC that has VMware Workstation or VirtualBox, double-click
 `Start VM.cmd`, and the launcher starts the VM in whichever of the two is installed.
 
-> **Status:** phase 4 of a hardening redesign. The launcher's checks and start steps live in a
+> **Status:** phase 5 of a hardening redesign. The launcher's checks and start steps live in a
 > tested module; it guards against suspends and saved states, checks its settings before it
 > reads the PC, keeps its settings, log and backups in `LauncherData`, apart from its code, runs
-> one start at a time, and logs each run with milliseconds, UTC offset, process ID and step
-> timings, moving a full log aside, as *What it does* and *Log* say.
+> one start at a time, logs each run with milliseconds, UTC offset, process ID and step timings,
+> and rewrites VM files so that a crash never leaves one half-written, as *What it does* and
+> *Log* say.
 > [CHANGELOG.md](CHANGELOG.md) lists every change. More small pull requests follow. Until they
 > land, follow the rules under [Known limits](#known-limits).
 
@@ -25,8 +26,13 @@ Before every start the launcher:
   disk signature, size, 512-byte sectors and the position of the Data partition it runs from.
   Otherwise nothing starts;
 - refuses the PC's own Windows disk;
-- points the VM's raw-disk descriptor (`.vmdk`) at that disk number;
-- fixes the stick's drive letter in the VirtualBox files;
+- points the VM's raw-disk descriptor (`.vmdk`) at that disk number, changing only its extent
+  lines and `createType`, and stops at a descriptor it does not understand;
+- fixes the stick's drive letter in the VirtualBox files: below a drive root in every quoted
+  path below the stick folder, whatever its letter, as before; when the stick folder is a drive
+  root, only in the paths on the stick's old letter, so that a path on another drive never moves;
+- checks every VM file it would change before it changes the first one, and writes each so that
+  a crash or a pulled stick leaves the old or the new version, never a mix;
 - refuses to start the VM in one hypervisor while it runs in the other, or while the other
   holds a saved or suspended state;
 - refuses to start the VM in VMware unless its `.vmx` has `suspend.disabled = "TRUE"` and
@@ -47,9 +53,25 @@ partition while the VM runs. For VirtualBox, the `HideDataPartition` setting dec
 
 Messages and the dialog title name the VM and the guest system as `VmDisplayName` and
 `GuestName` in the settings say; without them they say "the VM" and "the guest". Before the
-launcher rewrites a VM file for the first time, it keeps that first version below
-`LauncherData\backups`; a copy of a raw-disk descriptor names a disarmed device there, so
-opening it by mistake reaches no disk.
+launcher rewrites a VM file, it keeps two copies of it below `LauncherData\backups`: the first
+version, which it never replaces, and the version before the latest rewrite, with `.previous`
+in its name, which the next rewrite replaces; a rewrite that fails puts back the copy it
+replaced. A copy of a raw-disk descriptor names a disarmed device there, so opening it by
+mistake reaches no disk.
+
+A rewrite goes to `<file>.pvm-tmp` beside the file first, is forced onto the stick and read
+back, and only then takes the file's place; the replaced version stays as `<file>.pvm-old`
+until the new one reads back from there, and is then removed, with up to three tries a second
+apart. A crash or a pulled stick can leave one of these two beside the file. So can a new
+version that does not read back, or an old one that cannot be removed; then the start stops
+before the VM starts. The next start, in either hypervisor, stops at such a copy beside a VM
+file or beside one of its copies below `LauncherData\backups`, and names the one step to take,
+such as removing the `.pvm-tmp` or renaming the `.pvm-old` back. The step keeps the version
+from before that write; only beside a copy whose `.pvm-old` repeats its file as it is now does
+it keep the copy, and when that file is missing or cannot be read, it asks for the file first
+rather than guess.
+The next start then makes its change again. Bytes the launcher does not mean
+to change stay as they were, a byte order mark too.
 
 `-DryRun` takes the decisions of a real start and logs what would change, without changing a VM
 file or starting anything. It still adds its lines to the log and may move a full or old-format
@@ -86,7 +108,7 @@ and the VM files:
 | `Launcher\VERSION`, `Launcher\SHA256SUMS` | The deployed version and the hashes of its code, written by the deploy tool |
 | `LauncherData\settings.psd1` | Your settings, copied from `examples\settings.example.psd1` |
 | `LauncherData\logs\launcher.log` | The log of every run (see [Log](#log)); full or older logs are kept beside it as `launcher-<date>-<time>.log` |
-| `LauncherData\backups\` | The first version of each file the launcher rewrites, at its path below the stick folder; descriptor copies are disarmed |
+| `LauncherData\backups\` | The first version of each file the launcher rewrites, and the version before its latest rewrite (`*.previous.*`), at its path below the stick folder; descriptor copies are disarmed |
 | `LauncherData\backups\legacy\` | What `-MigrateSettings` moved there: the old settings file and the copies the launcher used to keep beside the VM files |
 | `Launcher.previous\` | The launcher that the last deploy replaced |
 | `VMware\` | The VMware VM (`.vmx`) and its raw-disk descriptor |
@@ -222,6 +244,8 @@ What a stick, a script or a user may rely on between versions:
   lists every key with its default.
 - `Launcher` holds code only, which each deploy replaces; `LauncherData` holds what the launcher
   keeps between runs, which a deploy leaves alone.
+- `<file>.pvm-tmp` and `<file>.pvm-old` beside a file are the copies of a write that did not
+  finish; the launcher and the deploy tool stop at them and name the step to take.
 
 ## Known limits
 

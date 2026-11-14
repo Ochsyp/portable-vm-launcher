@@ -1002,6 +1002,190 @@ function Get-PvmStickProblem {
     $null
 }
 
+# --- Safe writes -----------------------------------------------------------------------------
+# A VM file that a crash or a pulled stick leaves half-written opens in no hypervisor. So every
+# file the launcher and the deploy tool write on the stick goes through Write-PvmFile: the new
+# version is written beside the file, forced onto the disk and read back, and only then takes
+# the file's place. The log, which is only appended to, stays apart (Write-PvmLog).
+
+# Return whether the byte arrays $Left and $Right hold the same bytes.
+function Test-PvmSameContent {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Left,
+        [Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Right
+    )
+    $Left.Length -eq $Right.Length -and [Convert]::ToBase64String($Left) -ceq [Convert]::ToBase64String($Right)
+}
+
+# Return the copies that a write of the file $Path keeps beside it while it runs: Temp, the new
+# version, and Old, the version it replaces, during the swap.
+function Get-PvmWriteCopyPath {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param([Parameter(Mandatory)][string]$Path)
+    [pscustomobject]@{ Temp = "$Path.pvm-tmp"; Old = "$Path.pvm-old" }
+}
+
+# Return the one step that sets right a write of the file $Path that did not finish, as when a
+# crash or a pulled stick cut it off, which the copies left beside it show (Get-PvmWriteCopyPath),
+# or '' when there are none. The step keeps the version from before that write: the file itself,
+# or the old version beside it, which the write found unchanged. So it is right also when the new
+# version did not read back from its place, and the next run makes its change again. $Current, for
+# a copy below the backups, is that copy as it would be made of its file now: an old version that
+# holds exactly that is from a copy put back after a failed rewrite, so the copy put back stays,
+# also when its swap stopped between the two renames. An old version that cannot be read then
+# gets a step that does not guess.
+function Get-PvmLeftoverProblem {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [AllowNull()][AllowEmptyCollection()][byte[]]$Current
+    )
+    $copies = Get-PvmWriteCopyPath -Path $Path
+    $temp = [IO.File]::Exists($copies.Temp)
+    $old = [IO.File]::Exists($copies.Old)
+    if (-not $temp -and -not $old) { return '' }
+    $name = [IO.Path]::GetFileName($Path)
+    $repeats = $false
+    if ($null -ne $Current -and $old) {
+        try { $repeats = Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($copies.Old)) -Right $Current }
+        catch { return "A write of $Path did not finish, and $name.pvm-old beside it cannot be read. Close the program that holds it, then start again." }
+    }
+    $step = if ([IO.File]::Exists($Path)) {
+        if ($temp -and $old) { "remove $name.pvm-tmp and $name.pvm-old; $name itself is whole" }
+        elseif ($temp) { "remove $name.pvm-tmp; $name itself is whole" }
+        elseif ($repeats) { "remove $name.pvm-old, which holds a copy of the file as it is now; $name itself is whole" }
+        else { "remove $name, then rename $name.pvm-old back to $name, which holds the version before the write" }
+    } elseif ($old -and $temp) {
+        # The new copy was read back before the swap began, so it is whole.
+        if ($repeats) { "rename $name.pvm-tmp to $name and remove $name.pvm-old, which holds a copy of the file as it is now" }
+        else { "rename $name.pvm-old back to $name and remove $name.pvm-tmp" }
+    } elseif ($old) {
+        "rename $name.pvm-old back to $name"
+    } else {
+        "remove $name.pvm-tmp, which may be incomplete"
+    }
+    "A write of $Path did not finish. To set it right, $step."
+}
+
+# Return the exception for a refusal of Write-PvmFile: $Message names no path, so that the deploy
+# tool can show it as it is; $Detail, which may, goes to Data['PvmDetail'], and $Code to
+# Data['PvmWrite'].
+function Get-PvmWriteException {
+    [CmdletBinding()]
+    [OutputType([System.Exception])]
+    param(
+        [Parameter(Mandatory)][string]$Code,
+        [Parameter(Mandatory)][string]$Message,
+        [Parameter(Mandatory)][string]$Detail
+    )
+    $exception = [System.Management.Automation.RuntimeException]::new($Message)
+    $exception.Data['PvmWrite'] = $Code
+    $exception.Data['PvmDetail'] = $Detail
+    $exception
+}
+
+# Put the new version $Temp in place of the file $Path and keep the file as $Old: two renames on
+# one volume that keep the file's attributes, access rights and creation time. Windows' error
+# 1177 can stop it between the two, with the file under $Old and the new version still under
+# $Temp; Write-PvmFile then keeps both for the step by hand. Tests mock this for the errors
+# Windows documents.
+function Switch-PvmFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Temp,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Old
+    )
+    [IO.File]::Replace($Temp, $Path, $Old)
+}
+
+# Remove the file $Path, a copy that the same write made beside the file it wrote. Tests mock this.
+function Remove-PvmWriteCopy {
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory)][string]$Path)
+    if ($PSCmdlet.ShouldProcess($Path, 'Remove the copy that a safe write made')) { [IO.File]::Delete($Path) }
+}
+
+# Write the bytes $Bytes to the file $Path so that a crash or a pulled stick leaves its old or its
+# new version, never a mix. Without -Expected it creates the file, which must not exist; with
+# -Expected it replaces the file, which must still hold exactly those bytes, as when the caller
+# read them. The bytes go to <Path>.pvm-tmp beside it, are forced onto the disk and read back,
+# and then take the file's place; a replaced version stays as <Path>.pvm-old until the new one
+# reads back from its place, and when it does not, both stay for the step by hand
+# (Get-PvmLeftoverProblem). It removes only those two copies of its own. A refusal throws a
+# message that names no path, with the details in Data['PvmDetail'] and one of these codes in
+# Data['PvmWrite']: Leftover, Exists, Missing, NotAFile, ReadOnly, Link, Changed or ReadBack.
+# Errors of Windows pass on as they are. Returns '', or the name of the old version when three
+# tries a second apart could not remove it, at which the next write of the file stops.
+function Write-PvmFile {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes,
+        [AllowEmptyCollection()][byte[]]$Expected
+    )
+    $replace = $PSBoundParameters.ContainsKey('Expected')
+    $copies = Get-PvmWriteCopyPath -Path $Path
+    $leftover = Get-PvmLeftoverProblem -Path $Path
+    if ($leftover) { throw (Get-PvmWriteException -Code 'Leftover' -Message 'An earlier write of the file did not finish, and its copy is still beside it.' -Detail $leftover) }
+    if ($replace) {
+        if ([IO.Directory]::Exists($Path)) { throw (Get-PvmWriteException -Code 'NotAFile' -Message 'A folder has the name of the file to rewrite.' -Detail "$Path is a folder.") }
+        if (-not [IO.File]::Exists($Path)) { throw (Get-PvmWriteException -Code 'Missing' -Message 'The file to rewrite is missing.' -Detail "$Path is missing.") }
+        $attributes = [IO.File]::GetAttributes($Path)
+        if ($attributes -band [IO.FileAttributes]::ReparsePoint) { throw (Get-PvmWriteException -Code 'Link' -Message 'The file to rewrite is a link.' -Detail "$Path is a link.") }
+        if ($attributes -band [IO.FileAttributes]::ReadOnly) { throw (Get-PvmWriteException -Code 'ReadOnly' -Message 'The file to rewrite is read-only.' -Detail "$Path is read-only.") }
+    } elseif ([IO.File]::Exists($Path) -or [IO.Directory]::Exists($Path)) {
+        throw (Get-PvmWriteException -Code 'Exists' -Message 'An item has the name of the new file, and a new file never replaces one.' -Detail "$Path exists.")
+    }
+    try {
+        # Beside the file, so on the same volume, and forced onto the disk before it is read back.
+        $stream = [IO.FileStream]::new($copies.Temp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 4096, [IO.FileOptions]::WriteThrough)
+        try {
+            $stream.Write($Bytes, 0, $Bytes.Length)
+            $stream.Flush($true)
+        } finally {
+            $stream.Dispose()
+        }
+        if (-not (Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($copies.Temp)) -Right $Bytes)) {
+            throw (Get-PvmWriteException -Code 'ReadBack' -Message 'The new version did not read back as written, so the file was left as it was.' -Detail "$($copies.Temp) did not read back as written.")
+        }
+        if ($replace -and -not (Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($Path)) -Right $Expected)) {
+            throw (Get-PvmWriteException -Code 'Changed' -Message 'The file changed while it was being rewritten, so it was left as it was.' -Detail "$Path changed after it was read.")
+        }
+        if ($replace) { Switch-PvmFile -Temp $copies.Temp -Path $Path -Old $copies.Old }
+        else { [IO.File]::Move($copies.Temp, $Path) }
+    } catch {
+        # Only this call's new copy goes, and only while the file or no old version is there:
+        # when a failed swap left the file missing, both versions stay for the step by hand.
+        if ([IO.File]::Exists($copies.Temp) -and ([IO.File]::Exists($Path) -or -not [IO.File]::Exists($copies.Old))) { Remove-PvmWriteCopy -Path $copies.Temp }
+        throw
+    }
+    if (-not $replace) { return '' }
+    # The new version is in place: force it, read it back, and only then remove the old one.
+    $stream = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
+    try { $stream.Flush($true) } finally { $stream.Dispose() }
+    if (-not (Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($Path)) -Right $Bytes)) {
+        throw (Get-PvmWriteException -Code 'ReadBack' -Message 'The new version did not read back as written; the version before is still beside it.' -Detail (
+                "$Path did not read back as written after it took the file's place. $(Get-PvmLeftoverProblem -Path $Path)"))
+    }
+    # A program that looks at the renamed old version, such as a virus scanner, can hold it for a
+    # moment, so the removal gets three tries a second apart.
+    for ($try = 1; $true; $try++) {
+        try {
+            Remove-PvmWriteCopy -Path $copies.Old
+            return ''
+        } catch {
+            if ($try -ge 3) { return $copies.Old }
+        }
+        Invoke-PvmSleep -Seconds 1
+    }
+}
+
 # --- Raw-disk descriptors --------------------------------------------------------------------
 
 # Return what the VM gets of the raw disk $Drive, as the CreateType and the Extents lines of a
@@ -1029,10 +1213,99 @@ function Get-PvmDiskLayout {
     }
 }
 
-# Return the descriptor text $Text with its extent lines (RW, RDONLY or NOACCESS with a FLAT or
-# ZERO extent) replaced by the Extents of $Layout, written where the first one was, and its
-# createType set to $Layout.CreateType. Every other line and the line endings stay. Returns $null
-# when $Text has no such extent line.
+# Return the descriptor bytes $Bytes as text with one character per byte (ISO-8859-1), so that a
+# rewrite keeps every byte it does not change, whatever encoding the descriptor names. Throws a
+# FormatException with the reason when the bytes are no descriptor text: 1 MiB or more, a sparse
+# disk image (KDMV or COWD), UTF-16 or UTF-32 text, or a NUL byte.
+function ConvertFrom-PvmDescriptorData {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes)
+    if ($Bytes.Length -ge 1MB) { throw [FormatException]::new('it holds 1 MiB or more, which no descriptor does') }
+    $latin1 = [Text.Encoding]::GetEncoding(28591)
+    $magic = $latin1.GetString($Bytes, 0, [Math]::Min(4, $Bytes.Length))
+    if ($magic -ceq 'KDMV' -or $magic -ceq 'COWD') { throw [FormatException]::new('it is a disk image, not a descriptor') }
+    $utf16 = $Bytes.Length -ge 2 -and (($Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) -or ($Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF))
+    $utf32 = $Bytes.Length -ge 4 -and $Bytes[0] -eq 0 -and $Bytes[1] -eq 0 -and $Bytes[2] -eq 0xFE -and $Bytes[3] -eq 0xFF
+    if ($utf16 -or $utf32) { throw [FormatException]::new('it is UTF-16 or UTF-32 text, not descriptor text') }
+    if ([Array]::IndexOf($Bytes, [byte]0) -ge 0) { throw [FormatException]::new('it holds a NUL byte, which descriptor text never has') }
+    $latin1.GetString($Bytes)
+}
+
+# Return the lines of the descriptor text $Text, each with Text, Ending (CR LF, LF or none at the
+# end), Number and Kind: Blank, Comment, Key (with Key) or Extent (with Type, Target and Offset).
+# A UTF-8 byte order mark before the first line stays in its Text. Throws a FormatException with
+# the reason, which names the line, when the launcher does not understand the descriptor: a line
+# of no known kind, an extent other than '<access> <sectors> FLAT "<raw disk>" <offset>' or
+# '<access> <sectors> ZERO', extents apart from each other, createType set twice, or no extent.
+function ConvertFrom-PvmDescriptorText {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $lines = New-Object System.Collections.Generic.List[object]
+    $position = 0
+    while ($position -lt $Text.Length) {
+        $next = $Text.IndexOf("`n", $position)
+        if ($next -lt 0) { $line = $Text.Substring($position); $ending = ''; $position = $Text.Length }
+        else {
+            $line = $Text.Substring($position, $next - $position)
+            $ending = "`n"
+            if ($line.EndsWith("`r")) { $line = $line.Substring(0, $line.Length - 1); $ending = "`r`n" }
+            $position = $next + 1
+        }
+        $lines.Add([pscustomobject]@{ Text = $line; Ending = $ending; Number = $lines.Count + 1; Kind = ''; Key = ''; Type = ''; Target = ''; Offset = '' })
+    }
+    $bom = [string]::new([char[]](0xEF, 0xBB, 0xBF))
+    $extentPattern = '^[ \t]*(?<access>RW|RDONLY|NOACCESS)[ \t]+(?<sectors>\d+)[ \t]+(?<type>[A-Za-z]+)(?:[ \t]+"(?<target>[^"]*)"(?:[ \t]+(?<offset>\d+))?)?[ \t]*$'
+    $extentEnded = $false
+    $sawExtent = $false
+    $createTypes = 0
+    foreach ($entry in $lines) {
+        $text = if ($entry.Number -eq 1 -and $entry.Text.StartsWith($bom)) { $entry.Text.Substring(3) } else { $entry.Text }
+        $where = "line $($entry.Number)"
+        if ($text -match '^[ \t]*$') { $entry.Kind = 'Blank' }
+        elseif ($text -match '^[ \t]*#') { $entry.Kind = 'Comment' }
+        elseif ($text -match '^[ \t]*(RW|RDONLY|NOACCESS)([ \t]|$)') {
+            $match = [regex]::Match($text, $extentPattern, 'IgnoreCase')
+            if (-not $match.Success) { throw [FormatException]::new("$where is an extent line the launcher cannot read") }
+            $type = $match.Groups['type'].Value.ToUpperInvariant()
+            $target = $match.Groups['target']
+            if ($type -ne 'FLAT' -and $type -ne 'ZERO') { throw [FormatException]::new("$where has a $type extent, and the launcher rewrites only FLAT and ZERO extents") }
+            if ($type -eq 'FLAT') {
+                if (-not $target.Success) { throw [FormatException]::new("$where is an extent line the launcher cannot read") }
+                if (-not $match.Groups['offset'].Success) { throw [FormatException]::new("$where has a FLAT extent without an offset") }
+                if ($target.Value -notmatch '^\\\\[.?]\\') { throw [FormatException]::new("$where has a FLAT extent that names a file, not a raw disk") }
+            } elseif ($target.Success) {
+                throw [FormatException]::new("$where has a ZERO extent that names a target")
+            }
+            if ($extentEnded) { throw [FormatException]::new("$where is an extent apart from the others") }
+            $sawExtent = $true
+            $entry.Kind = 'Extent'
+            $entry.Type = $type
+            $entry.Target = $target.Value
+            $entry.Offset = $match.Groups['offset'].Value
+        } elseif ($text -match '^[ \t]*(?<key>[A-Za-z][A-Za-z0-9_.]*)[ \t]*=') {
+            $entry.Kind = 'Key'
+            $entry.Key = $Matches['key']
+            if ($entry.Key -eq 'createType') {
+                $createTypes++
+                if ($createTypes -gt 1) { throw [FormatException]::new("$where sets createType a second time") }
+            }
+        } else {
+            throw [FormatException]::new("$where is no descriptor line")
+        }
+        if ($entry.Kind -ne 'Extent' -and $sawExtent) { $extentEnded = $true }
+    }
+    if (-not $sawExtent) { throw [FormatException]::new('no disk extent found') }
+    $lines
+}
+
+# Return the descriptor text $Text with its extents (ConvertFrom-PvmDescriptorText) replaced by
+# the Extents of $Layout, where they were, and its createType set to $Layout.CreateType, or
+# inserted after the last key line above the extents when it has none. Every other line keeps its
+# text and its ending; new lines take the ending of the extents they replace. The result is read
+# again and must hold exactly the new layout. Throws a FormatException with the reason when the
+# launcher does not understand $Text.
 function ConvertTo-PvmDescriptorText {
     [CmdletBinding()]
     [OutputType([string])]
@@ -1040,23 +1313,43 @@ function ConvertTo-PvmDescriptorText {
         [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
         [Parameter(Mandatory)][hashtable]$Layout
     )
-    $newline = if ($Text.Contains("`r`n")) { "`r`n" } else { "`n" }
-    $lines = New-Object System.Collections.Generic.List[string]
-    $extentsWritten = $false
-    foreach ($line in ($Text -split "`r?`n")) {
-        if ($line -match '^\s*(RW|RDONLY|NOACCESS)\s+\d+\s+(FLAT|ZERO)\b') {
-            if (-not $extentsWritten) {
-                foreach ($extent in $Layout.Extents) { $lines.Add($extent) }
-                $extentsWritten = $true
-            }
-        } elseif ($line -match '^\s*createType\s*=') {
-            $lines.Add('createType="' + $Layout.CreateType + '"')
-        } else {
-            $lines.Add($line)
-        }
+    $lines = @(ConvertFrom-PvmDescriptorText -Text $Text)
+    $extents = @($lines | Where-Object { $_.Kind -eq 'Extent' })
+    $first = $lines.IndexOf($extents[0])
+    $last = $lines.IndexOf($extents[-1])
+    $dominant = if ($Text.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $ending = if ($extents[0].Ending) { $extents[0].Ending } else { $dominant }
+    $createType = 'createType="' + $Layout.CreateType + '"'
+    $hasCreateType = @($lines | Where-Object { $_.Kind -eq 'Key' -and $_.Key -eq 'createType' }).Count -gt 0
+    $after = -1
+    if (-not $hasCreateType) {
+        for ($index = 0; $index -lt $first; $index++) { if ($lines[$index].Kind -eq 'Key') { $after = $index } }
     }
-    if (-not $extentsWritten) { return $null }
-    $lines -join $newline
+    $builder = New-Object System.Text.StringBuilder
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        $line = $lines[$index]
+        if ($index -eq $first) {
+            if (-not $hasCreateType -and $after -lt 0) { $null = $builder.Append($createType).Append($ending) }
+            for ($number = 0; $number -lt $Layout.Extents.Count; $number++) {
+                $end = if ($number -eq $Layout.Extents.Count - 1) { $lines[$last].Ending } else { $ending }
+                $null = $builder.Append($Layout.Extents[$number]).Append($end)
+            }
+            $index = $last
+            continue
+        }
+        if ($line.Kind -eq 'Key' -and $line.Key -eq 'createType') { $null = $builder.Append($createType).Append($line.Ending) }
+        else { $null = $builder.Append($line.Text).Append($line.Ending) }
+        if ($index -eq $after) { $null = $builder.Append($createType).Append($line.Ending) }
+    }
+    $result = $builder.ToString()
+    # The rewrite must read back as the new layout, or it would write a broken descriptor.
+    $check = @(ConvertFrom-PvmDescriptorText -Text $result)
+    $written = @($check | Where-Object { $_.Kind -eq 'Extent' } | ForEach-Object { $_.Text.Trim() })
+    $types = @($check | Where-Object { $_.Kind -eq 'Key' -and $_.Key -eq 'createType' } | ForEach-Object { $_.Text.Trim() })
+    if (($written -join "`n") -cne (@($Layout.Extents) -join "`n") -or ($types -join "`n") -cne $createType) {
+        throw [FormatException]::new('the rewritten descriptor did not read back as the new layout')
+    }
+    $result
 }
 
 # Return the text of a new VMware descriptor for $Layout: a header, the Extents of $Layout and a
@@ -1099,59 +1392,345 @@ function ConvertTo-PvmDisarmedDescriptorText {
         })
 }
 
-# Keep the first version of the file $Path at $BackupPath, creating its folder. A copy that is
-# there already is never replaced. With -Disarm the file is a descriptor, and the copy names the
-# disarmed device in its raw-device extents (ConvertTo-PvmDisarmedDescriptorText); every other
-# byte is kept.
+# Keep the bytes $Bytes, the first version of a file the launcher rewrites, at $BackupPath
+# through a safe write (Write-PvmFile), creating its folder. A copy that is there already is
+# never replaced. With -Disarm the bytes are a descriptor's, and the copy names the disarmed
+# device (ConvertTo-PvmDisarmedDescriptorText); ISO-8859-1 maps each byte to one character and
+# back, so only the device names change.
 function Save-PvmFirstCopy {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes,
         [Parameter(Mandatory)][string]$BackupPath,
         [switch]$Disarm
     )
-    if (Test-Path -LiteralPath $BackupPath) { return }
-    $null = New-Item -ItemType Directory -Path (Split-Path $BackupPath) -Force
+    if ([IO.File]::Exists($BackupPath)) { return }
+    $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($BackupPath))
+    [byte[]]$copy = $Bytes
     if ($Disarm) {
-        # ISO-8859-1 maps each byte to one character and back, so only the device names change.
         $latin1 = [Text.Encoding]::GetEncoding(28591)
-        $text = $latin1.GetString([IO.File]::ReadAllBytes($Path))
-        [IO.File]::WriteAllBytes($BackupPath, $latin1.GetBytes((ConvertTo-PvmDisarmedDescriptorText -Text $text)))
+        $copy = $latin1.GetBytes((ConvertTo-PvmDisarmedDescriptorText -Text $latin1.GetString($Bytes)))
+    }
+    $null = Write-PvmFile -Path $BackupPath -Bytes $copy
+}
+
+# Keep the bytes $Bytes, the version of a file before the launcher rewrites it, at $BackupPath
+# through a safe write, creating its folder; the copy of an earlier rewrite there is replaced, so
+# that the version before the latest rewrite is one copy away. A copy that holds those bytes
+# already stays as it is. With -Disarm the bytes are a descriptor's, and the copy names the
+# disarmed device. When it replaced a copy, it returns the bytes it replaced (Replaced) and wrote
+# (Written), with which Restore-PvmPreviousCopy puts that copy back if the rewrite then fails. A
+# version before of the copy that cannot be removed throws a Leftover refusal.
+function Save-PvmPreviousCopy {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][byte[]]$Bytes,
+        [Parameter(Mandatory)][string]$BackupPath,
+        [switch]$Disarm
+    )
+    [byte[]]$copy = $Bytes
+    if ($Disarm) {
+        $latin1 = [Text.Encoding]::GetEncoding(28591)
+        $copy = $latin1.GetBytes((ConvertTo-PvmDisarmedDescriptorText -Text $latin1.GetString($Bytes)))
+    }
+    $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($BackupPath))
+    if ([IO.File]::Exists($BackupPath)) {
+        $current = [IO.File]::ReadAllBytes($BackupPath)
+        if (Test-PvmSameContent -Left $current -Right $copy) { return }
+        $left = Write-PvmFile -Path $BackupPath -Bytes $copy -Expected $current
+        if ($left) {
+            # The file is not rewritten then, so the step that puts the copy before back is right.
+            throw (Get-PvmWriteException -Code 'Leftover' -Message 'The copy was written, but its version before could not be removed from beside it.' -Detail (Get-PvmLeftoverProblem -Path $BackupPath))
+        }
+        [pscustomobject]@{ Replaced = $current; Written = $copy }
     } else {
-        Copy-Item -LiteralPath $Path -Destination $BackupPath
+        $null = Write-PvmFile -Path $BackupPath -Bytes $copy
     }
 }
 
-# Point the existing descriptor $Path at the stick: its extent lines and createType become those
-# of $Layout (ConvertTo-PvmDescriptorText), and the change is logged to $LogPath. Before the first
-# rewrite the file is kept, disarmed, at $BackupPath (Save-PvmFirstCopy), which is never replaced;
-# the descriptor is written as UTF-8 without a BOM. Throws a stop when the file has no extent
-# line.
+# Put back the copy at $BackupPath that Save-PvmPreviousCopy replaced for a rewrite that then
+# failed ($Previous, with the bytes it replaced and wrote), so that the copy still holds the
+# version before the latest rewrite that took place. A failure only goes to the log at $LogPath,
+# beside the stop for the failed rewrite.
+function Restore-PvmPreviousCopy {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Previous,
+        [Parameter(Mandatory)][string]$BackupPath,
+        [Parameter(Mandatory)][string]$LogPath
+    )
+    try {
+        $left = Write-PvmFile -Path $BackupPath -Bytes $Previous.Replaced -Expected $Previous.Written
+        if ($left) { Write-PvmLog -Path $LogPath -Message "Note: $left could not be removed after the copy was put back; the next start stops at it and names the step to take." }
+    } catch {
+        Write-PvmLog -Path $LogPath -Message "Note: $BackupPath could not be put back as it was before the failed rewrite, because $(Get-PvmWriteCause -ErrorRecord $_ -Path $BackupPath)."
+    }
+}
+
+# Throw a stop when a write of one of the files $Paths did not finish (Get-PvmLeftoverProblem),
+# with the one step to take, before the launcher changes any file.
+function Assert-PvmNoLeftover {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string[]]$Paths)
+    foreach ($path in $Paths) {
+        $problem = Get-PvmLeftoverProblem -Path $path
+        if ($problem) { throw (Get-PvmStopException -Message "$problem Nothing was started.") }
+    }
+}
+
+# Return what a copy of the file $Path made now would hold, as Save-PvmPreviousCopy makes it
+# (disarmed with -Disarm), for Get-PvmLeftoverProblem -Current: the Bytes, or a Reason why there
+# are none: Missing, Folder (a folder has the name) or Unreadable. A descriptor of 1 MiB or more,
+# which the launcher refuses, is not read and gets an empty copy.
+function Get-PvmCopyNow {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$Disarm
+    )
+    [byte[]]$bytes = @()
+    try {
+        if ([IO.Directory]::Exists($Path)) { return [pscustomobject]@{ Reason = 'Folder'; Bytes = $bytes } }
+        $file = [IO.FileInfo]::new($Path)
+        if (-not $file.Exists) { return [pscustomobject]@{ Reason = 'Missing'; Bytes = $bytes } }
+        if ($Disarm -and $file.Length -ge 1MB) { return [pscustomobject]@{ Reason = ''; Bytes = $bytes } }
+        $bytes = [IO.File]::ReadAllBytes($Path)
+    } catch {
+        return [pscustomobject]@{ Reason = 'Unreadable'; Bytes = [byte[]]@() }
+    }
+    if ($Disarm) {
+        $latin1 = [Text.Encoding]::GetEncoding(28591)
+        $bytes = $latin1.GetBytes((ConvertTo-PvmDisarmedDescriptorText -Text $latin1.GetString($bytes)))
+    }
+    [pscustomobject]@{ Reason = ''; Bytes = $bytes }
+}
+
+# Return the step for a write that did not finish of the copy $Path of the file $Of below the
+# backups (Get-PvmLeftoverProblem, with the copy that would be made of $Of now, disarmed with
+# -Disarm), or '' when there is none. $Of is read only where it decides the step: an old version
+# beside the copy, with the copy there and no new one, or the other way round. When it is
+# missing, a folder or cannot be read then, the step asks for the file rather than guess which
+# version of the copy to keep.
+function Get-PvmCopyLeftoverProblem {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Of,
+        [switch]$Disarm
+    )
+    $copies = Get-PvmWriteCopyPath -Path $Path
+    if (-not [IO.File]::Exists($copies.Old) -or [IO.File]::Exists($Path) -eq [IO.File]::Exists($copies.Temp)) { return (Get-PvmLeftoverProblem -Path $Path) }
+    $now = Get-PvmCopyNow -Path $Of -Disarm:$Disarm
+    switch ($now.Reason) {
+        'Missing' {
+            return ("A write of $Path did not finish, and $Of, which it is a copy of, is missing, so the launcher cannot tell which version of the copy to keep. " +
+                "Put $Of back, for example from its copies below LauncherData\backups, then start again.")
+        }
+        'Folder' {
+            return ("A write of $Path did not finish, and a folder has the name of $Of, which it is a copy of, so the launcher cannot tell which version of the copy " +
+                "to keep. Move that folder away and put $Of back, then start again.")
+        }
+        'Unreadable' {
+            return ("A write of $Path did not finish, and the launcher cannot read $Of to tell which version of the copy to keep. " +
+                "Make $Of readable again, for example by closing the program that holds it, then start again.")
+        }
+    }
+    Get-PvmLeftoverProblem -Path $Path -Current $now.Bytes
+}
+
+# Throw a stop when the file $Path is read-only or a link, which the launcher does not rewrite.
+function Assert-PvmRewritable {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+    $attributes = [IO.File]::GetAttributes($Path)
+    if ($attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw (Get-PvmStopException -Message "$Path is a link, so the launcher does not rewrite it. Put the file itself in its place, then start again. Nothing was started.")
+    }
+    if ($attributes -band [IO.FileAttributes]::ReadOnly) {
+        throw (Get-PvmStopException -Message "$Path is read-only, so the launcher does not rewrite it. Clear that attribute, then start again. Nothing was started.")
+    }
+}
+
+# Return the cause of the failed safe write of the file $Path in $ErrorRecord as it reads after
+# "because": the reason for a refusal of Write-PvmFile, else Get-PvmPathCause's words.
+function Get-PvmWriteCause {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord,
+        [Parameter(Mandatory)][string]$Path
+    )
+    switch ("$($ErrorRecord.Exception.Data['PvmWrite'])") {
+        'Leftover' { return 'an earlier write of it did not finish' }
+        'Exists' { return 'an item of that name is in the way' }
+        'Missing' { return 'it is missing' }
+        'NotAFile' { return 'a folder has its name' }
+        'ReadOnly' { return 'it is read-only' }
+        'Link' { return 'it is a link' }
+        'Changed' { return 'another program changed it after the launcher read it' }
+        'ReadBack' { return 'the new version did not read back as written' }
+    }
+    Format-PvmBecause -Cause (Get-PvmPathCause -Path $Path -ErrorRecord $ErrorRecord)
+}
+
+# Return whether the error $ErrorRecord comes from a safe write: a refusal of Write-PvmFile, or a
+# file error of Windows. Any other error is unexpected and passes on as it is.
+function Test-PvmWriteError {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+    if ($ErrorRecord.Exception.Data['PvmWrite']) { return $true }
+    $exception = $ErrorRecord.Exception
+    while ($exception -is [System.Management.Automation.MethodInvocationException] -and $null -ne $exception.InnerException) { $exception = $exception.InnerException }
+    $exception -is [IO.IOException] -or $exception -is [UnauthorizedAccessException]
+}
+
+# Return the stop for the failed safe write in $ErrorRecord: the Format-PvmMessage template
+# $Template, with {Cause} filled in by Get-PvmWriteCause for the file $Path and its other tokens
+# by $Values, in one pass, so that a brace in a path is never read as a token. The system's
+# message stays for the log.
+function Get-PvmWriteStop {
+    [CmdletBinding()]
+    [OutputType([System.Exception])]
+    param(
+        [Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Template,
+        [hashtable]$Values = @{}
+    )
+    $filled = @{ Cause = (Get-PvmWriteCause -ErrorRecord $ErrorRecord -Path $Path) }
+    foreach ($key in $Values.Keys) { $filled[$key] = $Values[$key] }
+    $exception = Get-PvmStopException -Message (Format-PvmMessage -Template $Template -Names @{ VM = $null; Guest = $null } -Values $filled)
+    $detail = $ErrorRecord.Exception.Data['PvmDetail']
+    $exception.Data['PvmDetail'] = if ($detail) { "$detail" } else { Get-PvmErrorText -ErrorRecord $ErrorRecord }
+    $exception
+}
+
+# Prepare pointing the existing descriptor $Path at the stick: its extents and createType become
+# those of $Layout (ConvertTo-PvmDescriptorText), every other byte stays, and today's line goes to
+# $LogPath. Stops, before any file changes, at a cut-off write of it or of its copies $BackupPath
+# and $PreviousPath, at a descriptor the launcher does not understand, and at one it may not
+# rewrite. Returns the change for Save-PvmFileChange, or $null when it points at the stick already.
+function Get-PvmDescriptorChange {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$BackupPath,
+        [Parameter(Mandatory)][string]$PreviousPath,
+        [Parameter(Mandatory)][string]$LogPath
+    )
+    Assert-PvmNoLeftover -Paths $Path, $BackupPath
+    $problem = Get-PvmCopyLeftoverProblem -Path $PreviousPath -Of $Path -Disarm
+    if ($problem) { throw (Get-PvmStopException -Message "$problem Nothing was started.") }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    try {
+        $text = ConvertFrom-PvmDescriptorData -Bytes $bytes
+        $new = ConvertTo-PvmDescriptorText -Text $text -Layout $Layout
+    } catch [FormatException] {
+        throw (Get-PvmStopException -Message "Unexpected content in $Path - $($_.Exception.Message). Nothing was started.")
+    }
+    $name = [IO.Path]::GetFileName($Path)
+    # -eq ignores case, as before the redesign, so a change of case alone is not written.
+    if ($new -eq $text) {
+        Write-PvmLog -Path $LogPath -Message "$name already points at the stick"
+        return $null
+    }
+    Write-PvmLog -Path $LogPath -Message "$name -> $($Layout.Extents -join ' | ')"
+    Assert-PvmRewritable -Path $Path
+    if ([IO.File]::Exists($PreviousPath)) { Assert-PvmRewritable -Path $PreviousPath }
+    [pscustomobject]@{
+        Path           = $Path
+        Old            = $bytes
+        New            = [Text.Encoding]::GetEncoding(28591).GetBytes($new)
+        FirstBackup    = $BackupPath
+        PreviousBackup = $PreviousPath
+        Disarm         = $true
+        Action         = 'Point the raw-disk descriptor at the stick'
+    }
+}
+
+# Write the change $Change (Get-PvmDescriptorChange, Get-PvmDriveLetterChange) through safe
+# writes, unless -WhatIf: first the copies of the version before it (Save-PvmFirstCopy, which
+# keeps the first version, and Save-PvmPreviousCopy), then the file itself, which must still hold
+# the bytes read. A failed write stops the launcher, naming the file or the copy and the cause,
+# or the step that sets a write right that did not finish, and puts back the copy of the version
+# before the latest rewrite. So does an old version of the file that cannot be removed: the VM
+# must not start and write the file while the step would put that version back.
+function Save-PvmFileChange {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Change,
+        [Parameter(Mandatory)][string]$LogPath
+    )
+    if (-not $PSCmdlet.ShouldProcess($Change.Path, $Change.Action)) { return }
+    $values = @{ Path = $Change.Path }
+    $copy = $Change.FirstBackup
+    try {
+        Save-PvmFirstCopy -Bytes $Change.Old -BackupPath $Change.FirstBackup -Disarm:$Change.Disarm
+        $copy = $Change.PreviousBackup
+        $previous = Save-PvmPreviousCopy -Bytes $Change.Old -BackupPath $Change.PreviousBackup -Disarm:$Change.Disarm
+    } catch {
+        if (-not (Test-PvmWriteError -ErrorRecord $_)) { throw }
+        $leftover = Get-PvmLeftoverProblem -Path $copy
+        if ($leftover) { throw (Get-PvmWriteStop -ErrorRecord $_ -Path $copy -Template '{Leftover} Nothing was started.' -Values @{ Leftover = $leftover }) }
+        throw (Get-PvmWriteStop -ErrorRecord $_ -Path $copy -Values @{ Copy = $copy; Path = $Change.Path } -Template (
+                'The launcher could not write the copy {Copy}, because {Cause}, so it did not rewrite {Path}. Nothing was started.'))
+    }
+    try {
+        $left = Write-PvmFile -Path $Change.Path -Bytes $Change.New -Expected $Change.Old
+    } catch {
+        if (-not (Test-PvmWriteError -ErrorRecord $_)) { throw }
+        $failure = $_
+        # No rewrite took place, so the copy of the version before the latest one goes back.
+        if ($previous) { Restore-PvmPreviousCopy -Previous $previous -BackupPath $Change.PreviousBackup -LogPath $LogPath }
+        $leftover = Get-PvmLeftoverProblem -Path $Change.Path
+        if ($leftover) { throw (Get-PvmWriteStop -ErrorRecord $failure -Path $Change.Path -Template '{Leftover} Nothing was started.' -Values @{ Leftover = $leftover }) }
+        # A refusal of Write-PvmFile comes before the swap, so the file is as the launcher found it.
+        $code = "$($failure.Exception.Data['PvmWrite'])"
+        # A file that cannot be read now counts as changed, so the stop still forms.
+        try { $unchanged = [IO.File]::Exists($Change.Path) -and (Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($Change.Path)) -Right $Change.Old) }
+        catch { $unchanged = $false }
+        $values.State = if ($code -eq 'Changed') { 'the launcher left it as that program wrote it. Close that program, then start again' }
+        elseif ($code) { 'the launcher left it as it is' }
+        elseif ($unchanged) { 'the file is unchanged' }
+        else { 'check the file against its copies below LauncherData\backups' }
+        throw (Get-PvmWriteStop -ErrorRecord $failure -Path $Change.Path -Values $values -Template 'The launcher could not rewrite {Path}, because {Cause}; {State}. Nothing was started.')
+    }
+    if ($left) {
+        # The step puts the version before back, so that copy goes back as it was too.
+        if ($previous) { Restore-PvmPreviousCopy -Previous $previous -BackupPath $Change.PreviousBackup -LogPath $LogPath }
+        $problem = Get-PvmLeftoverProblem -Path $Change.Path
+        # Both files are gone when the stick went away meanwhile.
+        if (-not $problem) { $problem = "The launcher could not remove $left after it rewrote $($Change.Path). Check both, then start again." }
+        throw (Get-PvmStopException -Message "$problem Nothing was started.")
+    }
+}
+
+# Point the existing descriptor $Path at the stick (Get-PvmDescriptorChange, then
+# Save-PvmFileChange), keeping its first version at $BackupPath and the version before the latest
+# rewrite at $PreviousPath, both disarmed, and logging to $LogPath.
 function Set-PvmDiskDescriptor {
     [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$BackupPath,
+        [Parameter(Mandatory)][string]$PreviousPath,
         [Parameter(Mandatory)][string]$LogPath
     )
-    $text = [IO.File]::ReadAllText($Path)
-    $new = ConvertTo-PvmDescriptorText -Text $text -Layout $Layout
-    if ($null -eq $new) { throw (Get-PvmStopException -Message "Unexpected content in $Path - no disk extent found. Nothing was started.") }
-    $name = Split-Path $Path -Leaf
-    # -eq ignores case, as before the redesign, so a change of case alone is not written.
-    if ($new -eq $text) {
-        Write-PvmLog -Path $LogPath -Message "$name already points at the stick"
-        return
-    }
-    Write-PvmLog -Path $LogPath -Message "$name -> $($Layout.Extents -join ' | ')"
-    if (-not $PSCmdlet.ShouldProcess($Path, 'Point the raw-disk descriptor at the stick')) { return }
-    Save-PvmFirstCopy -Path $Path -BackupPath $BackupPath -Disarm
-    [IO.File]::WriteAllText($Path, $new, (New-Object System.Text.UTF8Encoding $false))
+    $change = Get-PvmDescriptorChange -Path $Path -Layout $Layout -BackupPath $BackupPath -PreviousPath $PreviousPath -LogPath $LogPath
+    if ($null -ne $change) { Save-PvmFileChange -Change $change -LogPath $LogPath }
 }
 
-# Create the VMware descriptor $Path for $Layout (Get-PvmVMwareDescriptorText) as ASCII, and log
-# it to $LogPath.
+# Create the VMware descriptor $Path for $Layout (Get-PvmVMwareDescriptorText) as ASCII through a
+# safe write, and log it to $LogPath. Stops at a write of it that did not finish, which also
+# shows when the descriptor is missing because a rewrite was cut off, and, a dry run too, when
+# its folder is missing.
 function New-PvmVMwareDescriptor {
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -1159,60 +1738,145 @@ function New-PvmVMwareDescriptor {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$LogPath
     )
+    Assert-PvmNoLeftover -Paths $Path
     Write-PvmLog -Path $LogPath -Message "Creating $(Split-Path $Path -Leaf) -> $($Layout.Extents -join ' | ')"
+    if (-not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($Path))) {
+        throw (Get-PvmStopException -Message "The launcher could not create $Path, because its folder is missing. Nothing was started.")
+    }
     if (-not $PSCmdlet.ShouldProcess($Path, 'Create the raw-disk descriptor')) { return }
-    [IO.File]::WriteAllText($Path, (Get-PvmVMwareDescriptorText -Layout $Layout), [Text.Encoding]::ASCII)
+    try {
+        $null = Write-PvmFile -Path $Path -Bytes ([Text.Encoding]::ASCII.GetBytes((Get-PvmVMwareDescriptorText -Layout $Layout)))
+    } catch {
+        if (-not (Test-PvmWriteError -ErrorRecord $_)) { throw }
+        throw (Get-PvmWriteStop -ErrorRecord $_ -Path $Path -Values @{ Path = $Path } -Template 'The launcher could not create {Path}, because {Cause}. Nothing was started.')
+    }
 }
 
 # --- Drive letters ---------------------------------------------------------------------------
 # VirtualBox stores some paths on the stick with a drive letter, such as the VM's entry in
 # VirtualBox.xml, and the stick's letter differs between PCs.
 
-# Return $Text with the drive letter of every quoted path below the folder $Root set to $Letter,
-# for \ and / separators alike. Known limits, kept from before the redesign until phase 5: the
-# match is case-sensitive, nothing matches when $Root is a drive root, and $Root goes into the
-# replacement unescaped, so a '$' in a folder name is read as a substitution.
+# Return $Text with the drive letter of each quoted path on the stick set to $Letter. When the
+# stick folder $Root lies below a drive root, those are the paths below it. When $Root is a drive
+# root, they are the paths on the letters that the quoted paths to the stick's own files $Known
+# show in $Text, so a path on another drive never moves, and with no such path nothing moves.
+# Folders match in any case, \ and / both count, an & matches only as XML writes it (&amp;), and
+# only the letter changes, so the rest of each path stays as written.
 function ConvertTo-PvmDriveLetterText {
     [CmdletBinding()]
     [OutputType([string])]
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
         [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][string]$Letter
+        [Parameter(Mandatory)][string]$Letter,
+        [string[]]$Known = @()
     )
-    $new = $Text
-    foreach ($separator in '\', '/') {
-        $relative = $Root.Substring(2).Replace('\', $separator) + $separator
-        $new = [regex]::Replace($new, '"[A-Za-z]:' + [regex]::Escape($relative), ('"' + $Letter + ':' + $relative))
+    $separator = '[\\/]'
+    $options = [Text.RegularExpressions.RegexOptions]'IgnoreCase, CultureInvariant'
+    $quotedLetter = '"' + $Letter
+    $evaluator = [Text.RegularExpressions.MatchEvaluator] { param($match) $quotedLetter + $match.Value.Substring(2) }
+    $below = if ($Root.Length -gt 3) { $Root.Substring(3) } else { '' }
+    $folders = @($below.Split([char[]]'\/', [StringSplitOptions]::RemoveEmptyEntries))
+    # VirtualBox's files are XML, which always writes an & as &amp;.
+    if ($folders.Count) {
+        $pattern = '"[A-Za-z]:' + (($folders | ForEach-Object { $separator + [regex]::Escape($_.Replace('&', '&amp;')) }) -join '') + $separator
+        return [regex]::Replace($Text, $pattern, $evaluator, $options)
     }
-    $new
+    $letters = @(foreach ($file in $Known) {
+            $parts = @($file.Substring([Math]::Min(3, $file.Length)).Split([char[]]'\/', [StringSplitOptions]::RemoveEmptyEntries))
+            if (-not $parts.Count) { continue }
+            $pattern = '"(?<letter>[A-Za-z]):' + (($parts | ForEach-Object { $separator + [regex]::Escape($_.Replace('&', '&amp;')) }) -join '') + '"'
+            foreach ($match in [regex]::Matches($Text, $pattern, $options)) { $match.Groups['letter'].Value.ToUpperInvariant() }
+        }) | Sort-Object -Unique
+    if (-not @($letters).Count) { return $Text }
+    [regex]::Replace($Text, '"[' + (@($letters) -join '') + ']:' + $separator, $evaluator, $options)
 }
 
-# Set the stick's drive letter $Letter in the paths below $Root in the file $Path
-# (ConvertTo-PvmDriveLetterText), and log to $LogPath whether anything changed. Before the first
-# rewrite the file is copied to $BackupPath (Save-PvmFirstCopy), which is never replaced; the file
-# is written as UTF-8 without a BOM.
+# Return whether the text $New differs from $Old only in drive letters: the same length, and at
+# each place where they differ a letter right after a double quote and before a colon. A rewrite
+# that would change more is refused.
+function Test-PvmLetterChangeOnly {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Old,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$New
+    )
+    if ($Old.Length -ne $New.Length) { return $false }
+    for ($index = 0; $index -lt $Old.Length; $index++) {
+        if ($Old[$index] -ceq $New[$index]) { continue }
+        $letters = [char]::IsLetter($Old[$index]) -and [char]::IsLetter($New[$index]) -and [int]$Old[$index] -lt 128 -and [int]$New[$index] -lt 128
+        if (-not $letters -or $index -eq 0 -or $index + 1 -ge $Old.Length -or $Old[$index - 1] -ne '"' -or $Old[$index + 1] -ne ':') { return $false }
+    }
+    $true
+}
+
+# Prepare setting the stick's drive letter $Letter in the paths on the stick in the VirtualBox
+# file $Path (ConvertTo-PvmDriveLetterText with $Root and $Known), and log to $LogPath whether
+# anything changes. The file is read as strict UTF-8, as VirtualBox writes it, and every byte but
+# the letters stays, a byte order mark too. Stops, before any file changes, at a cut-off write of
+# it or of its copies $BackupPath and $PreviousPath, at a file that is not UTF-8, at a change that
+# would be more than drive letters, and at a file it may not rewrite. Returns the change for
+# Save-PvmFileChange, or $null when the letters fit already.
+function Get-PvmDriveLetterChange {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Letter,
+        [string[]]$Known = @(),
+        [Parameter(Mandatory)][string]$BackupPath,
+        [Parameter(Mandatory)][string]$PreviousPath,
+        [Parameter(Mandatory)][string]$LogPath
+    )
+    Assert-PvmNoLeftover -Paths $Path, $BackupPath
+    $problem = Get-PvmCopyLeftoverProblem -Path $PreviousPath -Of $Path
+    if ($problem) { throw (Get-PvmStopException -Message "$problem Nothing was started.") }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $strict = New-Object System.Text.UTF8Encoding $false, $true
+    try { $text = $strict.GetString($bytes) }
+    catch { throw (Get-PvmStopException -Message "$Path is not UTF-8 text, as VirtualBox writes it, so the launcher does not change its drive letters. Nothing was started.") }
+    $new = ConvertTo-PvmDriveLetterText -Text $text -Root $Root -Letter $Letter -Known $Known
+    $name = [IO.Path]::GetFileName($Path)
+    # -eq ignores case, as before the redesign, so a letter that differs only in case stays.
+    if ($new -eq $text) {
+        Write-PvmLog -Path $LogPath -Message "${name}: drive letter OK"
+        return $null
+    }
+    Write-PvmLog -Path $LogPath -Message "${name}: paths moved to drive ${Letter}:"
+    if (-not (Test-PvmLetterChangeOnly -Old $text -New $new)) {
+        throw (Get-PvmStopException -Message "The launcher would change more than drive letters in $Path, so it leaves the file as it is. Nothing was started.")
+    }
+    Assert-PvmRewritable -Path $Path
+    if ([IO.File]::Exists($PreviousPath)) { Assert-PvmRewritable -Path $PreviousPath }
+    [pscustomobject]@{
+        Path           = $Path
+        Old            = $bytes
+        New            = $strict.GetBytes($new)
+        FirstBackup    = $BackupPath
+        PreviousBackup = $PreviousPath
+        Disarm         = $false
+        Action         = "Move the stick's paths to drive ${Letter}:"
+    }
+}
+
+# Set the stick's drive letter $Letter in the VirtualBox file $Path (Get-PvmDriveLetterChange,
+# then Save-PvmFileChange), keeping its first version at $BackupPath and the version before the
+# latest rewrite at $PreviousPath, and logging to $LogPath.
 function Set-PvmDriveLetterInFile {
     [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$Letter,
+        [string[]]$Known = @(),
         [Parameter(Mandatory)][string]$BackupPath,
+        [Parameter(Mandatory)][string]$PreviousPath,
         [Parameter(Mandatory)][string]$LogPath
     )
-    $text = [IO.File]::ReadAllText($Path)
-    $new = ConvertTo-PvmDriveLetterText -Text $text -Root $Root -Letter $Letter
-    $name = Split-Path $Path -Leaf
-    # -eq ignores case, as before the redesign, so a letter that differs only in case stays.
-    if ($new -eq $text) {
-        Write-PvmLog -Path $LogPath -Message "${name}: drive letter OK"
-        return
-    }
-    Write-PvmLog -Path $LogPath -Message "${name}: paths moved to drive ${Letter}:"
-    if (-not $PSCmdlet.ShouldProcess($Path, "Move the stick's paths to drive ${Letter}:")) { return }
-    Save-PvmFirstCopy -Path $Path -BackupPath $BackupPath
-    [IO.File]::WriteAllText($Path, $new, (New-Object System.Text.UTF8Encoding $false))
+    $change = Get-PvmDriveLetterChange -Path $Path -Root $Root -Letter $Letter -Known $Known -BackupPath $BackupPath -PreviousPath $PreviousPath -LogPath $LogPath
+    if ($null -ne $change) { Save-PvmFileChange -Change $change -LogPath $LogPath }
 }
 
 # --- Running VMs -----------------------------------------------------------------------------
@@ -1375,6 +2039,48 @@ function Get-PvmVirtualBoxState {
     if ($null -eq $machine) { return [pscustomobject]@{ State = 'Unknown'; Reason = 'the file has no Machine element' } }
     $state = if ($machine.GetAttribute('stateFile')) { 'Saved' } else { 'NotSaved' }
     [pscustomobject]@{ State = $state; Reason = '' }
+}
+
+# Return the files a start may write, as the settings in $Context name them, each followed by its
+# first copy and the copy of the version before its latest rewrite below the backups folder: the
+# VMware descriptor, the .vbox, VirtualBox.xml and the VirtualBox descriptor. Each has its Path;
+# a copy also the file it is Of, whether its copies are disarmed (Disarm), and whether it is the
+# copy of the version before (Previous).
+function Get-PvmWrittenPath {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param([Parameter(Mandatory)][pscustomobject]$Context)
+    $settings = $Context.Settings
+    $backup = @{ Root = $Context.Root; Backups = $Context.Backups }
+    $files = @(
+        @{ Path = (Join-Path $Context.Root $settings['VMwareDisk']); Suffix = '.orig' }
+        @{ Path = (Join-Path $Context.Root $settings['VirtualBoxVbox']); Suffix = '.launcher-backup' }
+        @{ Path = (Join-Path (Join-Path $Context.Root $settings['VirtualBoxHome']) 'VirtualBox.xml'); Suffix = '.launcher-backup' }
+        @{ Path = (Join-Path $Context.Root $settings['VirtualBoxDisk']); Suffix = '.orig' }
+    )
+    foreach ($file in $files) {
+        $disarm = $file.Suffix -eq '.orig'
+        [pscustomobject]@{ Path = $file.Path; Of = ''; Disarm = $disarm; Previous = $false }
+        [pscustomobject]@{ Path = (Get-PvmBackupPath @backup -Path $file.Path -Suffix $file.Suffix); Of = $file.Path; Disarm = $disarm; Previous = $false }
+        [pscustomobject]@{ Path = (Get-PvmBackupPath @backup -Path $file.Path -Suffix ('.previous' + $file.Suffix)); Of = $file.Path; Disarm = $disarm; Previous = $true }
+    }
+}
+
+# Stop a start, a dry run as it stops (Invoke-PvmStopUnlessDryRun), at a write that did not finish
+# of a file the start may write or of a copy of one (Get-PvmWrittenPath), with the step that sets
+# it right. A file's own step comes before its copies', which are checked against the file as it
+# is then.
+function Assert-PvmNoWrittenLeftover {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][pscustomobject]$Context)
+    $broken = @{}
+    foreach ($entry in @(Get-PvmWrittenPath -Context $Context)) {
+        if ($entry.Of -and $broken.ContainsKey($entry.Of)) { continue }
+        $problem = if ($entry.Previous) { Get-PvmCopyLeftoverProblem -Path $entry.Path -Of $entry.Of -Disarm:$entry.Disarm } else { Get-PvmLeftoverProblem -Path $entry.Path }
+        if (-not $problem) { continue }
+        if (-not $entry.Of) { $broken[$entry.Path] = $true }
+        Invoke-PvmStopUnlessDryRun -Context $Context -Message "$problem Nothing was started."
+    }
 }
 
 # Stop the launcher when $State, from Get-PvmVMwareState or Get-PvmVirtualBoxState, is Unknown:
@@ -1566,9 +2272,10 @@ function Invoke-PvmVMware {
 
     Enter-PvmStep -Context $Context -Name 'files'
     $disk = Join-Path $Context.Root $settings['VMwareDisk']
-    if (Test-Path -LiteralPath $disk) {
-        $backup = Get-PvmBackupPath -Root $Context.Root -Backups $Context.Backups -Path $disk -Suffix '.orig'
-        Set-PvmDiskDescriptor -Path $disk -Layout $layout -BackupPath $backup -LogPath $log -WhatIf:$Context.DryRun
+    if ([IO.File]::Exists($disk)) {
+        $copies = @{ Root = $Context.Root; Backups = $Context.Backups; Path = $disk }
+        $change = Get-PvmDescriptorChange -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @copies -Suffix '.orig') -PreviousPath (Get-PvmBackupPath @copies -Suffix '.previous.orig') -LogPath $log
+        if ($null -ne $change) { Save-PvmFileChange -Change $change -LogPath $log -WhatIf:$Context.DryRun }
     } else {
         New-PvmVMwareDescriptor -Path $disk -Layout $layout -LogPath $log -WhatIf:$Context.DryRun
     }
@@ -1687,10 +2394,15 @@ function Invoke-PvmVirtualBox {
     $registry = Join-Path (Join-Path $Context.Root $settings['VirtualBoxHome']) 'VirtualBox.xml'
     $disk = Join-Path $Context.Root $settings['VirtualBoxDisk']
     $backup = @{ Root = $Context.Root; Backups = $Context.Backups }
-    $letterChange = @{ Root = $Context.Root; Letter = $Context.Letter; LogPath = $log; WhatIf = $Context.DryRun }
-    Set-PvmDriveLetterInFile -Path $vbox -BackupPath (Get-PvmBackupPath @backup -Path $vbox -Suffix '.launcher-backup') @letterChange
-    Set-PvmDriveLetterInFile -Path $registry -BackupPath (Get-PvmBackupPath @backup -Path $registry -Suffix '.launcher-backup') @letterChange
-    Set-PvmDiskDescriptor -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @backup -Path $disk -Suffix '.orig') -LogPath $log -WhatIf:$Context.DryRun
+    # At a drive root the paths to the VM's own files show the stick's old letter.
+    $letters = @{ Root = $Context.Root; Letter = $Context.Letter; Known = @($vbox, $disk); LogPath = $log }
+    # Every file is checked first, so that a refusal leaves all of them as they are.
+    $changes = @(@(
+            Get-PvmDriveLetterChange -Path $vbox -BackupPath (Get-PvmBackupPath @backup -Path $vbox -Suffix '.launcher-backup') -PreviousPath (Get-PvmBackupPath @backup -Path $vbox -Suffix '.previous.launcher-backup') @letters
+            Get-PvmDriveLetterChange -Path $registry -BackupPath (Get-PvmBackupPath @backup -Path $registry -Suffix '.launcher-backup') -PreviousPath (Get-PvmBackupPath @backup -Path $registry -Suffix '.previous.launcher-backup') @letters
+            Get-PvmDescriptorChange -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @backup -Path $disk -Suffix '.orig') -PreviousPath (Get-PvmBackupPath @backup -Path $disk -Suffix '.previous.orig') -LogPath $log
+        ) | Where-Object { $null -ne $_ })
+    foreach ($change in $changes) { Save-PvmFileChange -Change $change -LogPath $log -WhatIf:$Context.DryRun }
     Enter-PvmStep -Context $Context -Name 'start'
     if ($Context.DryRun) {
         Write-PvmLog -Path $log -Message "DRY RUN - would start VM {$uuid} with VirtualBox ($VirtualBoxDir)"
@@ -1753,6 +2465,9 @@ function Invoke-PvmLaunch {
     # Each state is logged as soon as it is known, so a .vbox that cannot be read does not hide a
     # VMware suspend from the log. A state the launcher cannot tell stops it.
     $vbox = Join-Path $Context.Root $settings['VirtualBoxVbox']
+    # A write that did not finish, of any file a start may write or of a copy of one, stops a start
+    # in either hypervisor before a file is read, with the step that sets it right.
+    Assert-PvmNoWrittenLeftover -Context $Context
     $Context.VMwareState = Get-PvmVMwareState -Path $vmx
     if ($Context.VMwareState.State -eq 'Saved') { Write-PvmLog -Path $log -Message 'Saved state found: suspended in VMware' }
     Assert-PvmKnownState -Context $Context -State $Context.VMwareState -What 'whether {vm} is suspended in VMware' -Setting 'VMwareVmx' -Path $vmx

@@ -137,6 +137,51 @@ B. On the stick, from an elevated PowerShell, with VirtualBox closed for a minut
 
 No real start is needed for phase 4.
 
+## Phase 5 checks
+
+Phase 5 writes the VM files through a safe write, reads descriptors with a strict parser, fixes
+drive letters at a drive root and keeps the version before the latest rewrite. It changes how the
+files are written, not what a hypervisor reads, so its checks need no step on the VHDX test disk.
+Before its pull request is merged, from an elevated PowerShell, with VirtualBox closed for a
+minute before:
+
+1. With the phase 4 launcher still on the stick, copy the config text files outside the
+   repository, run the inventory and a dry run in each hypervisor (set `Hypervisor` for the
+   second one and put the file back), and keep their lines and exit codes outside the
+   repository.
+2. On the PC, never the stick: let the branch's module read the copies of the two descriptors
+   (`ConvertFrom-PvmDescriptorData`, then `ConvertFrom-PvmDescriptorText`). A refusal stops the
+   check until it is understood, since a start would stop at it too.
+3. Deploy phase 5 (README, *Install or update*). `Launcher` matches its `SHA256SUMS`, and no
+   `*.pvm-tmp` or `*.pvm-old` file is below the stick folder.
+4. Run the same dry runs. After dropping the prefixes and the `Timings:` lines, each run's lines
+   equal those of step 1 apart from the version line and a wait line, if VirtualBox's background
+   service ran, and the exit codes are the same. Any other difference stops the check until it
+   is understood.
+5. VMware start. Disarm the VMware descriptor in place (`ConvertTo-PvmDisarmedDescriptorText`,
+   written through `Write-PvmFile` with `-Expected`), so that the start must rewrite it. Start
+   the VM with `Start VM.cmd`, use the guest and shut it down from inside. The log shows the
+   descriptor's `->` line, `Started with VMware Workstation` and exit code 0. Afterwards:
+   - the descriptor's extent lines equal those of its step 1 copy, apart from the device names
+     if Windows numbered the stick differently; any other line may differ only where VMware keeps
+     its own entries (`CID` and `ddb.` lines);
+   - its `.previous.orig` copy below `LauncherData\backups` equals the step 1 copy disarmed, and
+     a first copy that was there before is unchanged;
+   - no `*.pvm-tmp` or `*.pvm-old` file is below the stick folder.
+6. VirtualBox start. Set `Hypervisor` to VirtualBox for this start and disarm the VirtualBox
+   descriptor in the same way. Start the VM with `Start VM.cmd`, use the guest and shut it down
+   from inside, then put the settings file back byte for byte. The log shows a drive-letter line
+   for the `.vbox` file and one for `VirtualBox.xml`, then the descriptor's `->` line, `Started
+   with VirtualBox` and exit code 0. Afterwards the descriptor and its copies are as in step 5,
+   with VirtualBox in place of VMware; a file whose paths moved has a `.previous.launcher-backup`
+   copy equal to its step 1 copy; and no `*.pvm-tmp` or `*.pvm-old` file is below the stick
+   folder. VirtualBox rewrites the `.vbox` file and `VirtualBox.xml` itself while the VM runs, so
+   they are not compared with step 1.
+7. Run the inventory again: every answer as in step 1.
+
+By hand, the owner starts the VM twice, and each time uses the guest and shuts it down from
+inside; never pull the stick while a VM runs.
+
 ## Rules for the real stick
 
 - Never switch VirtualBox's host I/O cache off for the stick's controller.

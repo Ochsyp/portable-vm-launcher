@@ -32,6 +32,8 @@ VBox*.log*
 *.vbox
 *.vbox-prev
 *.vbox-tmp
+*.pvm-tmp
+*.pvm-old
 *.vdi
 *.vhd
 *.vhdx
