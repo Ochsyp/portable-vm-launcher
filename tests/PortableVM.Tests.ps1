@@ -458,6 +458,25 @@ Describe 'Safe writes' {
         Test-PvmSameContent -Left ([IO.File]::ReadAllBytes("$script:file.pvm-old")) -Right $script:oldBytes | Should -BeTrue
     }
 
+    It 'name, beside a copy put back whose swap stopped between its renames, the step that keeps the copy put back' {
+        # The copy's name is free, its version before repeats the file as it is now, and the new copy is the one put back.
+        [IO.File]::WriteAllBytes("$script:file.pvm-old", $script:newBytes)
+        [IO.File]::WriteAllBytes("$script:file.pvm-tmp", $script:oldBytes)
+        Get-PvmLeftoverProblem -Path $script:file -Current $script:newBytes | Should -BeExactly ("A write of $script:file did not finish. To set it right, rename stick.vmdk.pvm-tmp " +
+            'to stick.vmdk and remove stick.vmdk.pvm-old, which holds a copy of the file as it is now.')
+        Get-PvmLeftoverProblem -Path $script:file -Current $script:oldBytes |
+            Should -BeExactly "A write of $script:file did not finish. To set it right, rename stick.vmdk.pvm-old back to stick.vmdk and remove stick.vmdk.pvm-tmp."
+    }
+
+    It 'name a step that needs no guess when the version before beside a copy cannot be read' {
+        [IO.File]::WriteAllBytes($script:file, $script:oldBytes)
+        [IO.File]::WriteAllBytes("$script:file.pvm-old", $script:newBytes)
+        $held = [IO.File]::Open("$script:file.pvm-old", 'Open', 'Read', 'None')
+        try { $problem = Get-PvmLeftoverProblem -Path $script:file -Current $script:newBytes }
+        finally { $held.Dispose() }
+        $problem | Should -BeExactly "A write of $script:file did not finish, and stick.vmdk.pvm-old beside it cannot be read. Close the program that holds it, then start again."
+    }
+
     It 'name the one step that sets right a write that did not finish: <Case>' -ForEach @(
         @{ Case = 'nothing left'; Names = @('stick.vmdk'); Step = '' }
         @{ Case = 'a new copy beside the file'; Names = @('stick.vmdk', 'stick.vmdk.pvm-tmp'); Step = 'remove stick.vmdk.pvm-tmp; stick.vmdk itself is whole' }
@@ -1247,6 +1266,31 @@ Describe 'A start' {
             $result.Message | Should -BeExactly "A write of $($script:stick.VMwareDisk) did not finish. To set it right, rename stick.vmdk.pvm-old back to stick.vmdk. Nothing was started."
             $script:stick.VMwareDisk | Should -Not -Exist
             Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+        }
+
+        It 'stops without guessing, a dry run too, when <Case>' -ForEach @(
+            @{ Case = 'the version before beside a copy cannot be read'; Held = 'old'
+                Message = 'A write of <copy> did not finish, and Test VM.vbox.previous.launcher-backup.pvm-old beside it cannot be read. Close the program that holds it, then start again. Nothing was started.'
+            }
+            @{ Case = 'the file of a copy with its version before beside it cannot be read'; Held = 'file'
+                Message = ('A write of <copy> did not finish, and the launcher cannot read <vbox> to tell which version of the copy to keep. Make <vbox> readable again, ' +
+                    'for example by closing the program that holds it, then start again. Nothing was started.')
+            }
+        ) {
+            $copy = Join-Path $script:stick.Backups 'VirtualBox\Test VM\Test VM.vbox.previous.launcher-backup'
+            Write-TestFile -Path $copy -Text '<VirtualBox old="1"/>'
+            [IO.File]::Copy($script:stick.Vbox, "$copy.pvm-old")
+            $target = if ($Held -eq 'old') { "$copy.pvm-old" } else { $script:stick.Vbox }
+            $handle = [IO.File]::Open($target, 'Open', 'Read', 'None')
+            try {
+                foreach ($dryRun in $false, $true) {
+                    $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun
+                    $result.ExitCode | Should -Be 1
+                    $result.Message | Should -BeExactly $Message.Replace('<copy>', $copy).Replace('<vbox>', $script:stick.Vbox)
+                }
+            } finally {
+                $handle.Dispose()
+            }
         }
 
         It 'names the step, in a start and a dry run, when a write of the .vbox did not finish and left it missing, and starts nothing' {

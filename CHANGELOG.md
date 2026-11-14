@@ -100,7 +100,8 @@ All notable changes to this project are listed here. The format follows
   reads back. A crash or a pulled stick leaves the old or the new version, never a mix, and the
   next start, in either hypervisor, stops at a leftover copy and names the one step to take,
   which keeps the version from before that write, or the copy itself beside a copy whose old
-  version repeats its file as it is now. A new version that does not read back from its place,
+  version repeats its file as it is now; when that file cannot be read, it asks for that first
+  rather than guess. A new version that does not read back from its place,
   and an old one that cannot be removed after three tries a second apart, stop the start the
   same way, before the VM starts.
 - A copy of the version before the latest rewrite, `*.previous.orig` or

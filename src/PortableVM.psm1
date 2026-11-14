@@ -1034,7 +1034,9 @@ function Get-PvmWriteCopyPath {
 # or the old version beside it, which the write found unchanged. So it is right also when the new
 # version did not read back from its place, and the next run makes its change again. $Current, for
 # a copy below the backups, is that copy as it would be made of its file now: an old version that
-# holds exactly that is a copy put back after a failed rewrite left it, and the copy stays.
+# holds exactly that is from a copy put back after a failed rewrite, so the copy put back stays,
+# also when its swap stopped between the two renames. An old version that cannot be read then
+# gets a step that does not guess.
 function Get-PvmLeftoverProblem {
     [CmdletBinding()]
     [OutputType([string])]
@@ -1047,14 +1049,20 @@ function Get-PvmLeftoverProblem {
     $old = [IO.File]::Exists($copies.Old)
     if (-not $temp -and -not $old) { return '' }
     $name = [IO.Path]::GetFileName($Path)
-    $repeats = $null -ne $Current -and $old -and -not $temp -and (Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($copies.Old)) -Right $Current)
+    $repeats = $false
+    if ($null -ne $Current -and $old) {
+        try { $repeats = Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($copies.Old)) -Right $Current }
+        catch { return "A write of $Path did not finish, and $name.pvm-old beside it cannot be read. Close the program that holds it, then start again." }
+    }
     $step = if ([IO.File]::Exists($Path)) {
         if ($temp -and $old) { "remove $name.pvm-tmp and $name.pvm-old; $name itself is whole" }
         elseif ($temp) { "remove $name.pvm-tmp; $name itself is whole" }
         elseif ($repeats) { "remove $name.pvm-old, which holds a copy of the file as it is now; $name itself is whole" }
         else { "remove $name, then rename $name.pvm-old back to $name, which holds the version before the write" }
     } elseif ($old -and $temp) {
-        "rename $name.pvm-old back to $name and remove $name.pvm-tmp"
+        # The new copy was read back before the swap began, so it is whole.
+        if ($repeats) { "rename $name.pvm-tmp to $name and remove $name.pvm-old, which holds a copy of the file as it is now" }
+        else { "rename $name.pvm-old back to $name and remove $name.pvm-tmp" }
     } elseif ($old) {
         "rename $name.pvm-old back to $name"
     } else {
@@ -1460,18 +1468,63 @@ function Restore-PvmPreviousCopy {
     }
 }
 
-# Throw a stop when a write of one of the files $Paths did not finish (Get-PvmLeftoverProblem,
-# with $Current for a copy), with the one step to take, before the launcher changes any file.
+# Throw a stop when a write of one of the files $Paths did not finish (Get-PvmLeftoverProblem),
+# with the one step to take, before the launcher changes any file.
 function Assert-PvmNoLeftover {
     [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string[]]$Paths,
-        [AllowNull()][AllowEmptyCollection()][byte[]]$Current
-    )
+    param([Parameter(Mandatory)][string[]]$Paths)
     foreach ($path in $Paths) {
-        $problem = Get-PvmLeftoverProblem -Path $path -Current $Current
+        $problem = Get-PvmLeftoverProblem -Path $path
         if ($problem) { throw (Get-PvmStopException -Message "$problem Nothing was started.") }
     }
+}
+
+# Return what a copy of the file $Path made now would hold, as Save-PvmPreviousCopy makes it
+# (disarmed with -Disarm), for Get-PvmLeftoverProblem -Current: Readable and the Bytes, or Readable
+# $false when the file is missing, a folder or cannot be read. A descriptor of 1 MiB or more, which
+# the launcher refuses, is not read and gets an empty copy.
+function Get-PvmCopyNow {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$Disarm
+    )
+    [byte[]]$bytes = @()
+    try {
+        $file = [IO.FileInfo]::new($Path)
+        if (-not $file.Exists) { return [pscustomobject]@{ Readable = $false; Bytes = $bytes } }
+        if ($Disarm -and $file.Length -ge 1MB) { return [pscustomobject]@{ Readable = $true; Bytes = $bytes } }
+        $bytes = [IO.File]::ReadAllBytes($Path)
+    } catch {
+        return [pscustomobject]@{ Readable = $false; Bytes = [byte[]]@() }
+    }
+    if ($Disarm) {
+        $latin1 = [Text.Encoding]::GetEncoding(28591)
+        $bytes = $latin1.GetBytes((ConvertTo-PvmDisarmedDescriptorText -Text $latin1.GetString($bytes)))
+    }
+    [pscustomobject]@{ Readable = $true; Bytes = $bytes }
+}
+
+# Return the step for a write that did not finish of the copy $Path of the file $Of below the
+# backups (Get-PvmLeftoverProblem, with the copy that would be made of $Of now, disarmed with
+# -Disarm), or '' when there is none. $Of is read only when an old version is beside the copy;
+# when it cannot be read then, the step says so rather than guess which version to keep.
+function Get-PvmCopyLeftoverProblem {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Of,
+        [switch]$Disarm
+    )
+    if (-not [IO.File]::Exists((Get-PvmWriteCopyPath -Path $Path).Old)) { return (Get-PvmLeftoverProblem -Path $Path) }
+    $now = Get-PvmCopyNow -Path $Of -Disarm:$Disarm
+    if (-not $now.Readable) {
+        return ("A write of $Path did not finish, and the launcher cannot read $Of to tell which version of the copy to keep. " +
+            "Make $Of readable again, for example by closing the program that holds it, then start again.")
+    }
+    Get-PvmLeftoverProblem -Path $Path -Current $now.Bytes
 }
 
 # Throw a stop when the file $Path is read-only or a link, which the launcher does not rewrite.
@@ -1558,11 +1611,9 @@ function Get-PvmDescriptorChange {
         [Parameter(Mandatory)][string]$LogPath
     )
     Assert-PvmNoLeftover -Paths $Path, $BackupPath
+    $problem = Get-PvmCopyLeftoverProblem -Path $PreviousPath -Of $Path -Disarm
+    if ($problem) { throw (Get-PvmStopException -Message "$problem Nothing was started.") }
     $bytes = [IO.File]::ReadAllBytes($Path)
-    # The copy as it would be made of the file now, disarmed, tells a copy put back after a failed rewrite.
-    $latin1 = [Text.Encoding]::GetEncoding(28591)
-    [byte[]]$copy = $latin1.GetBytes((ConvertTo-PvmDisarmedDescriptorText -Text $latin1.GetString($bytes)))
-    Assert-PvmNoLeftover -Paths $PreviousPath -Current $copy
     try {
         $text = ConvertFrom-PvmDescriptorData -Bytes $bytes
         $new = ConvertTo-PvmDescriptorText -Text $text -Layout $Layout
@@ -1766,8 +1817,9 @@ function Get-PvmDriveLetterChange {
         [Parameter(Mandatory)][string]$LogPath
     )
     Assert-PvmNoLeftover -Paths $Path, $BackupPath
+    $problem = Get-PvmCopyLeftoverProblem -Path $PreviousPath -Of $Path
+    if ($problem) { throw (Get-PvmStopException -Message "$problem Nothing was started.") }
     $bytes = [IO.File]::ReadAllBytes($Path)
-    Assert-PvmNoLeftover -Paths $PreviousPath -Current $bytes
     $strict = New-Object System.Text.UTF8Encoding $false, $true
     try { $text = $strict.GetString($bytes) }
     catch { throw (Get-PvmStopException -Message "$Path is not UTF-8 text, as VirtualBox writes it, so the launcher does not change its drive letters. Nothing was started.") }
@@ -2007,20 +2059,10 @@ function Get-PvmWrittenPath {
 function Assert-PvmNoWrittenLeftover {
     [CmdletBinding()]
     param([Parameter(Mandatory)][pscustomobject]$Context)
-    $latin1 = [Text.Encoding]::GetEncoding(28591)
     $broken = @{}
     foreach ($entry in @(Get-PvmWrittenPath -Context $Context)) {
         if ($entry.Of -and $broken.ContainsKey($entry.Of)) { continue }
-        [byte[]]$current = $null
-        if ($entry.Previous -and [IO.File]::Exists($entry.Of)) {
-            try {
-                $current = [IO.File]::ReadAllBytes($entry.Of)
-                if ($entry.Disarm) { $current = $latin1.GetBytes((ConvertTo-PvmDisarmedDescriptorText -Text $latin1.GetString($current))) }
-            } catch {
-                $current = $null
-            }
-        }
-        $problem = Get-PvmLeftoverProblem -Path $entry.Path -Current $current
+        $problem = if ($entry.Previous) { Get-PvmCopyLeftoverProblem -Path $entry.Path -Of $entry.Of -Disarm:$entry.Disarm } else { Get-PvmLeftoverProblem -Path $entry.Path }
         if (-not $problem) { continue }
         if (-not $entry.Of) { $broken[$entry.Path] = $true }
         Invoke-PvmStopUnlessDryRun -Context $Context -Message "$problem Nothing was started."
