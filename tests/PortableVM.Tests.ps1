@@ -13,6 +13,9 @@ BeforeAll {
     $script:utf8 = New-Object System.Text.UTF8Encoding $false
     $script:uuid = '5ca1ab1e-0000-4000-8000-000000000001'
     $script:onWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    # These tests pin the launcher's decisions on Windows, so on another system the launcher takes
+    # its Windows rules here too; the tests of a rule that differs mock the host either way.
+    if (-not $script:onWindows) { Mock -ModuleName PortableVM Test-PvmWindowsHost { $true } }
     # The program names, without .exe, that the launcher's process checks ask for.
     $script:vmwareNames = 'vmware-vmx'
     $script:virtualBoxVmNames = 'VirtualBoxVM,VBoxHeadless'
@@ -410,6 +413,31 @@ Describe 'Host-neutral rules' {
         ) {
             $thrown = try { $null = ConvertFrom-PvmDescriptorText -Text "RW 9 FLAT `"$Target`" 0" } catch { $_ }
             $thrown.Exception.Message | Should -BeExactly 'line 1 has a FLAT extent that names a file, not a raw disk'
+        }
+
+        It 'refuse a /dev path with <Shape>, which can lead out of /dev: <Target>' -ForEach @(
+            @{ Shape = 'a .. in the middle'; Target = '/dev/sdb/../../srv/vm/stick-flat.vmdk' }
+            @{ Shape = 'a .. after a device folder'; Target = '/dev/disk/by-id/../../../srv/vm/flat.vmdk' }
+            @{ Shape = 'a trailing ..'; Target = '/dev/disk/..' }
+            @{ Shape = 'a trailing .'; Target = '/dev/disk/.' }
+            @{ Shape = 'a . in the middle'; Target = '/dev/disk/./sdb' }
+            @{ Shape = 'a trailing separator'; Target = '/dev/sdb/' }
+            @{ Shape = 'an empty name'; Target = '/dev//sdb' }
+            @{ Shape = 'mixed separators with ..'; Target = '/dev/sdb\..\..\srv\vm\flat.vmdk' }
+            @{ Shape = 'mixed separators'; Target = '/dev/disk\by-id/sdb' }
+            @{ Shape = 'a backslash for the first separator'; Target = '/dev\sdb' }
+        ) {
+            Test-PvmRawDeviceTarget -Target $Target | Should -BeFalse
+            $thrown = try { $null = ConvertFrom-PvmDescriptorText -Text "RW 9 FLAT `"$Target`" 0" } catch { $_ }
+            $thrown.Exception.Message | Should -BeExactly 'line 1 has a FLAT extent that names a file, not a raw disk'
+            # The disarm step leaves a target it does not take for a device as it is.
+            ConvertTo-PvmDisarmedDescriptorText -Text "RW 9 FLAT `"$Target`" 0" | Should -BeExactly "RW 9 FLAT `"$Target`" 0"
+        }
+
+        It 'take a /dev path of names without . or .. as a raw disk: <Target>' -ForEach @(
+            @{ Target = '/dev/sdb' }, @{ Target = '/dev/nvme0n1' }, @{ Target = '/dev/disk/by-id/usb-Test_Stick_0-0:0' }, @{ Target = '/dev/mapper/..stick' }
+        ) {
+            Test-PvmRawDeviceTarget -Target $Target | Should -BeTrue
         }
 
         It 'name the disarmed device in the spelling of the device it replaces: <Target>' -ForEach @(
@@ -2791,8 +2819,8 @@ Describe 'Unexpected errors' -Tag 'WindowsOnly' {
     }
 }
 
-Describe 'The drive letter' -Tag 'WindowsOnly' {
-    It 'is the root of a path with a drive letter, in upper case: <Path>' -ForEach @(
+Describe 'The drive letter' {
+    It 'is the root of a path with a drive letter, in upper case: <Path>' -Tag 'WindowsOnly' -ForEach @(
         @{ Path = 'X:\Launcher'; Letter = 'X' }
         @{ Path = 'x:\Folder\Launcher'; Letter = 'X' }
         @{ Path = '\\server\share\Launcher'; Letter = $null }
@@ -2843,6 +2871,24 @@ Describe 'The drive letter' -Tag 'WindowsOnly' {
             Should -Invoke -CommandName Invoke-PvmGetPartition -ModuleName PortableVM -Times 0 -Exactly
             Should -Invoke -CommandName Invoke-PvmGetDisk -ModuleName PortableVM -Times 0 -Exactly
             (Get-TestLog -Path $script:stick.Log) | Should -Contain 'STOPPED: On this system the launcher cannot tell yet which disk is the USB stick; so far it starts the VM only on Windows. Nothing was started.'
+        }
+
+        It 'stops with the plain message before the rights check and the lock on a system other than Windows, where the rights check throws: dry run <DryRun>' -ForEach @(
+            @{ DryRun = $false; Start = '----- Start VM -----'; End = '----- End: exit code 1 -----' }
+            @{ DryRun = $true; Start = '----- Start VM (dry run) -----'; End = '----- End (dry run): exit code 1 -----' }
+        ) {
+            Mock -ModuleName PortableVM Test-PvmWindowsHost { $false }
+            Mock -ModuleName PortableVM Invoke-PvmTestAdministrator { throw [PlatformNotSupportedException]::new('Windows Principal functionality is not supported on this platform.') }
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$DryRun
+            $stop = 'On this system the launcher cannot tell yet which disk is the USB stick; so far it starts the VM only on Windows. Nothing was started.'
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly $stop
+            $result.Icon | Should -BeExactly 'Error'
+            Should -Invoke -CommandName Invoke-PvmTestAdministrator -ModuleName PortableVM -Times 0 -Exactly
+            Should -Invoke -CommandName Invoke-PvmEnterLock -ModuleName PortableVM -Times 0 -Exactly
+            Should -Invoke -CommandName Invoke-PvmGetPartition -ModuleName PortableVM -Times 0 -Exactly
+            $log = Get-TestLog -Path $script:stick.Log
+            $log | Should -BeExactly @($Start, 'Launcher version unknown', "STOPPED: $stop", $End)
         }
     }
 }

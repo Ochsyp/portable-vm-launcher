@@ -232,8 +232,8 @@ function Get-PvmErrnoCause {
 }
 
 # Return the cause of the error $ErrorRecord of a write to the file $Path, as Get-PvmErrorCause
-# words it, but 'a path is too long' when it says 'it is missing' and $Path has 260 characters or
-# more, since Windows without long-path support names a missing part of such a path.
+# words it, but on Windows 'a path is too long' when it says 'it is missing' and $Path has 260
+# characters or more, since Windows without long-path support names a missing part of such a path.
 function Get-PvmPathCause {
     [CmdletBinding()]
     [OutputType([string])]
@@ -242,7 +242,7 @@ function Get-PvmPathCause {
         [Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord
     )
     $cause = Get-PvmErrorCause -ErrorRecord $ErrorRecord
-    if ($cause -eq 'it is missing' -and $Path.Length -ge 260) { return 'a path is too long' }
+    if ($cause -eq 'it is missing' -and $Path.Length -ge 260 -and (Test-PvmWindowsHost)) { return 'a path is too long' }
     $cause
 }
 
@@ -594,6 +594,15 @@ function Get-PvmLockName {
     [OutputType([string])]
     param()
     'Global\PortableVM-Launcher'
+}
+
+# Return the message of a run on a system other than Windows, where the launcher cannot find the
+# stick's disk yet (Get-PvmStickLocation).
+function Get-PvmOtherSystemMessage {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    'On this system the launcher cannot tell yet which disk is the USB stick; so far it starts the VM only on Windows. Nothing was started.'
 }
 
 # Return the message of a run that finds another run holding the lock.
@@ -1532,12 +1541,16 @@ function Get-PvmVMwareDescriptorText {
 
 # Return whether the FLAT extent target $Target names a raw device, as a descriptor of a raw disk
 # does: a Windows device path, which starts with \\.\ or \\?\, or a device below /dev on Linux,
-# such as /dev/sdb. Any other target names a file.
+# such as /dev/sdb. A /dev path counts only when every name after /dev/ is there, is not . or ..
+# and holds no \, so that no spelling of it leads out of /dev. Any other target names a file.
 function Test-PvmRawDeviceTarget {
     [CmdletBinding()]
     [OutputType([bool])]
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Target)
-    $Target -match '\A\\\\[.?]\\' -or $Target -cmatch '\A/dev/(?!\.\.?(/|\z))[^/]'
+    if ($Target -match '\A\\\\[.?]\\') { return $true }
+    if (-not $Target.StartsWith('/dev/', [StringComparison]::Ordinal)) { return $false }
+    $names = $Target.Substring(5).Split('/')
+    @($names | Where-Object { -not $_ -or $_ -eq '.' -or $_ -eq '..' -or $_.Contains('\') }).Count -eq 0
 }
 
 # Return the device that a disarmed descriptor copy names instead of the raw device $Target, in
@@ -2748,8 +2761,11 @@ function Invoke-PortableVM {
         # lines, as every run begins with them.
         $admin = $false
         $setupError = $null
+        # The rights check and the lock exist on Windows only so far, and the rights check throws
+        # elsewhere, so another system stops after the start and version lines with a plain message.
+        $windows = Test-PvmWindowsHost
         try {
-            $admin = Invoke-PvmTestAdministrator
+            if ($windows) { $admin = Invoke-PvmTestAdministrator }
             if ($admin) {
                 $lock = Invoke-PvmEnterLock -Name (Get-PvmLockName)
                 $owned = $lock.State -ne 'Busy'
@@ -2774,6 +2790,7 @@ function Invoke-PortableVM {
             Write-PvmLog -Path $paths.Log -Message 'Note: an earlier run of the launcher ended without releasing its lock; this run took the lock over.'
         }
         if ($null -ne $setupError) { throw $setupError }
+        if (-not $windows) { throw (Get-PvmStopException -Message (Get-PvmOtherSystemMessage)) }
         if (-not $admin) {
             $rights = if ($DryRun) {
                 'A dry run needs administrator rights, as a real start has them, so that its checks see what a real start sees. Run it from an elevated PowerShell. Nothing was started.'
@@ -2808,7 +2825,7 @@ function Invoke-PortableVM {
         $location = Get-PvmStickLocation -LauncherPath $LauncherPath -Root $paths.Root
         if (-not $location) {
             if (-not (Test-PvmWindowsHost)) {
-                throw (Get-PvmStopException -Message 'On this system the launcher cannot tell yet which disk is the USB stick; so far it starts the VM only on Windows. Nothing was started.')
+                throw (Get-PvmStopException -Message (Get-PvmOtherSystemMessage))
             }
             throw (Get-PvmStopException -Message (Format-PvmMessage -Names $context.Names -Template 'The launcher runs from {Path}, which is not on a drive with a letter, so it cannot tell which disk is the USB stick. Start it with Start VM.cmd on the stick''s own drive. Nothing was started.' -Values @{
                         Path = $LauncherPath

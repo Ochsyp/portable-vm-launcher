@@ -458,6 +458,20 @@ Describe 'Causes of errors from Linux' {
         Get-PvmErrorCause -ErrorRecord $record | Should -BeExactly 'an error of type IOException'
     }
 
+    It 'keep a missing part of a path of 260 characters or more missing, since only Windows limits paths to 260' -ForEach @(
+        @{ Length = 260 }, @{ Length = 300 }, @{ Length = 1000 }
+    ) {
+        Mock -ModuleName PortableVM Test-PvmWindowsHost { $false }
+        $record = [Management.Automation.ErrorRecord]::new([IO.DirectoryNotFoundException]::new('x'), 'Test', 'NotSpecified', $null)
+        Get-PvmPathCause -Path ('/media/stick/' + 'a' * ($Length - 13)) -ErrorRecord $record | Should -BeExactly 'it is missing'
+    }
+
+    It 'name a missing part of a path of 260 characters too long on Windows' {
+        Mock -ModuleName PortableVM Test-PvmWindowsHost { $true }
+        $record = [Management.Automation.ErrorRecord]::new([IO.DirectoryNotFoundException]::new('x'), 'Test', 'NotSpecified', $null)
+        Get-PvmPathCause -Path ('X:\' + 'a' * 257) -ErrorRecord $record | Should -BeExactly 'a path is too long'
+    }
+
     It 'leave the codes from Windows as they are on any system' {
         Mock -ModuleName PortableVM Test-PvmWindowsHost { $false }
         $record = [Management.Automation.ErrorRecord]::new([IO.IOException]::new('failed', [int]0x80070070), 'Test', 'NotSpecified', $null)

@@ -129,7 +129,7 @@ All notable changes to this project are listed here. The format follows
   `/dev/PortableVM-disarmed` for it; the launcher finds the stick through a location (the drive
   letter on Windows) and stops, on a system without one yet, before it reads a disk; running
   VMs are found by program name. The pre-push hook runs its privacy check in `pwsh` where
-  `powershell.exe` is missing. 474 tests now run in the Linux job, up from 287.
+  `powershell.exe` is missing. 497 tests now run in the Linux job, up from 287.
 
 ### Changed
 
