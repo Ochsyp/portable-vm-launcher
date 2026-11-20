@@ -16,6 +16,33 @@ BeforeAll {
         . ([scriptblock]::Create($function.Extent.Text))
     }
 
+    # Return the system's ANSI code page, read from the registry, in which the launcher writes its
+    # log: a test of the log checks the launcher's bytes against it, not against the launcher's
+    # own choice of encoding.
+    function Get-TestAnsiEncoding {
+        [Text.Encoding]::GetEncoding([int](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\CodePage').ACP)
+    }
+
+    # Create and return the mutex named $Name with a security descriptor that denies this user
+    # every right to it, as when an elevated run holds the lock. .NET Framework and .NET take the
+    # descriptor in different calls.
+    function New-TestDeniedMutex {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Test helper that makes a mutex of this process only.')]
+        param([string]$Name)
+        $security = [System.Security.AccessControl.MutexSecurity]::new()
+        $security.AddAccessRule([System.Security.AccessControl.MutexAccessRule]::new([System.Security.Principal.WindowsIdentity]::GetCurrent().User,
+                [System.Security.AccessControl.MutexRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Deny))
+        $created = $false
+        if ($PSVersionTable.PSEdition -eq 'Desktop') {
+            $mutex = [System.Threading.Mutex]::new($false, $Name, [ref]$created, $security)
+        } else {
+            $acl = [Type]::GetType('System.Threading.MutexAcl, System.Threading.AccessControl', $true)
+            $mutex = $acl::Create($false, $Name, [ref]$created, $security)
+        }
+        if (-not $created) { $mutex.Dispose(); throw "The mutex $Name existed already." }
+        $mutex
+    }
+
     # Point the script's functions at a fresh synthetic stick in TestDrive, with LauncherData, as
     # the script's own variables do: $Here is the Launcher folder.
     function Initialize-TestStick {
@@ -30,7 +57,7 @@ BeforeAll {
 
     # Return the messages of the log, without their prefixes.
     function Get-TestLog {
-        @([IO.File]::ReadAllLines($script:log, [Text.Encoding]::Default) | ForEach-Object { $_ -replace '^.*?  ', '' })
+        @([IO.File]::ReadAllLines($script:log, (Get-TestAnsiEncoding)) | ForEach-Object { $_ -replace '^.*?  ', '' })
     }
 
     # Return a drive letter that neither Windows nor PowerShell knows, as for a stick that is gone.
@@ -48,7 +75,7 @@ AfterAll {
     $env:PVM_TEST = $script:previousTestFlag
 }
 
-Describe 'The script''s log lines' {
+Describe 'The script''s log lines' -Tag 'WindowsOnly' {
     BeforeEach {
         Mock Write-Host {}
         Initialize-TestStick
@@ -82,10 +109,11 @@ Describe 'The script''s log lines' {
         Should -Invoke Write-Host -Times 1 -Exactly -ParameterFilter { "$Object" -like '*  x' }
     }
 
-    It 'are written in ANSI, as the module writes them' {
+    It 'are written in the system''s ANSI code page, as the module writes them' {
+        (Get-AnsiEncoding).CodePage | Should -Be (Get-TestAnsiEncoding).CodePage
         Add-LogLine -Message "caf$([char]0xE9)" | Should -BeExactly ''
         $bytes = [IO.File]::ReadAllBytes($script:log)
-        $expected = [Text.Encoding]::Default.GetBytes("caf$([char]0xE9)`r`n")
+        $expected = (Get-TestAnsiEncoding).GetBytes("caf$([char]0xE9)`r`n")
         [Convert]::ToBase64String($bytes, $bytes.Length - $expected.Length, $expected.Length) | Should -BeExactly ([Convert]::ToBase64String($expected))
     }
 
@@ -160,8 +188,7 @@ Describe 'The script''s log lines' {
 
     It 'are appended with their lines together while another writer holds the log open, as the module''s are' {
         $null = [IO.Directory]::CreateDirectory((Split-Path $script:log))
-        $other = [IO.FileStream]::new($script:log, [IO.FileMode]::Append, [Security.AccessControl.FileSystemRights]::AppendData,
-            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete), 4096, [IO.FileOptions]::None)
+        $other = Open-AppendStream -Path $script:log
         try {
             $bytes = [Text.Encoding]::ASCII.GetBytes("other 1`r`n")
             $other.Write($bytes, 0, $bytes.Length)
@@ -199,7 +226,7 @@ Describe 'The script''s log lines' {
     }
 }
 
-Describe 'The warning of the rights request' {
+Describe 'The warning of the rights request' -Tag 'WindowsOnly' {
     BeforeEach {
         Mock Write-Host {}
         Mock Show-Dialog {}
@@ -253,7 +280,7 @@ Describe 'The warning of the rights request' {
     }
 }
 
-Describe 'The request for administrator rights' {
+Describe 'The request for administrator rights' -Tag 'WindowsOnly' {
     BeforeEach {
         Mock Write-Host {}
         Initialize-TestStick
@@ -311,7 +338,7 @@ Describe 'The request for administrator rights' {
     }
 }
 
-Describe 'The lock check before the prompt' {
+Describe 'The lock check before the prompt' -Tag 'WindowsOnly' {
     It 'finds no lock on a free name, and finds one while a handle holds the name' {
         # Only a unique Local\ name, never the launcher's own lock.
         $name = "Local\PortableVM-Test-$([guid]::NewGuid())"
@@ -326,13 +353,8 @@ Describe 'The lock check before the prompt' {
 
     It 'finds a lock that this process may not open, as when an elevated run holds it' {
         $name = "Local\PortableVM-Test-$([guid]::NewGuid())"
-        $security = [System.Security.AccessControl.MutexSecurity]::new()
-        $security.AddAccessRule([System.Security.AccessControl.MutexAccessRule]::new([System.Security.Principal.WindowsIdentity]::GetCurrent().User,
-                [System.Security.AccessControl.MutexRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Deny))
-        $created = $false
-        $mutex = [System.Threading.Mutex]::new($false, $name, [ref]$created, $security)
+        $mutex = New-TestDeniedMutex -Name $name
         try {
-            $created | Should -BeTrue
             Test-LockHeld -Name $name | Should -BeTrue
         } finally {
             $mutex.Dispose()
@@ -340,7 +362,7 @@ Describe 'The lock check before the prompt' {
     }
 }
 
-Describe 'The result''s message' {
+Describe 'The result''s message' -Tag 'WindowsOnly' {
     BeforeEach {
         Mock Write-Host {}
         Initialize-TestStick
@@ -371,7 +393,7 @@ Describe 'The result''s message' {
     }
 }
 
-Describe 'The launcher run' {
+Describe 'The launcher run' -Tag 'WindowsOnly' {
     BeforeEach {
         Mock Write-Host {}
         Initialize-TestStick

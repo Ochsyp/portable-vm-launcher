@@ -4,17 +4,22 @@
 #
 # Runs PSScriptAnalyzer 1.25.0 with PSScriptAnalyzerSettings.psd1 over src, tools, tests and
 # examples, then Pester 6.2.0 over the *.Tests.ps1 files in tests, as CI does. Run it in Windows
-# PowerShell 5.1:
+# PowerShell 5.1, the launcher's own engine, or in PowerShell 7:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run-checks.ps1
+#   pwsh -NoProfile -File ./tests/run-checks.ps1 -SkipAnalyzer -ExcludeTag WindowsOnly
 # Any analyzer finding fails the run. Pester runs with $env:PVM_TEST set to '1', so a test that
 # reaches one of the launcher's adapters without mocking it fails instead of touching the PC.
-# -SkipAnalyzer or -SkipPester leaves that step out, and -Filter runs only the tests whose full
-# name matches it, such as -Filter '*example*'. Exits 0 when nothing fails, else 1.
+# -SkipAnalyzer or -SkipPester leaves that step out, -Filter runs only the tests whose full name
+# matches it, such as -Filter '*example*', and -Tag or -ExcludeTag runs only, or all but, the
+# tests with one of those tags. WindowsOnly marks a test that needs Windows. Exits 0 when nothing
+# fails, else 1.
 
 param(
     [switch]$SkipAnalyzer,
     [switch]$SkipPester,
-    [string]$Filter
+    [string]$Filter,
+    [string[]]$Tag,
+    [string[]]$ExcludeTag
 )
 
 $ErrorActionPreference = 'Stop'
@@ -63,6 +68,8 @@ try {
         $config.Run.PassThru = $true
         $config.Output.Verbosity = 'Normal'
         if ($Filter) { $config.Filter.FullName = $Filter }
+        if ($Tag) { $config.Filter.Tag = $Tag }
+        if ($ExcludeTag) { $config.Filter.ExcludeTag = $ExcludeTag }
         # Splatted, since the analyzer's 5.1 profile knows only the in-box Pester 3.4, whose Invoke-Pester has no -Configuration.
         $pesterArguments = @{ Configuration = $config }
         $previousTestFlag = $env:PVM_TEST

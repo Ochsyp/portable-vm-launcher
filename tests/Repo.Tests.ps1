@@ -75,6 +75,8 @@ BeforeAll {
                 "$name in $(Get-SourceFunctionName -Ast $member)"
             } elseif ($name -eq 'new' -and $type -match '(?i)(^|\.)(FileStream|StreamWriter|BinaryWriter)$') {
                 "$($Matches[2]) in $(Get-SourceFunctionName -Ast $member)"
+            } elseif ($name -eq 'Create' -and $type -match '(?i)(^|\.)FileSystemAclExtensions$') {
+                "FileSystemAclExtensions in $(Get-SourceFunctionName -Ast $member)"
             }
         }
         foreach ($command in $Ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] }, $true)) {
@@ -282,7 +284,7 @@ Describe 'Static guards' {
         $types | Where-Object { $_ -match '(?i)Diagnostics\.Process|Win32\.Registry|^System\.Management(?!\.Automation)' } | Should -BeNullOrEmpty
     }
 
-    It 'never change disks, partitions or volumes, nor delete VirtualBox media' {
+    It 'never change disks, partitions or volumes, nor delete VirtualBox media' -Tag 'WindowsOnly' {
         # Every Storage command that is not a Get, and the generic CIM and WMI writers.
         $storage = @(Get-Command -Module Storage -ErrorAction SilentlyContinue | Where-Object { $_.Verb -ne 'Get' } | ForEach-Object { $_.Name })
         $storage.Count | Should -BeGreaterThan 20
@@ -318,8 +320,10 @@ Describe 'Static guards' {
         $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandParameterAst] -and $args[0].ParameterName -eq 'Force' }, $true) |
             Where-Object { $_.Parent.GetCommandName() -ne 'Import-Module' -and $_.Parent.GetCommandName() -ne 'New-Item' -and $_.Parent.GetCommandName() -ne 'Get-ChildItem' } |
             ForEach-Object { "$($_.Parent.GetCommandName()) at line $($_.Extent.StartLineNumber)" } | Should -BeNullOrEmpty
-        # The tool writes files only through the module's safe write; the one stream it opens checks access.
-        @(Get-SourceFileWrite -Ast $ast | Sort-Object -Unique) | Should -BeExactly @('FileStream in Assert-DeployWriteAccess')
+        # The tool writes files only through the module's safe write; the one stream it opens, in
+        # one of three ways for the engine and the system, checks access.
+        @(Get-SourceFileWrite -Ast $ast | Sort-Object -Unique) |
+            Should -BeExactly @('FileStream in Assert-DeployWriteAccess', 'FileSystemAclExtensions in Assert-DeployWriteAccess', 'Open in Assert-DeployWriteAccess')
         @(Get-SourceCommand -Ast $ast | Where-Object { $_.Name -eq 'Write-PvmFile' }).Count | Should -BeGreaterThan 0
     }
 
@@ -334,6 +338,7 @@ Describe 'Static guards' {
         @{ Code = 'function F { New-Object IO.FileStream $p, Create }'; Change = ''; Write = 'FileStream in F' }
         @{ Code = 'function F { [System.IO.FileStream]::new($p, ''Create'') }'; Change = ''; Write = 'FileStream in F' }
         @{ Code = 'function F { [IO.StreamWriter]::new($p) }'; Change = ''; Write = 'StreamWriter in F' }
+        @{ Code = 'function F { [System.IO.FileSystemAclExtensions]::Create($i, ''Create'', $r, ''None'', 4096, ''None'', $null) }'; Change = ''; Write = 'FileSystemAclExtensions in F' }
         @{ Code = 'function F { ''x'' > $p }'; Change = ''; Write = 'redirection in F' }
         @{ Code = 'function F { ''x'' | Set-Content -LiteralPath $p }'; Change = ''; Write = 'Set-Content in F' }
         @{ Code = 'function F { ''x'' > $null; $text.Replace(''a'', ''b'') }'; Change = ''; Write = '' }
@@ -391,7 +396,8 @@ Describe 'Static guards' {
     It 'let the module write files only through Write-PvmFile, the log aside' {
         # The streams of the log, of the check of its format and of the safe write itself.
         @(Get-SourceFileWrite -Ast (Get-SourceAst -Path $script:module) | Sort-Object -Unique) |
-            Should -BeExactly @('FileStream in Test-PvmLogFormat', 'FileStream in Write-PvmFile', 'FileStream in Write-PvmLog')
+            Should -BeExactly @('FileStream in Open-PvmAppendStream', 'FileStream in Test-PvmLogFormat', 'FileStream in Write-PvmFile',
+                'FileSystemAclExtensions in Open-PvmAppendStream')
     }
 
     It 'end in the script''s one trap, logged with its details and shown, with exit code 1, what no step of the script handles' {
@@ -435,8 +441,8 @@ Describe 'Static guards' {
     }
 
     It 'append a log text in one write that other launcher processes cannot break up: <Function>' -ForEach @(
-        @{ File = 'src\PortableVM.psm1'; Function = 'Write-PvmLog' }
-        @{ File = 'src\Start-PortableVM.ps1'; Function = 'Add-LogLine' }
+        @{ File = 'src\PortableVM.psm1'; Function = 'Write-PvmLog'; Open = 'Open-PvmAppendStream'; Encoding = 'Get-PvmAnsiEncoding' }
+        @{ File = 'src\Start-PortableVM.ps1'; Function = 'Add-LogLine'; Open = 'Open-AppendStream'; Encoding = 'Get-AnsiEncoding' }
     ) {
         $name = $Function
         $definition = (Get-SourceAst -Path (Join-Path $script:repoRoot $File)).Find({
@@ -444,14 +450,8 @@ Describe 'Static guards' {
             }, $true)
         $definition | Should -Not -BeNullOrEmpty
         $members = @($definition.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
-        $opens = @($members | Where-Object { $_.Member.Extent.Text -eq 'new' -and $_.Expression.TypeName.FullName -eq 'IO.FileStream' })
-        $opens.Count | Should -Be 1
-        $opens[0].Arguments[1].Extent.Text | Should -BeExactly '[IO.FileMode]::Append'
-        $opens[0].Arguments[2].Extent.Text | Should -BeExactly '[Security.AccessControl.FileSystemRights]::AppendData'
-        # Other writers may append, and a run may move the log aside, while the file is open.
-        $opens[0].Arguments[3].Extent.Text | Should -BeExactly '([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)'
-        $opens[0].Arguments[4].Extent.Text | Should -BeExactly '4096'
-        $opens[0].Arguments[5].Extent.Text | Should -BeExactly '[IO.FileOptions]::None'
+        @(Get-SourceCommand -Ast $definition | Where-Object { $_.Name -eq $Open }).Count | Should -Be 1
+        @(Get-SourceFileWrite -Ast $definition) | Should -BeNullOrEmpty
         $writes = @($members | Where-Object { $_.Member.Extent.Text -match '^(Write|WriteByte|BeginWrite|WriteAsync|Flush|(Append|Write)All(Text|Lines|Bytes))$' })
         @($writes | ForEach-Object { $_.Extent.Text }) | Should -BeExactly @('$stream.Write($bytes, 0, $bytes.Length)')
         # The one write runs once: no loop and no script block lies around it.
@@ -460,8 +460,33 @@ Describe 'Static guards' {
             $parent | Should -Not -BeOfType ([System.Management.Automation.Language.ScriptBlockExpressionAst])
         }
         # The text of all lines of the message becomes the bytes of that write.
-        @($members | Where-Object { $_.Member.Extent.Text -eq 'GetBytes' } | ForEach-Object { $_.Extent.Text }) | Should -BeExactly @('[Text.Encoding]::Default.GetBytes($text + "`r`n")')
+        @($members | Where-Object { $_.Member.Extent.Text -eq 'GetBytes' } | ForEach-Object { $_.Extent.Text }) | Should -BeExactly @("($Encoding).GetBytes(`$text + `"``r``n`")")
         Get-SourceCommand -Ast $definition | Where-Object { $_.Name -in 'Add-Content', 'Set-Content', 'Out-File', 'Tee-Object' } | Should -BeNullOrEmpty
+    }
+
+    It 'open the log only to append, sharing it with other writers and with the move aside: <Function>' -ForEach @(
+        @{ File = 'src\PortableVM.psm1'; Function = 'Open-PvmAppendStream' }
+        @{ File = 'src\Start-PortableVM.ps1'; Function = 'Open-AppendStream' }
+    ) {
+        $name = $Function
+        $definition = (Get-SourceAst -Path (Join-Path $script:repoRoot $File)).Find({
+                $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq $name
+            }, $true)
+        $definition | Should -Not -BeNullOrEmpty
+        # Other writers may append, and a run may move the log aside, while the file is open.
+        @($definition.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and $args[0].Left.Extent.Text -eq '$share' }, $true) |
+                ForEach-Object { $_.Right.Extent.Text }) | Should -BeExactly @('[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete')
+        $opens = @($definition.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $args[0].Member.Extent.Text -in 'new', 'Create' }, $true) |
+                Where-Object { $_.Expression.TypeName.FullName -in 'IO.FileStream', 'System.IO.FileSystemAclExtensions' })
+        # .NET Framework, .NET on Windows, and .NET elsewhere.
+        @($opens | ForEach-Object { $_.Expression.TypeName.FullName }) | Should -BeExactly @('IO.FileStream', 'System.IO.FileSystemAclExtensions', 'IO.FileStream')
+        foreach ($open in $opens) {
+            $open.Arguments[1].Extent.Text | Should -BeExactly '[IO.FileMode]::Append'
+            $open.Arguments[3].Extent.Text | Should -BeExactly '$share'
+        }
+        # On Windows the handle may only append, so Windows writes each write at the end in one piece.
+        $opens[0].Arguments[2].Extent.Text | Should -BeExactly '[Security.AccessControl.FileSystemRights]::AppendData'
+        $opens[1].Arguments[2].Extent.Text | Should -BeExactly '[Security.AccessControl.FileSystemRights]::AppendData'
     }
 
     It 'remove PVM_TEST in the script only at its top level, so that a test that calls one of its functions keeps it' {
@@ -514,7 +539,7 @@ Describe 'Example settings' {
     }
 }
 
-Describe 'privacy-scan' {
+Describe 'privacy-scan' -Tag 'WindowsOnly' {
     It 'runs in the sh of Git for Windows' {
         $script:sh | Should -Not -BeNullOrEmpty
     }
@@ -554,7 +579,7 @@ Describe 'privacy-scan' {
     }
 }
 
-Describe 'Find-PrivateData' {
+Describe 'Find-PrivateData' -Tag 'WindowsOnly' {
     It 'finds a denylisted name outside ASCII in contents, file names, messages and ref names, and never prints it' {
         $sample = Join-Path $TestDrive 'find-name'
         Initialize-SampleRepository -Path $sample -Files @{

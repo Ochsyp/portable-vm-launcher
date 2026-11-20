@@ -23,8 +23,8 @@
 #>
 # Show-Dialog and Show-Question load System.Windows.Forms with Add-Type before they use the
 # types, which the analyzer's compatibility profile cannot see: it lists only the assemblies that
-# load by default.
-[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseCompatibleTypes', '', Justification = 'Show-Dialog and Show-Question load System.Windows.Forms with Add-Type first.')]
+# load by default. Open-AppendStream uses FileSystemAclExtensions only under PowerShell 7.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseCompatibleTypes', '', Justification = 'Show-Dialog and Show-Question load System.Windows.Forms with Add-Type first; FileSystemAclExtensions is used only under PowerShell 7.')]
 param([switch]$DryRun)
 
 $ErrorActionPreference = 'Stop'
@@ -79,6 +79,26 @@ function Add-LogNote([string]$Message, [string]$Problem) {
     "$Message`n`nThe launcher could not write this message to its log, LauncherData\logs\launcher.log, because $because."
 }
 
+# Return the system's ANSI code page, in which the log is written, as Get-PvmAnsiEncoding does.
+function Get-AnsiEncoding {
+    if ($PSVersionTable.PSEdition -eq 'Desktop') { return [Text.Encoding]::Default }
+    [Text.Encoding]::GetEncoding(0)
+}
+
+# Open the file $Path to append, sharing reading, writing and deletion, as Open-PvmAppendStream
+# does: on Windows through a handle that may only append, so that a write stays in one piece.
+function Open-AppendStream([string]$Path) {
+    $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        return [IO.FileStream]::new($Path, [IO.FileMode]::Append, [Security.AccessControl.FileSystemRights]::AppendData, $share, 4096, [IO.FileOptions]::None)
+    }
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        return [System.IO.FileSystemAclExtensions]::Create([IO.FileInfo]::new($Path), [IO.FileMode]::Append,
+            [Security.AccessControl.FileSystemRights]::AppendData, $share, 4096, [IO.FileOptions]::None, $null)
+    }
+    [IO.FileStream]::new($Path, [IO.FileMode]::Append, [IO.FileAccess]::Write, $share, 4096, [IO.FileOptions]::None)
+}
+
 # Show $Message in the log's format on the console and append it to
 # LauncherData\logs\launcher.log beside the Launcher folder, in one write as Write-PvmLog does,
 # creating the logs folder. Returns '' when the text is written, or when there is no LauncherData
@@ -97,9 +117,8 @@ function Add-LogLine([string]$Message) {
         $null = [IO.Directory]::CreateDirectory($path)
         $folder = $false
         $path = [IO.Path]::Combine($path, 'launcher.log')
-        $bytes = [Text.Encoding]::Default.GetBytes($text + "`r`n")
-        $stream = [IO.FileStream]::new($path, [IO.FileMode]::Append, [Security.AccessControl.FileSystemRights]::AppendData,
-            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete), 4096, [IO.FileOptions]::None)
+        $bytes = (Get-AnsiEncoding).GetBytes($text + "`r`n")
+        $stream = Open-AppendStream -Path $path
         try { $stream.Write($bytes, 0, $bytes.Length) }
         finally { $stream.Dispose() }
         ''
@@ -187,7 +206,8 @@ function Test-Administrator {
 # says so and returns $false, and the elevated run checks again.
 function Test-LockHeld([string]$Name) {
     $mutex = $null
-    try { [System.Threading.Mutex]::TryOpenExisting($Name, [System.Security.AccessControl.MutexRights]::Synchronize, [ref]$mutex) }
+    # A mutex that exists but may not be opened throws UnauthorizedAccessException, caught below.
+    try { [System.Threading.Mutex]::TryOpenExisting($Name, [ref]$mutex) }
     catch [System.UnauthorizedAccessException] { $true }
     catch {
         Write-Host "The check for another run of the launcher failed: $($_.Exception.Message)"

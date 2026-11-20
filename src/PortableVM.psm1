@@ -106,6 +106,37 @@ function Get-PvmLogProblem {
     "$(Get-Variable -Name PvmLogProblem -Scope Script -ValueOnly -ErrorAction SilentlyContinue)"
 }
 
+# Return the system's ANSI code page, in which the log and old settings files are written. Windows
+# PowerShell 5.1 calls it Default; PowerShell 7 calls UTF-8 Default and gives the ANSI code page
+# for code page 0.
+function Get-PvmAnsiEncoding {
+    [CmdletBinding()]
+    [OutputType([Text.Encoding])]
+    param()
+    if ($PSVersionTable.PSEdition -eq 'Desktop') { return [Text.Encoding]::Default }
+    [Text.Encoding]::GetEncoding(0)
+}
+
+# Open the file $Path to append, sharing reading, writing and deletion. On Windows the handle may
+# only append, so Windows puts each write at the file's end in one piece and other launcher
+# processes cannot break a log text up; .NET Framework and .NET name that handle differently.
+# Elsewhere the file is opened for writing at its end, without that promise.
+function Open-PvmAppendStream {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseCompatibleTypes', '', Justification = 'FileSystemAclExtensions is used only under PowerShell 7.')]
+    [CmdletBinding()]
+    [OutputType([IO.FileStream])]
+    param([Parameter(Mandatory)][string]$Path)
+    $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        return [IO.FileStream]::new($Path, [IO.FileMode]::Append, [Security.AccessControl.FileSystemRights]::AppendData, $share, 4096, [IO.FileOptions]::None)
+    }
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        return [System.IO.FileSystemAclExtensions]::Create([IO.FileInfo]::new($Path), [IO.FileMode]::Append,
+            [Security.AccessControl.FileSystemRights]::AppendData, $share, 4096, [IO.FileOptions]::None, $null)
+    }
+    [IO.FileStream]::new($Path, [IO.FileMode]::Append, [IO.FileAccess]::Write, $share, 4096, [IO.FileOptions]::None)
+}
+
 # Append the message $Message to the log file $Path as Format-PvmLogText gives it, with the time
 # now and this process's ID, and show it on the console. The text goes in one write through an
 # append-only handle that shares reading, writing and deletion, so that other launcher processes
@@ -121,9 +152,8 @@ function Write-PvmLog {
     $text = Format-PvmLogText -Time (Get-PvmNow) -ProcessId $PID -Message $Message
     Write-Host $text
     try {
-        $bytes = [Text.Encoding]::Default.GetBytes($text + "`r`n")
-        $stream = [IO.FileStream]::new($Path, [IO.FileMode]::Append, [Security.AccessControl.FileSystemRights]::AppendData,
-            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete), 4096, [IO.FileOptions]::None)
+        $bytes = (Get-PvmAnsiEncoding).GetBytes($text + "`r`n")
+        $stream = Open-PvmAppendStream -Path $Path
         try { $stream.Write($bytes, 0, $bytes.Length) }
         finally { $stream.Dispose() }
     } catch {
@@ -796,7 +826,7 @@ function ConvertFrom-PvmDataFileByte {
         $encoding = New-Object System.Text.UnicodeEncoding $true, $false, $true
         $skip = 2
     } elseif ($Legacy) {
-        return [Text.Encoding]::Default.GetString($Bytes)
+        return (Get-PvmAnsiEncoding).GetString($Bytes)
     } else {
         if (@($Bytes | Where-Object { $_ -gt 0x7F }).Count -gt 0) {
             throw 'it holds characters outside ASCII but no byte order mark; save it as UTF-8 with BOM'

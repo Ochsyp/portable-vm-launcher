@@ -122,7 +122,11 @@ function Read-PrivateSetting {
     }
     if ($null -eq $text) {
         try { $text = (New-Object System.Text.UTF8Encoding $false, $true).GetString($bytes) }
-        catch { $text = [Text.Encoding]::Default.GetString($bytes) }
+        catch {
+            # ANSI: Default in Windows PowerShell 5.1, code page 0 in PowerShell 7.
+            $ansi = if ($PSVersionTable.PSEdition -eq 'Desktop') { [Text.Encoding]::Default } else { [Text.Encoding]::GetEncoding(0) }
+            $text = $ansi.GetString($bytes)
+        }
     }
     $tokens = $null
     $errors = $null

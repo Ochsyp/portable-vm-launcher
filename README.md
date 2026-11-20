@@ -119,9 +119,9 @@ The table's paths can also lie in a folder below the drive's root; `Launcher` an
 
 ## Log
 
-`LauncherData\logs\launcher.log` is ANSI text, one line per line of a message, each after a
-prefix with the local time to the millisecond, its UTC offset and the ID of the process that
-wrote it:
+`LauncherData\logs\launcher.log` is text in the PC's ANSI code page, one line per line of a
+message, each after a prefix with the local time to the millisecond, its UTC offset and the ID
+of the process that wrote it:
 
 ```text
 2026-11-12T08:15:02.123+01:00 [4120]  Asking for administrator rights
@@ -276,11 +276,14 @@ The redesign removes these. Until then:
 
 The launcher's code is in `src`, the tools in `tools`, the tests in `tests` and the example
 settings in `examples`. CI runs PSScriptAnalyzer 1.25.0 over these folders and Pester 6.2.0 in
-Windows PowerShell 5.1, then the privacy scan over the tracked files in Git Bash. The tests mock
-everything that reads the PC, so they never touch a disk or a VM. Locally:
+Windows PowerShell 5.1, then the privacy scan over the tracked files in Git Bash. It also runs
+the tests in PowerShell 7 on Windows and on Linux; on Linux it leaves out those tagged
+`WindowsOnly`. The tests mock everything that reads the PC, so they never touch a disk or a VM.
+Locally:
 
 ```text
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run-checks.ps1
+pwsh -NoProfile -File .\tests\run-checks.ps1 -SkipAnalyzer
 sh .githooks/privacy-scan --tracked
 ```
 
