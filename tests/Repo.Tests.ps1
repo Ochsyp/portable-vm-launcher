@@ -579,6 +579,67 @@ Describe 'privacy-scan' -Tag 'WindowsOnly' {
     }
 }
 
+Describe 'pre-push' -Tag 'WindowsOnly' {
+    BeforeAll {
+        # Run .githooks/pre-push in the repository at $Path for a push of a feature branch, with only
+        # git and the folder $Tools on the path, and $Exit as the exit code of a pwsh stub there.
+        # Returns the hook's exit code and lines, and the arguments the stub got, if it ran.
+        function Invoke-PrePush {
+            param([string]$Path, [string]$Tools, [string]$Exit = '0')
+            $hook = (Join-Path $script:repoRoot '.githooks\pre-push') -replace '\\', '/'
+            $git = Split-Path (Get-Command -Name git -CommandType Application | Select-Object -First 1).Source
+            $calls = Join-Path $Path 'pwsh-calls.txt'
+            $previousPath = $env:PATH
+            $previousExit = $env:PVM_STUB_EXIT
+            $previous = $ErrorActionPreference
+            Push-Location -LiteralPath $Path
+            try {
+                $env:PATH = "$Tools;$git"
+                $env:PVM_STUB_EXIT = $Exit
+                $ErrorActionPreference = 'Continue'
+                $lines = @('refs/heads/feature 0 refs/heads/feature 0' | & $script:sh $hook 2>&1 | ForEach-Object { "$_" })
+                $code = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $previous
+                $env:PATH = $previousPath
+                $env:PVM_STUB_EXIT = $previousExit
+                Pop-Location
+            }
+            $called = if (Test-Path -LiteralPath $calls) { [IO.File]::ReadAllText($calls) } else { $null }
+            [pscustomobject]@{ ExitCode = $code; Lines = $lines; Called = $called }
+        }
+    }
+
+    BeforeEach {
+        $script:sample = Join-Path $TestDrive "push-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
+        Initialize-SampleRepository -Path $script:sample -Files @{ 'a.txt' = 'text' }
+        $null = New-Item -ItemType Directory -Path (Join-Path $script:sample 'LauncherData')
+        [IO.File]::WriteAllText((Join-Path $script:sample 'LauncherData\settings.psd1'), '@{}', $script:utf8)
+        $script:tools = Join-Path $script:sample 'tools-on-path'
+        $null = New-Item -ItemType Directory -Path $script:tools
+    }
+
+    It 'runs the privacy check in pwsh where powershell.exe is missing, and lets the push through when it passes' {
+        [IO.File]::WriteAllText((Join-Path $script:tools 'pwsh'), "#!/bin/sh`necho `"`$*`" > pwsh-calls.txt`nexit `"`$PVM_STUB_EXIT`"`n", $script:utf8)
+        $result = Invoke-PrePush -Path $script:sample -Tools $script:tools
+        $result.ExitCode | Should -Be 0
+        $result.Called | Should -Match '-File \S*tools/Find-PrivateData\.ps1 -History'
+    }
+
+    It 'refuses the push when the privacy check in pwsh finds something' {
+        [IO.File]::WriteAllText((Join-Path $script:tools 'pwsh'), "#!/bin/sh`necho `"`$*`" > pwsh-calls.txt`nexit `"`$PVM_STUB_EXIT`"`n", $script:utf8)
+        $result = Invoke-PrePush -Path $script:sample -Tools $script:tools -Exit '1'
+        $result.ExitCode | Should -Be 1
+        $result.Called | Should -Not -BeNullOrEmpty
+    }
+
+    It 'refuses the push when neither powershell.exe nor pwsh can run the privacy check' {
+        $result = Invoke-PrePush -Path $script:sample -Tools $script:tools
+        $result.ExitCode | Should -Be 1
+        ($result.Lines -join "`n") | Should -Match 'neither powershell\.exe nor pwsh'
+    }
+}
+
 Describe 'Find-PrivateData' -Tag 'WindowsOnly' {
     It 'finds a denylisted name outside ASCII in contents, file names, messages and ref names, and never prints it' {
         $sample = Join-Path $TestDrive 'find-name'

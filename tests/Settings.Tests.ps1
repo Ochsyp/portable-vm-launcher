@@ -231,7 +231,7 @@ Describe 'Checking settings against schema 2' {
         ($problems -contains 'VmSectors: must be above DataPartitionStart and at most StickSectors') | Should -Be $Problem
     }
 
-    It 'refuses a path setting <Value>' -Tag 'WindowsOnly' -ForEach @(
+    It 'refuses a path setting <Value>' -ForEach @(
         @{ Value = '' }, @{ Value = '.' }, @{ Value = '..' }, @{ Value = 'VMware\..\Test VM.vmx' }, @{ Value = 'VMware\.\Test VM.vmx' }
         @{ Value = 'VMware.\Test VM.vmx' }, @{ Value = 'VMware \Test VM.vmx' }, @{ Value = 'VMware\\Test VM.vmx' }, @{ Value = 'VMware\CON.vmx' }
         @{ Value = 'NUL.vmx' }, @{ Value = 'com1.vmx' }, @{ Value = 'C:\VMware\Test VM.vmx' }, @{ Value = 'C:Test VM.vmx' }
@@ -243,7 +243,7 @@ Describe 'Checking settings against schema 2' {
         $problems | Should -BeExactly @("VMwareVmx: must name a .vmx file below the folder that holds Launcher and LauncherData, without a drive, '.' or '..'")
     }
 
-    It 'accepts a path setting <Value>, which Windows reads as written' -Tag 'WindowsOnly' -ForEach @(
+    It 'accepts a path setting <Value>, which Windows reads as written' -ForEach @(
         @{ Value = 'VMware\Test VM.vmx' }, @{ Value = 'VMware/Test VM.VMX' }, @{ Value = 'Test VM.vmx' }
         @{ Value = 'a b\c d\Test VM.vmx' }, @{ Value = 'VMware\CONFIG.vmx' }, @{ Value = 'VMware\.hidden\Test VM.vmx' }
     ) {
@@ -426,6 +426,59 @@ Describe 'Causes of errors from Windows' {
     }
 }
 
+Describe 'Causes of errors from Linux' {
+    # .NET outside Windows puts the error number of the system call in HResult as it is.
+    It 'names the cause of error number <Errno> (<Name>) without the path' -ForEach @(
+        @{ Errno = 11; Name = 'EAGAIN, a file another process locked'; Cause = 'it is open in another program' }
+        @{ Errno = 16; Name = 'EBUSY'; Cause = 'it is open in another program' }
+        @{ Errno = 26; Name = 'ETXTBSY'; Cause = 'it is open in another program' }
+        @{ Errno = 1; Name = 'EPERM'; Cause = 'access is denied' }
+        @{ Errno = 13; Name = 'EACCES'; Cause = 'access is denied' }
+        @{ Errno = 2; Name = 'ENOENT'; Cause = 'it is missing' }
+        @{ Errno = 17; Name = 'EEXIST'; Cause = 'an item of that name exists already' }
+        @{ Errno = 28; Name = 'ENOSPC'; Cause = 'the disk is full' }
+        @{ Errno = 122; Name = 'EDQUOT'; Cause = 'the disk is full' }
+        @{ Errno = 36; Name = 'ENAMETOOLONG'; Cause = 'a path is too long' }
+        @{ Errno = 30; Name = 'EROFS'; Cause = 'the drive is write-protected' }
+        @{ Errno = 123; Name = 'ENOMEDIUM'; Cause = 'the drive is not ready' }
+        @{ Errno = 6; Name = 'ENXIO'; Cause = 'the drive is not connected' }
+        @{ Errno = 19; Name = 'ENODEV'; Cause = 'the drive is not connected' }
+        @{ Errno = 5; Name = 'EIO'; Cause = 'the drive reported a read or write error' }
+        @{ Errno = 999; Name = 'unknown'; Cause = 'an error of type IOException' }
+    ) {
+        Mock -ModuleName PortableVM Test-PvmWindowsHost { $false }
+        $exception = [IO.IOException]::new("The file '/media/x/Ann's VM/stick.vmdk' failed.", [int]$Errno)
+        $record = [Management.Automation.ErrorRecord]::new($exception, 'Test', 'NotSpecified', $null)
+        Get-PvmErrorCause -ErrorRecord $record | Should -BeExactly $Cause
+    }
+
+    It 'are not read on Windows, where such a number is no Windows code' -ForEach @(@{ Errno = 5 }, @{ Errno = 28 }, @{ Errno = 11 }) {
+        Mock -ModuleName PortableVM Test-PvmWindowsHost { $true }
+        $record = [Management.Automation.ErrorRecord]::new([IO.IOException]::new('failed', [int]$Errno), 'Test', 'NotSpecified', $null)
+        Get-PvmErrorCause -ErrorRecord $record | Should -BeExactly 'an error of type IOException'
+    }
+
+    It 'keep a missing part of a path of 260 characters or more missing, since only Windows limits paths to 260' -ForEach @(
+        @{ Length = 260 }, @{ Length = 300 }, @{ Length = 1000 }
+    ) {
+        Mock -ModuleName PortableVM Test-PvmWindowsHost { $false }
+        $record = [Management.Automation.ErrorRecord]::new([IO.DirectoryNotFoundException]::new('x'), 'Test', 'NotSpecified', $null)
+        Get-PvmPathCause -Path ('/media/stick/' + 'a' * ($Length - 13)) -ErrorRecord $record | Should -BeExactly 'it is missing'
+    }
+
+    It 'name a missing part of a path of 260 characters too long on Windows' {
+        Mock -ModuleName PortableVM Test-PvmWindowsHost { $true }
+        $record = [Management.Automation.ErrorRecord]::new([IO.DirectoryNotFoundException]::new('x'), 'Test', 'NotSpecified', $null)
+        Get-PvmPathCause -Path ('X:\' + 'a' * 257) -ErrorRecord $record | Should -BeExactly 'a path is too long'
+    }
+
+    It 'leave the codes from Windows as they are on any system' {
+        Mock -ModuleName PortableVM Test-PvmWindowsHost { $false }
+        $record = [Management.Automation.ErrorRecord]::new([IO.IOException]::new('failed', [int]0x80070070), 'Test', 'NotSpecified', $null)
+        Get-PvmErrorCause -ErrorRecord $record | Should -BeExactly 'the disk is full'
+    }
+}
+
 Describe 'The example settings' {
     It 'are refused only as the example' {
         Test-PvmSetting -Settings (Import-PvmDataFile -Path $script:example) |
@@ -515,7 +568,7 @@ Describe 'The data folder' {
         $paths.OldSettings | Should -BeExactly (Join-Path $TestDrive 'stick\Launcher\settings.psd1')
     }
 
-    It 'keeps a file''s first version at its path below the stick folder' -Tag 'WindowsOnly' {
+    It 'keeps a file''s first version at its path below the stick folder' {
         $root = Join-Path $TestDrive 'stick'
         $backups = Join-Path $root 'LauncherData\backups'
         Get-PvmBackupPath -Root $root -Backups $backups -Path (Join-Path $root 'VMware\stick.vmdk') -Suffix '.orig' |

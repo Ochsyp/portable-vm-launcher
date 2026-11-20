@@ -2,7 +2,8 @@
 # Refuse pushes to main: it changes only through a merged pull request. Then, when a real
 # settings file (LauncherData/settings.psd1 or the older Launcher/settings.psd1) or the privacy
 # denylist is present, refuse the push if any commit, commit message, file name or ref name holds
-# one of their values.
+# one of their values. The check runs in Windows PowerShell, or in PowerShell 7 (pwsh) where
+# that is missing, as on Linux; with neither the push is refused.
 # git passes one line per ref: <local ref> <local sha> <remote ref> <remote sha>.
 status=0
 while read -r _ _ remote_ref _; do
@@ -18,7 +19,15 @@ done
 top=$(git rev-parse --show-toplevel)
 denylist="$(git rev-parse --absolute-git-dir)/info/privacy-denylist"
 if [ -f "$top/LauncherData/settings.psd1" ] || [ -f "$top/Launcher/settings.psd1" ] || [ -f "$denylist" ]; then
-    if ! powershell.exe -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File "$top/tools/Find-PrivateData.ps1" -History; then
+    if command -v powershell.exe >/dev/null 2>&1; then
+        shell=powershell.exe
+    elif command -v pwsh >/dev/null 2>&1; then
+        shell=pwsh
+    else
+        echo "pre-push: refused. The privacy check needs PowerShell, but neither powershell.exe nor pwsh was found." >&2
+        exit 1
+    fi
+    if ! "$shell" -NoLogo -NoProfile -ExecutionPolicy RemoteSigned -File "$top/tools/Find-PrivateData.ps1" -History; then
         echo "pre-push: refused. Remove the values tools/Find-PrivateData.ps1 reported, then push again." >&2
         exit 1
     fi

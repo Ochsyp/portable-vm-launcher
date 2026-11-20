@@ -344,14 +344,14 @@ function Find-DeployLegacyCopy {
         [Parameter(Mandatory)][string]$Target,
         [Parameter(Mandatory)][hashtable[]]$Settings
     )
-    $root = [IO.Path]::GetFullPath($Target).TrimEnd('\') + '\'
+    $root = [IO.Path]::GetFullPath($Target).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
     # The extension each path setting needs; the folder setting names its folder itself.
     $rules = [ordered]@{ VMwareDisk = '.vmdk'; VirtualBoxDisk = '.vmdk'; VirtualBoxVbox = '.vbox'; VirtualBoxHome = '' }
     $folders = @(foreach ($table in $Settings) {
             foreach ($key in $rules.Keys) {
                 $value = Get-DeployValue -Values $table -Key $key
                 if ($value -isnot [string] -or (Get-PvmPathProblem -Value $value -Extension $rules[$key])) { continue }
-                $path = Join-Path $Target $value
+                $path = Join-PvmStickPath -Root $Target -Path $value
                 if ($rules[$key]) { Split-Path $path } else { $path }
             }
         }) | ForEach-Object { [IO.Path]::GetFullPath($_) } | Sort-Object -Unique
@@ -590,14 +590,14 @@ function Move-DeployLegacyData {
     $steps = @(Get-DeployLeftoverStep -Folder $legacy)
     if ($steps.Count) { throw (Get-PvmWriteException -Code 'Leftover' -Message 'An earlier write of the file did not finish, and its copy is still beside it.' -Detail ($steps -join ' ')) }
     $null = New-Item -ItemType Directory -Path (Join-Path $data 'logs'), (Join-Path $legacy 'Launcher') -Force
-    $oldSettings = Join-Path $Target 'Launcher\settings.psd1'
+    $oldSettings = Join-Path (Join-Path $Target 'Launcher') 'settings.psd1'
     $hash = Get-DeployHash -Path $oldSettings
     # A copy that a safe write left beside the file is no copy yet; the write stops at it instead.
     $copies = @(Get-ChildItem -LiteralPath (Join-Path $legacy 'Launcher') -File | Where-Object { $_.Name -notlike '*.pvm-tmp' -and $_.Name -notlike '*.pvm-old' })
     if (@($copies | Where-Object { (Get-DeployHash -Path $_.FullName) -eq $hash }).Count -eq 0) {
-        $null = Copy-DeployFile -Source $oldSettings -Destination (Get-DeployFreePath -Path (Join-Path $legacy 'Launcher\settings.psd1'))
+        $null = Copy-DeployFile -Source $oldSettings -Destination (Get-DeployFreePath -Path (Join-Path (Join-Path $legacy 'Launcher') 'settings.psd1'))
     }
-    if ($Plan.Log) { Move-Item -LiteralPath (Join-Path $Target 'Launcher\launcher.log') -Destination (Get-DeployFreePath -Path (Join-Path $data 'logs\launcher.log')) }
+    if ($Plan.Log) { Move-Item -LiteralPath (Join-Path (Join-Path $Target 'Launcher') 'launcher.log') -Destination (Get-DeployFreePath -Path (Join-Path (Join-Path $data 'logs') 'launcher.log')) }
     foreach ($copy in $Plan.Copies.Move) {
         $destination = Get-DeployFreePath -Path (Join-Path $legacy $copy.Relative)
         $null = New-Item -ItemType Directory -Path (Split-Path $destination) -Force
