@@ -348,7 +348,11 @@ Describe 'Importing the settings' {
         $message | Should -BeExactly 'LauncherData\settings.psd1 is missing. Copy examples\settings.example.psd1 there and fill it in.'
         $path = Write-TestByte -Name 'syntax.psd1' -Bytes ([Text.Encoding]::ASCII.GetBytes('@{'))
         $message = try { $null = Import-PvmSetting -Path $path } catch { Get-PvmStopMessage -ErrorRecord $_ }
-        $message | Should -BeExactly 'LauncherData\settings.psd1 cannot be read: line 1 is no valid PowerShell data (IncompleteHashLiteral).'
+        # The parser of each engine names the error itself: IncompleteHashLiteral in Windows
+        # PowerShell 5.1, MissingEndCurlyBrace in PowerShell 7.
+        $errors = $null
+        $null = [System.Management.Automation.Language.Parser]::ParseInput('@{', [ref]$null, [ref]$errors)
+        $message | Should -BeExactly "LauncherData\settings.psd1 cannot be read: line 1 is no valid PowerShell data ($($errors[0].ErrorId))."
     }
 
     It 'returns the checked settings with the defaults' {

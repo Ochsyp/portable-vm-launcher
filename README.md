@@ -283,9 +283,14 @@ Locally:
 
 ```text
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run-checks.ps1
-pwsh -NoProfile -File .\tests\run-checks.ps1 -SkipAnalyzer
+pwsh -NoProfile -File .\tests\run-checks.ps1
 sh .githooks/privacy-scan --tracked
 ```
+
+In PowerShell 7 on Windows, `run-checks.ps1` uses the pinned Pester and PSScriptAnalyzer that
+are installed for Windows PowerShell, so one install serves both. When a pinned module is
+installed nowhere, it stops and prints the one `Install-Module` line that installs it for the
+current user.
 
 This checks that no value of the real settings file or the privacy denylist is in git's index
 or history:

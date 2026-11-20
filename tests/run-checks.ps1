@@ -6,7 +6,8 @@
 # examples, then Pester 6.2.0 over the *.Tests.ps1 files in tests, as CI does. Run it in Windows
 # PowerShell 5.1, the launcher's own engine, or in PowerShell 7:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run-checks.ps1
-#   pwsh -NoProfile -File ./tests/run-checks.ps1 -SkipAnalyzer -ExcludeTag WindowsOnly
+#   pwsh -NoProfile -File ./tests/run-checks.ps1
+#   pwsh -NoProfile -File ./tests/run-checks.ps1 -SkipAnalyzer -ExcludeTag WindowsOnly   (on Linux)
 # Any analyzer finding fails the run. Pester runs with $env:PVM_TEST set to '1', so a test that
 # reaches one of the launcher's adapters without mocking it fails instead of touching the PC.
 # -SkipAnalyzer or -SkipPester leaves that step out, -Filter runs only the tests whose full name
@@ -25,7 +26,10 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # Import the module $Name at exactly $Version, after unloading any other version of it from this
-# session. Throws naming the Install-Module command when that version is not installed.
+# session. PowerShell 7 on Windows does not look in Windows PowerShell's module folder of the
+# current user, so there it also takes the version from that folder, for this run only; both
+# pinned modules work in either engine. Throws naming the Install-Module command for the running
+# engine when that version is installed nowhere it looks.
 function Import-PinnedModule {
     [CmdletBinding()]
     param(
@@ -33,6 +37,13 @@ function Import-PinnedModule {
         [Parameter(Mandatory)][version]$Version
     )
     $installed = @(Get-Module -ListAvailable -Name $Name | Where-Object { $_.Version -eq $Version })
+    if ($installed.Count -eq 0 -and $PSVersionTable.PSEdition -ne 'Desktop' -and [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $windowsModules = [IO.Path]::Combine([Environment]::GetFolderPath('MyDocuments'), 'WindowsPowerShell', 'Modules')
+        if ([IO.Directory]::Exists([IO.Path]::Combine($windowsModules, $Name, "$Version"))) {
+            $env:PSModulePath = $windowsModules + [IO.Path]::PathSeparator + $env:PSModulePath
+            $installed = @(Get-Module -ListAvailable -Name $Name | Where-Object { $_.Version -eq $Version })
+        }
+    }
     if ($installed.Count -eq 0) {
         throw ("$Name $Version is not installed. Install it with: " +
             "Install-Module -Name $Name -RequiredVersion $Version -Repository PSGallery -Scope CurrentUser -Force -SkipPublisherCheck")

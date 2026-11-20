@@ -286,10 +286,15 @@ Describe 'Deploy-PortableVM' -Tag 'WindowsOnly' {
         @{ Case = 'does not parse'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $false; Failure = $null
             Bytes = { [Text.Encoding]::ASCII.GetBytes("function {`r`n") } }
         # Windows PowerShell 5.1 reads a script without a byte order mark as ANSI: there a dash in
-        # UTF-8 ends a string early, and the curly quotes of Windows-1252 make one.
-        @{ Case = 'does not parse as ANSI, although it parses as UTF-8'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $true; Failure = $null
+        # UTF-8 ends a string early, and the curly quotes of Windows-1252 make one. PowerShell 7
+        # reads it as UTF-8, so the same bytes give the opposite results there.
+        @{ Case = 'does not parse as ANSI, although it parses as UTF-8'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $true; Failure = $null; Engine = 'Desktop'
             Bytes = { (New-Object System.Text.UTF8Encoding $false).GetBytes("`$dash = `"a $([char]0x2014) b`"`r`n") } }
-        @{ Case = 'stops while it loads, although it does not parse as UTF-8'; Cause = ''; Held = $false; Ansi = $true; Failure = $null
+        @{ Case = 'stops while it loads, although it does not parse as UTF-8'; Cause = ''; Held = $false; Ansi = $true; Failure = $null; Engine = 'Desktop'
+            Bytes = { [byte[]]([Text.Encoding]::ASCII.GetBytes('$m = ') + 0x93 + [Text.Encoding]::ASCII.GetBytes('a (b') + 0x94 + [Text.Encoding]::ASCII.GetBytes("`r`nthrow 'stopped while it loads'`r`n")) } }
+        @{ Case = 'stops while it loads, although it does not parse as ANSI'; Cause = ''; Held = $false; Ansi = $false; Failure = $null; Engine = 'Core'
+            Bytes = { (New-Object System.Text.UTF8Encoding $false).GetBytes("`$dash = `"a $([char]0x2014) b`"`r`nthrow 'stopped while it loads'`r`n") } }
+        @{ Case = 'does not parse as UTF-8, although it parses as ANSI'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $false; Failure = $null; Engine = 'Core'
             Bytes = { [byte[]]([Text.Encoding]::ASCII.GetBytes('$m = ') + 0x93 + [Text.Encoding]::ASCII.GetBytes('a (b') + 0x94 + [Text.Encoding]::ASCII.GetBytes("`r`nthrow 'stopped while it loads'`r`n")) } }
         # With a byte order mark, PowerShell reads UTF-8, where a curly quote ends a string.
         @{ Case = 'does not parse as UTF-8 with a byte order mark'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $false; Failure = $null
@@ -314,6 +319,10 @@ Describe 'Deploy-PortableVM' -Tag 'WindowsOnly' {
                 [Management.Automation.ParseException]::new([Management.Automation.Language.ParseError[]]@([Management.Automation.Language.ParseError]::new($extent, 'ContentBlocked', 'X:\clone\src\PortableVM.psm1 is blocked.')))
             } }
     ) {
+        if ($_.Engine -and $_.Engine -ne $PSVersionTable.PSEdition) {
+            Set-ItResult -Skipped -Because "the case is one of the $($_.Engine) edition of PowerShell"
+            return
+        }
         if ($Ansi -and (Get-TestAnsiEncoding).CodePage -ne 1252) {
             Set-ItResult -Skipped -Because 'the case needs Windows-1252 as the ANSI code page'
             return

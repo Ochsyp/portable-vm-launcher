@@ -176,12 +176,12 @@ function Import-DeployModule {
         while ($null -ne $exception.InnerException) { $exception = $exception.InnerException }
         $code = if (($exception.HResult -band 0xFFFF0000) -eq 0x80070000) { $exception.HResult -band 0xFFFF } else { 0 }
         # ParseFile would report a file it cannot read as a parse error, so the text is read first,
-        # decoded as Windows PowerShell 5.1 decodes a script: by its byte order mark, else as ANSI,
-        # which PowerShell 7 gives for code page 0.
+        # decoded as the running engine reads a script: by its byte order mark, else as ANSI in
+        # Windows PowerShell 5.1 and as UTF-8 in PowerShell 7.
         $parseErrors = @()
         try {
-            $ansi = if ($PSVersionTable.PSEdition -eq 'Desktop') { [Text.Encoding]::Default } else { [Text.Encoding]::GetEncoding(0) }
-            $text = [IO.File]::ReadAllText($module, $ansi)
+            $encoding = if ($PSVersionTable.PSEdition -eq 'Desktop') { [Text.Encoding]::Default } else { New-Object System.Text.UTF8Encoding $false }
+            $text = [IO.File]::ReadAllText($module, $encoding)
             $errors = $null
             $null = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$errors)
             $parseErrors = @($errors)
