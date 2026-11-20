@@ -121,6 +121,15 @@ All notable changes to this project are listed here. The format follows
   job. `tests\run-checks.ps1` takes `-Tag` and `-ExcludeTag`; `WindowsOnly` marks a test that
   needs Windows, and the Linux job leaves those out. In PowerShell 7 on Windows it uses the
   pinned modules installed for Windows PowerShell.
+- Rules that hold on Windows and on Linux alike, with nothing changed for a start on Windows:
+  path settings refuse the characters Windows forbids on every system; path settings and backup
+  copies use the system's separator, and outside Windows names compare in their case, which the
+  message about a missing VM file then says; error causes read Linux's error numbers; the
+  descriptor parser takes a device below `/dev` as a raw disk, and a disarmed copy names
+  `/dev/PortableVM-disarmed` for it; the launcher finds the stick through a location (the drive
+  letter on Windows) and stops, on a system without one yet, before it reads a disk; running
+  VMs are found by program name. The pre-push hook runs its privacy check in `pwsh` where
+  `powershell.exe` is missing. 474 tests now run in the Linux job, up from 287.
 
 ### Changed
 

@@ -169,7 +169,8 @@ function Write-PvmLog {
 # name a file on the stick: it is open in another program, access is denied, it is missing, an item
 # of that name exists already, the disk is full, a path is too long, the drive is write-protected,
 # not ready or not connected, the drive reported a read or write error, or Windows cannot access
-# it; else the type of the error.
+# it; else the type of the error. Outside Windows, .NET puts the system's error number in HResult
+# as it is, which Get-PvmErrnoCause reads; on Windows such a small number is no Windows code.
 function Get-PvmErrorCause {
     [CmdletBinding()]
     [OutputType([string])]
@@ -186,6 +187,10 @@ function Get-PvmErrorCause {
     }
     # An HRESULT from Windows (facility 7) holds the Windows error code in its low word.
     $code = if (($exception.HResult -band 0xFFFF0000) -eq 0x80070000) { $exception.HResult -band 0xFFFF } else { 0 }
+    if ($code -eq 0 -and $exception.HResult -gt 0 -and -not (Test-PvmWindowsHost)) {
+        $cause = Get-PvmErrnoCause -Errno $exception.HResult
+        if ($cause) { return $cause }
+    }
     if ($code -eq 32 -or $code -eq 33) { return 'it is open in another program' }
     if ($exception -is [UnauthorizedAccessException] -or $code -eq 5) { return 'access is denied' }
     if ($exception -is [IO.FileNotFoundException] -or $exception -is [IO.DirectoryNotFoundException] -or
@@ -200,6 +205,30 @@ function Get-PvmErrorCause {
     if (@(23, 31, 121, 483, 1117, 1392) -contains $code) { return 'the drive reported a read or write error' }
     if ($code -eq 1920) { return 'Windows cannot access it' }
     "an error of type $($exception.GetType().Name)"
+}
+
+# Return the cause, in Get-PvmErrorCause's words, of the Linux error number $Errno, or '' for a
+# number it does not know: the file is locked (EAGAIN, EBUSY, ETXTBSY), access is denied (EPERM,
+# EACCES), it is missing (ENOENT), it exists (EEXIST), the disk or the quota is full (ENOSPC,
+# EDQUOT), a name is too long (ENAMETOOLONG), the file system is read-only (EROFS), there is no
+# medium (ENOMEDIUM), the device is gone (ENXIO, ENODEV) or reported an I/O error (EIO).
+function Get-PvmErrnoCause {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][int]$Errno)
+    switch ($Errno) {
+        { $_ -in 11, 16, 26 } { return 'it is open in another program' }
+        { $_ -in 1, 13 } { return 'access is denied' }
+        2 { return 'it is missing' }
+        17 { return 'an item of that name exists already' }
+        { $_ -in 28, 122 } { return 'the disk is full' }
+        36 { return 'a path is too long' }
+        30 { return 'the drive is write-protected' }
+        123 { return 'the drive is not ready' }
+        { $_ -in 6, 19 } { return 'the drive is not connected' }
+        5 { return 'the drive reported a read or write error' }
+    }
+    ''
 }
 
 # Return the cause of the error $ErrorRecord of a write to the file $Path, as Get-PvmErrorCause
@@ -326,6 +355,17 @@ function Invoke-PvmStopUnlessDryRun {
     }
 }
 
+# --- Host ------------------------------------------------------------------------------------
+
+# Return whether this PC runs Windows. The rules that differ between systems ask this one function,
+# so that tests can take either side of them on any system.
+function Test-PvmWindowsHost {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+    [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+}
+
 # --- Adapters --------------------------------------------------------------------------------
 # One function for each thing the launcher reads from or starts on this PC, so that tests can
 # mock each one. Get-Partition and Get-Disk are functions of another module, which does not see
@@ -354,13 +394,25 @@ function Invoke-PvmGetDisk {
     Get-Disk -Number $Number -ErrorAction Stop
 }
 
-# Return the processes that the WQL condition $Filter selects, as Win32_Process instances with
-# Name and CommandLine. CommandLine is empty where this process may not read it.
+# Return the processes of the programs named $Name, without .exe, each with its Name and
+# CommandLine; CommandLine is empty where this process may not read it. Windows PowerShell's
+# Get-Process has no command line, so on Windows they come from Win32_Process
+# (ConvertTo-PvmProcessFilter), with .exe in their names.
 function Invoke-PvmGetProcess {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Filter)
+    param([Parameter(Mandatory)][string[]]$Name)
     Assert-PvmNotUnderTest -Name $MyInvocation.MyCommand.Name
-    Get-CimInstance -ClassName Win32_Process -Filter $Filter
+    if (Test-PvmWindowsHost) { return (Get-CimInstance -ClassName Win32_Process -Filter (ConvertTo-PvmProcessFilter -Name $Name)) }
+    Get-Process -Name $Name -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Name = $_.ProcessName; CommandLine = $_.CommandLine } }
+}
+
+# Return the WQL condition that selects the Win32_Process instances of the programs named $Name,
+# without .exe, in that order: Name='<name>.exe' OR ...
+function ConvertTo-PvmProcessFilter {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string[]]$Name)
+    (@($Name | ForEach-Object { "Name='$_.exe'" })) -join ' OR '
 }
 
 # Return whether a process named $Name runs on this PC.
@@ -491,16 +543,17 @@ function Get-PvmDataPath {
         Data        = $data
         Settings    = Join-Path $data 'settings.psd1'
         Logs        = Join-Path $data 'logs'
-        Log         = Join-Path $data 'logs\launcher.log'
+        Log         = Join-Path (Join-Path $data 'logs') 'launcher.log'
         Backups     = Join-Path $data 'backups'
-        Legacy      = Join-Path $data 'backups\legacy'
+        Legacy      = Join-Path (Join-Path $data 'backups') 'legacy'
         State       = Join-Path $data 'state'
         OldSettings = Join-Path $LauncherPath 'settings.psd1'
     }
 }
 
 # Return where the launcher keeps the first version of the file $Path, which lies below the stick
-# folder $Root: at the same path relative to $Backups, with $Suffix added. Throws when $Path is not
+# folder $Root: at the same path relative to $Backups, with $Suffix added. Names compare in any
+# case on Windows and exactly elsewhere, as the file systems there do. Throws when $Path is not
 # below $Root, which the path settings rule out.
 function Get-PvmBackupPath {
     [CmdletBinding()]
@@ -511,10 +564,25 @@ function Get-PvmBackupPath {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Suffix
     )
-    $below = [IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+    $below = [IO.Path]::GetFullPath($Root).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
     $full = [IO.Path]::GetFullPath($Path)
-    if (-not $full.StartsWith($below, [StringComparison]::OrdinalIgnoreCase)) { throw "$Path is not below $Root." }
+    $comparison = if (Test-PvmWindowsHost) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    if (-not $full.StartsWith($below, $comparison)) { throw "$Path is not below $Root." }
     Join-Path $Backups ($full.Substring($below.Length) + $Suffix)
+}
+
+# Return the path setting $Path, written with \ or / between its names, joined to the stick folder
+# $Root. On Windows that is what Join-Path gives; elsewhere each \ becomes /, since only / parts
+# names there.
+function Join-PvmStickPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Path
+    )
+    if ([IO.Path]::DirectorySeparatorChar -eq '\') { return (Join-Path $Root $Path) }
+    $Root.TrimEnd('/') + '/' + $Path.Replace('\', '/')
 }
 
 # --- Run lock and log files ------------------------------------------------------------------
@@ -616,6 +684,60 @@ function Get-PvmDriveLetter {
     if ($root -match '\A[A-Za-z]:\\\z') { $root.Substring(0, 1).ToUpperInvariant() } else { $null }
 }
 
+# --- Stick location --------------------------------------------------------------------------
+# Where the stick is mounted decides how the launcher finds its disk. On Windows that is the drive
+# letter of the launcher folder; the step "Linux host" adds the Linux kind. The launcher asks only
+# these functions, so the rest of it does not depend on drive letters.
+
+# Return the location of the stick folder $Root, which holds the launcher folder $LauncherPath:
+# on Windows Kind 'DriveLetter', with the Letter in upper case (Get-PvmDriveLetter) and the Path
+# $Root; or $null where the launcher cannot find the stick's disk from it: a launcher folder
+# without a drive letter, or a system other than Windows.
+function Get-PvmStickLocation {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$LauncherPath,
+        [Parameter(Mandatory)][string]$Root
+    )
+    if (-not (Test-PvmWindowsHost)) { return $null }
+    $letter = Get-PvmDriveLetter -Path $LauncherPath
+    if (-not $letter) { return $null }
+    [pscustomobject]@{ Kind = 'DriveLetter'; Letter = $letter; Path = $Root }
+}
+
+# Return the raw device by which a hypervisor opens the whole disk $Disk on Windows.
+function Get-PvmRawDevice {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)]$Disk)
+    "\\.\PhysicalDrive$($Disk.Number)"
+}
+
+# Return the Partition the stick folder at $Location (Get-PvmStickLocation) is on, its Disk and the
+# raw Device of that disk (Get-PvmRawDevice), through the adapters. Throws a stop, naming the VM
+# as $Names says (Format-PvmMessage), when Windows has no partition with the location's drive
+# letter, as for a network drive or one made with subst.
+function Get-PvmStickDevice {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Location,
+        [Parameter(Mandatory)][hashtable]$Names
+    )
+    try { $partition = Invoke-PvmGetPartition -DriveLetter $Location.Letter }
+    catch {
+        if ("$($_.FullyQualifiedErrorId)" -like 'CmdletizationQuery_NotFound_DriveLetter,*') {
+            throw (Get-PvmStopException -Message (Format-PvmMessage -Names $Names -Template 'Windows has no partition with the drive letter {Letter}:, so the launcher cannot tell which disk is the USB stick; a network drive or a drive made with subst has none. Start it with Start VM.cmd on the stick''s own drive. Nothing was started.' -Values @{
+                        Letter = $Location.Letter
+                    }))
+        }
+        throw
+    }
+    $disk = Invoke-PvmGetDisk -Number $partition.DiskNumber
+    [pscustomobject]@{ Partition = $partition; Disk = $disk; Device = (Get-PvmRawDevice -Disk $disk) }
+}
+
 # --- Settings --------------------------------------------------------------------------------
 # LauncherData\settings.psd1 holds one hashtable of plain values. The launcher parses it without
 # running anything in it, checks every value against schema 2 before it reads the PC, and fills
@@ -653,9 +775,10 @@ function Get-PvmSettingSchema {
 # $Extension, or a folder when $Extension is empty, below the stick folder. Such a path is
 # relative, uses \ or / as separator and has no blank at either end, and each of its parts is a
 # real name: not empty, '.' or '..', not ending in a dot or a blank, no device name such as CON
-# or NUL, and no character Windows forbids in a name, such as ':'. Joined to the stick folder, it
-# gives the path that [IO.Path]::GetFullPath gives, so the launcher compares and logs the path
-# Windows uses.
+# or NUL, and no character Windows forbids in a name, such as ':' (Get-PvmForbiddenNameChar), on
+# every system, so that settings that pass on one system pass on the other. Joined to the stick
+# folder, it gives the path that [IO.Path]::GetFullPath gives, so the launcher compares and logs
+# the path Windows uses.
 function Get-PvmPathProblem {
     [CmdletBinding()]
     [OutputType([string])]
@@ -666,12 +789,22 @@ function Get-PvmPathProblem {
     $what = if ($Extension) { "a $Extension file" } else { 'a folder' }
     $problem = "must name $what below the folder that holds Launcher and LauncherData, without a drive, '.' or '..'"
     if (-not $Value -or $Value -ne $Value.Trim() -or $Value -match '\A[\\/]') { return $problem }
-    $forbidden = [IO.Path]::GetInvalidFileNameChars()
+    $forbidden = [char[]]@(Get-PvmForbiddenNameChar)
     foreach ($part in ($Value -split '[\\/]')) {
         if (-not $part -or $part -match '[. ]\z' -or $part.IndexOfAny($forbidden) -ge 0 -or
             $part -match '\A(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9]|LPT[1-9])(\.|\z)') { return $problem }
     }
     if ($Extension -and -not $Value.EndsWith($Extension, [StringComparison]::OrdinalIgnoreCase)) { return $problem }
+}
+
+# Return the characters Windows forbids in a file name, which [IO.Path]::GetInvalidFileNameChars
+# gives on Windows: the control characters and " < > | : * ? \ /. Outside Windows that call gives
+# only NUL and /.
+function Get-PvmForbiddenNameChar {
+    [CmdletBinding()]
+    [OutputType([char], [char[]])]
+    param()
+    [char[]](@(0..31 | ForEach-Object { [char]$_ }) + [char[]]'"<>|:*?\/')
 }
 
 # Return whether $Value can name the VM or the guest in a message or a dialog title: 1 to 40
@@ -1267,7 +1400,8 @@ function ConvertFrom-PvmDescriptorData {
 # A UTF-8 byte order mark before the first line stays in its Text. Throws a FormatException with
 # the reason, which names the line, when the launcher does not understand the descriptor: a line
 # of no known kind, an extent other than '<access> <sectors> FLAT "<raw disk>" <offset>' or
-# '<access> <sectors> ZERO', extents apart from each other, createType set twice, or no extent.
+# '<access> <sectors> ZERO', extents apart from each other, createType set twice, or no extent. A
+# raw disk is a Windows device path or a device below /dev (Test-PvmRawDeviceTarget).
 function ConvertFrom-PvmDescriptorText {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -1304,7 +1438,7 @@ function ConvertFrom-PvmDescriptorText {
             if ($type -eq 'FLAT') {
                 if (-not $target.Success) { throw [FormatException]::new("$where is an extent line the launcher cannot read") }
                 if (-not $match.Groups['offset'].Success) { throw [FormatException]::new("$where has a FLAT extent without an offset") }
-                if ($target.Value -notmatch '^\\\\[.?]\\') { throw [FormatException]::new("$where has a FLAT extent that names a file, not a raw disk") }
+                if (-not (Test-PvmRawDeviceTarget -Target $target.Value)) { throw [FormatException]::new("$where has a FLAT extent that names a file, not a raw disk") }
             } elseif ($target.Success) {
                 throw [FormatException]::new("$where has a ZERO extent that names a target")
             }
@@ -1396,28 +1530,42 @@ function Get-PvmVMwareDescriptorText {
     $lines -join "`r`n"
 }
 
-# Return the device that disarmed descriptor copies name instead of a raw disk. No disk has this
-# name, so a hypervisor that opens such a copy by mistake finds no disk, rather than whatever disk
-# has the copy's old number now.
+# Return whether the FLAT extent target $Target names a raw device, as a descriptor of a raw disk
+# does: a Windows device path, which starts with \\.\ or \\?\, or a device below /dev on Linux,
+# such as /dev/sdb. Any other target names a file.
+function Test-PvmRawDeviceTarget {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Target)
+    $Target -match '\A\\\\[.?]\\' -or $Target -cmatch '\A/dev/(?!\.\.?(/|\z))[^/]'
+}
+
+# Return the device that a disarmed descriptor copy names instead of the raw device $Target, in
+# its spelling: /dev/PortableVM-disarmed for a device below /dev, else \\.\PortableVM-disarmed. No
+# disk has this name, so a hypervisor that opens such a copy by mistake finds no disk, rather than
+# whatever disk has the copy's old device now.
 function Get-PvmDisarmedDevice {
     [CmdletBinding()]
     [OutputType([string])]
-    param()
+    param([Parameter(Mandatory)][string]$Target)
+    if ($Target.StartsWith('/')) { return '/dev/PortableVM-disarmed' }
     '\\.\PortableVM-disarmed'
 }
 
-# Return the descriptor text $Text with the target of every FLAT extent that names a raw device,
-# a path that starts with \\.\ or \\?\, set to the disarmed device (Get-PvmDisarmedDevice).
-# Every other character stays, so a second pass changes nothing, and ConvertTo-PvmDescriptorText
-# arms such a copy again.
+# Return the descriptor text $Text with the target of every FLAT extent that names a raw device
+# (Test-PvmRawDeviceTarget) set to the disarmed device in its spelling (Get-PvmDisarmedDevice), so
+# a Windows descriptor stays a Windows one. Every other character stays, so a second pass changes
+# nothing, and ConvertTo-PvmDescriptorText arms such a copy again.
 function ConvertTo-PvmDisarmedDescriptorText {
     [CmdletBinding()]
     [OutputType([string])]
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
-    $device = Get-PvmDisarmedDevice
-    [regex]::Replace($Text, '(?im)^([ \t]*(?:RW|RDONLY|NOACCESS)[ \t]+\d+[ \t]+FLAT[ \t]+")(\\\\[.?]\\[^"\r\n]*)(")', {
+    [regex]::Replace($Text, '(?im)^([ \t]*(?:RW|RDONLY|NOACCESS)[ \t]+\d+[ \t]+FLAT[ \t]+")([^"\r\n]*)(")', {
             param($match)
-            if ($match.Groups[2].Value -eq $device) { $match.Value }
+            $target = $match.Groups[2].Value
+            if (-not (Test-PvmRawDeviceTarget -Target $target)) { return $match.Value }
+            $device = Get-PvmDisarmedDevice -Target $target
+            if ($target -eq $device) { $match.Value }
             else { $match.Groups[1].Value + $device + $match.Groups[3].Value }
         })
 }
@@ -1953,13 +2101,13 @@ function Test-PvmVirtualBoxVmListed {
     $false
 }
 
-# Return whether a VirtualBox VM process on this PC (VirtualBoxVM.exe or VBoxHeadless.exe) may be
+# Return whether a VirtualBox VM process on this PC (VirtualBoxVM or VBoxHeadless) may be
 # the VM $VmUuid (Test-PvmVirtualBoxVmProcess).
 function Test-PvmRunningInVirtualBox {
     [CmdletBinding()]
     [OutputType([bool])]
     param([string]$VmUuid)
-    $processes = @(Invoke-PvmGetProcess -Filter "Name='VirtualBoxVM.exe' OR Name='VBoxHeadless.exe'")
+    $processes = @(Invoke-PvmGetProcess -Name 'VirtualBoxVM', 'VBoxHeadless')
     [bool]($processes | Where-Object { Test-PvmVirtualBoxVmProcess -Process $_ -VmUuid $VmUuid })
 }
 
@@ -1975,12 +2123,12 @@ function Test-PvmVMwareVmProcess {
     (-not $Process.CommandLine) -or $Process.CommandLine.ToLower().Contains($Vmx.ToLower())
 }
 
-# Return whether a vmware-vmx.exe process on this PC may be the VM $Vmx (Test-PvmVMwareVmProcess).
+# Return whether a vmware-vmx process on this PC may be the VM $Vmx (Test-PvmVMwareVmProcess).
 function Test-PvmRunningInVMware {
     [CmdletBinding()]
     [OutputType([bool])]
     param([Parameter(Mandatory)][string]$Vmx)
-    $processes = @(Invoke-PvmGetProcess -Filter "Name='vmware-vmx.exe'")
+    $processes = @(Invoke-PvmGetProcess -Name 'vmware-vmx')
     [bool]($processes | Where-Object { Test-PvmVMwareVmProcess -Process $_ -Vmx $Vmx })
 }
 
@@ -2007,6 +2155,17 @@ function ConvertFrom-PvmVmxText {
     $values
 }
 
+# Return why a file the settings name is missing, for Assert-PvmKnownState: outside Windows the
+# name in settings.psd1 must also match the file's case, which a setting that works on Windows may
+# not.
+function Get-PvmMissingReason {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    if (Test-PvmWindowsHost) { return 'the file does not exist' }
+    'the file does not exist, and on this system the name in settings.psd1 must match its case'
+}
+
 # Return what the .vmx $Path says about a VMware suspend: State 'Saved' when checkpoint.vmState
 # has a value, 'NotSaved' when it has none, or 'Unknown' with the Reason when the file is missing,
 # cannot be read or is no complete .vmx, which always holds config.version. Values holds the
@@ -2019,7 +2178,7 @@ function Get-PvmVMwareState {
         return [pscustomobject]@{ State = 'Unknown'; Reason = 'the path is a folder, not a file'; Values = @{} }
     }
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return [pscustomobject]@{ State = 'Unknown'; Reason = 'the file does not exist'; Values = @{} }
+        return [pscustomobject]@{ State = 'Unknown'; Reason = (Get-PvmMissingReason); Values = @{} }
     }
     try { $text = [IO.File]::ReadAllText($Path) }
     catch { return [pscustomobject]@{ State = 'Unknown'; Reason = "the file cannot be read ($($_.Exception.Message))"; Values = @{} } }
@@ -2048,7 +2207,7 @@ function Get-PvmVirtualBoxState {
         return [pscustomobject]@{ State = 'Unknown'; Reason = 'the path is a folder, not a file' }
     }
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return [pscustomobject]@{ State = 'Unknown'; Reason = 'the file does not exist' }
+        return [pscustomobject]@{ State = 'Unknown'; Reason = (Get-PvmMissingReason) }
     }
     try { $text = [IO.File]::ReadAllText($Path) }
     catch { return [pscustomobject]@{ State = 'Unknown'; Reason = "the file cannot be read ($($_.Exception.Message))" } }
@@ -2083,10 +2242,10 @@ function Get-PvmWrittenPath {
     $settings = $Context.Settings
     $backup = @{ Root = $Context.Root; Backups = $Context.Backups }
     $files = @(
-        @{ Path = (Join-Path $Context.Root $settings['VMwareDisk']); Suffix = '.orig' }
-        @{ Path = (Join-Path $Context.Root $settings['VirtualBoxVbox']); Suffix = '.launcher-backup' }
-        @{ Path = (Join-Path (Join-Path $Context.Root $settings['VirtualBoxHome']) 'VirtualBox.xml'); Suffix = '.launcher-backup' }
-        @{ Path = (Join-Path $Context.Root $settings['VirtualBoxDisk']); Suffix = '.orig' }
+        @{ Path = (Join-PvmStickPath -Root $Context.Root -Path $settings['VMwareDisk']); Suffix = '.orig' }
+        @{ Path = (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxVbox']); Suffix = '.launcher-backup' }
+        @{ Path = (Join-Path (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxHome']) 'VirtualBox.xml'); Suffix = '.launcher-backup' }
+        @{ Path = (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxDisk']); Suffix = '.orig' }
     )
     foreach ($file in $files) {
         $disarm = $file.Suffix -eq '.orig'
@@ -2287,7 +2446,7 @@ function Invoke-PvmVMware {
     $log = $Context.LogPath
     $layout = Get-PvmDiskLayout -Drive $Drive -VmSectors $settings['VmSectors'] -DataPartitionStart $settings['DataPartitionStart'] -HideData $true
     $layout.CreateType = 'fullDevice'
-    $vmx = Join-Path $Context.Root $settings['VMwareVmx']
+    $vmx = Join-PvmStickPath -Root $Context.Root -Path $settings['VMwareVmx']
     if (Test-PvmRunningInVMware -Vmx $vmx) {
         Write-PvmLog -Path $log -Message 'Already running in VMware.'
         return 'AlreadyRunning'
@@ -2301,7 +2460,7 @@ function Invoke-PvmVMware {
     Assert-PvmVMwareReady -Context $Context -Vmx $vmx
 
     Enter-PvmStep -Context $Context -Name 'files'
-    $disk = Join-Path $Context.Root $settings['VMwareDisk']
+    $disk = Join-PvmStickPath -Root $Context.Root -Path $settings['VMwareDisk']
     if ([IO.File]::Exists($disk)) {
         $copies = @{ Root = $Context.Root; Backups = $Context.Backups; Path = $disk }
         $change = Get-PvmDescriptorChange -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @copies -Suffix '.orig') -PreviousPath (Get-PvmBackupPath @copies -Suffix '.previous.orig') -LogPath $log
@@ -2380,9 +2539,9 @@ function Invoke-PvmVirtualBox {
     $layout = Get-PvmDiskLayout -Drive $Drive -VmSectors $settings['VmSectors'] -DataPartitionStart $settings['DataPartitionStart'] -HideData $settings['HideDataPartition']
     $vboxManage = Join-Path $VirtualBoxDir 'VBoxManage.exe'
     $uuid = $settings['VirtualBoxVmUuid']
-    Invoke-PvmSetEnvironment -Name 'VBOX_USER_HOME' -Value (Join-Path $Context.Root $settings['VirtualBoxHome'])
+    Invoke-PvmSetEnvironment -Name 'VBOX_USER_HOME' -Value (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxHome'])
     $names = $Context.Names
-    $vmx = Join-Path $Context.Root $settings['VMwareVmx']
+    $vmx = Join-PvmStickPath -Root $Context.Root -Path $settings['VMwareVmx']
     if (Test-PvmRunningInVMware -Vmx $vmx) {
         Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $names -Template '{VM} is running in VMware. Close it before starting it in VirtualBox.')
     }
@@ -2390,7 +2549,7 @@ function Invoke-PvmVirtualBox {
         Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $names -Template '{VM} is suspended in VMware. Resume it in VMware (on a PC with VMware Workstation) and shut {guest} down normally before starting it in VirtualBox - otherwise {guest}''s disk can get corrupted.')
     }
 
-    $open = @(Invoke-PvmGetProcess -Filter "Name='VirtualBox.exe' OR Name='VirtualBoxVM.exe' OR Name='VBoxHeadless.exe'")
+    $open = @(Invoke-PvmGetProcess -Name 'VirtualBox', 'VirtualBoxVM', 'VBoxHeadless')
     if ($open.Count) {
         # VirtualBox hides its VM processes' command lines, so VirtualBox is asked whether this VM is the one running.
         $info = Invoke-PvmNative -FilePath $vboxManage -ArgumentList @('showvminfo', $uuid, '--machinereadable')
@@ -2420,12 +2579,13 @@ function Invoke-PvmVirtualBox {
     }
 
     Enter-PvmStep -Context $Context -Name 'files'
-    $vbox = Join-Path $Context.Root $settings['VirtualBoxVbox']
-    $registry = Join-Path (Join-Path $Context.Root $settings['VirtualBoxHome']) 'VirtualBox.xml'
-    $disk = Join-Path $Context.Root $settings['VirtualBoxDisk']
+    $vbox = Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxVbox']
+    $registry = Join-Path (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxHome']) 'VirtualBox.xml'
+    $disk = Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxDisk']
     $backup = @{ Root = $Context.Root; Backups = $Context.Backups }
-    # At a drive root the paths to the VM's own files show the stick's old letter.
-    $letters = @{ Root = $Context.Root; Letter = $Context.Letter; Known = @($vbox, $disk); LogPath = $log }
+    # At a drive root the paths to the VM's own files show the stick's old letter. The location
+    # gives the stick folder as Windows spells it, which on Windows is $Context.Root.
+    $letters = @{ Root = $Context.Location.Path; Letter = $Context.Location.Letter; Known = @($vbox, $disk); LogPath = $log }
     # Every file is checked first, so that a refusal leaves all of them as they are.
     $changes = @(@(
             Get-PvmDriveLetterChange -Path $vbox -BackupPath (Get-PvmBackupPath @backup -Path $vbox -Suffix '.launcher-backup') -PreviousPath (Get-PvmBackupPath @backup -Path $vbox -Suffix '.previous.launcher-backup') @letters
@@ -2467,20 +2627,12 @@ function Invoke-PvmLaunch {
 
     # 1. Find the stick this launcher is on, and make sure it is the right one. A network drive or
     # a drive made with subst has a letter but no partition.
-    try { $partition = Invoke-PvmGetPartition -DriveLetter $Context.Letter }
-    catch {
-        if ("$($_.FullyQualifiedErrorId)" -like 'CmdletizationQuery_NotFound_DriveLetter,*') {
-            throw (Get-PvmStopException -Message (Format-PvmMessage -Names $Context.Names -Template 'Windows has no partition with the drive letter {Letter}:, so the launcher cannot tell which disk is the USB stick; a network drive or a drive made with subst has none. Start it with Start VM.cmd on the stick''s own drive. Nothing was started.' -Values @{
-                        Letter = $Context.Letter
-                    }))
-        }
-        throw
-    }
-    $disk = Invoke-PvmGetDisk -Number $partition.DiskNumber
-    $problem = Get-PvmStickProblem -Disk $disk -Partition $partition -Settings $settings
+    $stick = Get-PvmStickDevice -Location $Context.Location -Names $Context.Names
+    $disk = $stick.Disk
+    $problem = Get-PvmStickProblem -Disk $disk -Partition $stick.Partition -Settings $settings
     if ($problem) { throw (Get-PvmStopException -Message $problem) }
-    $drive = "\\.\PhysicalDrive$($disk.Number)"
-    Write-PvmLog -Path $log -Message "Stick found: disk $($disk.Number) ($drive), drive $($Context.Letter):, ID $(Get-PvmDiskSignature -Disk $disk)"
+    $drive = $stick.Device
+    Write-PvmLog -Path $log -Message "Stick found: disk $($disk.Number) ($drive), drive $($Context.Location.Letter):, ID $(Get-PvmDiskSignature -Disk $disk)"
 
     Enter-PvmStep -Context $Context -Name 'choice'
     $deviceGuard = Invoke-PvmGetDeviceGuard
@@ -2491,10 +2643,10 @@ function Invoke-PvmLaunch {
     # 2. Pick the hypervisor.
     $vmwareDir = Get-PvmVMwareDir
     $virtualBoxDir = Get-PvmVirtualBoxDir
-    $vmx = Join-Path $Context.Root $settings['VMwareVmx']
+    $vmx = Join-PvmStickPath -Root $Context.Root -Path $settings['VMwareVmx']
     # Each state is logged as soon as it is known, so a .vbox that cannot be read does not hide a
     # VMware suspend from the log. A state the launcher cannot tell stops it.
-    $vbox = Join-Path $Context.Root $settings['VirtualBoxVbox']
+    $vbox = Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxVbox']
     # A write that did not finish, of any file a start may write or of a copy of one, stops a start
     # in either hypervisor before a file is read, with the step that sets it right.
     Assert-PvmNoWrittenLeftover -Context $Context
@@ -2565,13 +2717,13 @@ function Invoke-PortableVM {
     $owned = $false
     $result = $null
     $logStop = $false
-    # The steps below fill in the settings, the names, the caption and the drive letter;
-    # Invoke-PvmLaunch fills in VMwareState and VirtualBoxState.
+    # The steps below fill in the settings, the names, the caption and the stick's location
+    # (Get-PvmStickLocation); Invoke-PvmLaunch fills in VMwareState and VirtualBoxState.
     $context = [pscustomobject]@{
         Root            = $paths.Root
         LogPath         = $paths.Log
         Backups         = $paths.Backups
-        Letter          = ''
+        Location        = $null
         DryRun          = [bool]$DryRun
         AskResume       = $AskResume
         Names           = @{ VM = 'the VM'; Guest = 'the guest' }
@@ -2653,13 +2805,16 @@ function Invoke-PortableVM {
         $context.Settings = $settings
         $context.Names = @{ VM = $settings['VmDisplayName']; Guest = $settings['GuestName'] }
         $context.Caption = Get-PvmCaption -Settings $settings
-        $letter = Get-PvmDriveLetter -Path $LauncherPath
-        if (-not $letter) {
+        $location = Get-PvmStickLocation -LauncherPath $LauncherPath -Root $paths.Root
+        if (-not $location) {
+            if (-not (Test-PvmWindowsHost)) {
+                throw (Get-PvmStopException -Message 'On this system the launcher cannot tell yet which disk is the USB stick; so far it starts the VM only on Windows. Nothing was started.')
+            }
             throw (Get-PvmStopException -Message (Format-PvmMessage -Names $context.Names -Template 'The launcher runs from {Path}, which is not on a drive with a letter, so it cannot tell which disk is the USB stick. Start it with Start VM.cmd on the stick''s own drive. Nothing was started.' -Values @{
                         Path = $LauncherPath
                     }))
         }
-        $context.Letter = $letter
+        $context.Location = $location
 
         $outcome = Invoke-PvmLaunch -Context $context
         $result = if ($context.WouldStop) {

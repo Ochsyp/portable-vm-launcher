@@ -12,15 +12,17 @@ BeforeAll {
     Import-Module (Join-Path $script:repoRoot 'src\PortableVM.psm1') -Force
     $script:utf8 = New-Object System.Text.UTF8Encoding $false
     $script:uuid = '5ca1ab1e-0000-4000-8000-000000000001'
-    # The WQL filters of the launcher's process checks.
-    $script:vmwareFilter = "Name='vmware-vmx.exe'"
-    $script:virtualBoxVmFilter = "Name='VirtualBoxVM.exe' OR Name='VBoxHeadless.exe'"
-    $script:virtualBoxOpenFilter = "Name='VirtualBox.exe' OR Name='VirtualBoxVM.exe' OR Name='VBoxHeadless.exe'"
+    $script:onWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    # The program names, without .exe, that the launcher's process checks ask for.
+    $script:vmwareNames = 'vmware-vmx'
+    $script:virtualBoxVmNames = 'VirtualBoxVM,VBoxHeadless'
+    $script:virtualBoxOpenNames = 'VirtualBox,VirtualBoxVM,VBoxHeadless'
 
     # Return the system's ANSI code page, read from the registry, in which the launcher writes its
     # log: a test of the log checks the launcher's bytes against it, not against the launcher's
-    # own choice of encoding.
+    # own choice of encoding. Outside Windows the log is UTF-8.
     function Get-TestAnsiEncoding {
+        if (-not $script:onWindows) { return (New-Object System.Text.UTF8Encoding $false) }
         [Text.Encoding]::GetEncoding([int](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\CodePage').ACP)
     }
 
@@ -124,13 +126,16 @@ BeforeAll {
     # $Change applied, written as PowerShell data. The VMware folder holds the .vmx and a CRLF
     # descriptor; the VirtualBox home holds VirtualBox.xml and the VM with an LF descriptor, and
     # their paths on the stick carry the drive letter OldLetter. The two programs are empty files
-    # below Programs.
+    # below Programs. On Windows the stick's Letter and WindowsPath are those of TestDrive; on
+    # another system, where the launcher finds no drive letter, they are made up as T:\TestDrive\
+    # <Name>, and Set-TestPc gives the launcher that location.
     function Initialize-TestStick {
         param(
             [string]$Name = 'stick',
             [hashtable]$Change = @{}
         )
         $root = Join-Path $TestDrive $Name
+        $windowsPath = if ($script:onWindows) { $root } else { "T:\TestDrive\$Name" }
         $stick = [pscustomobject]@{
             Root           = $root
             Launcher       = Join-Path $root 'Launcher'
@@ -145,8 +150,9 @@ BeforeAll {
             VirtualBoxDisk = Join-Path $root 'VirtualBox\Test VM\stick.vmdk'
             VMwareDir      = Join-Path $root 'Programs\VMware'
             VirtualBoxDir  = Join-Path $root 'Programs\VirtualBox'
-            Letter         = $root.Substring(0, 1).ToUpper()
-            OldLetter      = if ($root.Substring(0, 1).ToUpper() -eq 'Q') { 'R' } else { 'Q' }
+            WindowsPath    = $windowsPath
+            Letter         = $windowsPath.Substring(0, 1).ToUpper()
+            OldLetter      = if ($windowsPath.Substring(0, 1).ToUpper() -eq 'Q') { 'R' } else { 'Q' }
         }
         $null = New-Item -ItemType Directory -Path $stick.Launcher -Force
         Write-TestFile -Path $stick.Settings -Text (ConvertTo-TestSettingsText -Settings (Get-TestSettingTable -Change $Change))
@@ -155,7 +161,7 @@ BeforeAll {
         Write-TestFile -Path $stick.Vmx -Text (Get-TestVmxText)
         Write-TestFile -Path $stick.VMwareDisk -Text (Get-TestDescriptorText)
         Write-TestFile -Path $stick.VirtualBoxDisk -Text (Get-TestDescriptorText -Newline "`n")
-        $below = $root.Substring(2)
+        $below = $windowsPath.Substring(2)
         Write-TestFile -Path $stick.Vbox -Text (@(
                 '<?xml version="1.0"?>', '<VirtualBox xmlns="http://www.virtualbox.org/" version="1.19-windows">',
                 "  <Machine uuid=`"{$script:uuid}`" name=`"Test VM`" OSType=`"Debian_64`">",
@@ -211,24 +217,24 @@ BeforeAll {
     function Get-TestTreeHash {
         param([string]$Root)
         $hashes = @{}
-        foreach ($file in Get-ChildItem -LiteralPath $Root -Recurse -File | Where-Object { $_.FullName -notlike '*\LauncherData\logs\*' }) {
+        foreach ($file in Get-ChildItem -LiteralPath $Root -Recurse -File | Where-Object { $_.FullName -notmatch '[\\/]LauncherData[\\/]logs[\\/]' }) {
             $hashes[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
         }
         $hashes
     }
 
-    # Return the processes in $script:testProcesses whose names the WQL condition $Filter lists as
-    # Name='<name>', as the launcher's process check would find them.
+    # Return the processes in $script:testProcesses whose program names, without .exe, are among
+    # $Name, as the launcher's process check would find them.
     function Get-TestProcess {
-        param([string]$Filter)
-        $names = @([regex]::Matches($Filter, "Name='([^']+)'") | ForEach-Object { $_.Groups[1].Value })
-        @($script:testProcesses | Where-Object { $names -ccontains $_.Name })
+        param([string[]]$Name)
+        @($script:testProcesses | Where-Object { $Name -ccontains ($_.Name -replace '\.exe\z', '') })
     }
 
     # Mock every adapter for a start on the synthetic stick $Stick: the partition with the stick's
     # letter is on disk 3, which is the stick; the processes in $script:testProcesses run, none at
     # first; and the hypervisors in $Installed ('VMware', 'VirtualBox') are installed. VBoxManage
-    # lists the VM, reports it powered off and starts it.
+    # lists the VM, reports it powered off and starts it. Outside Windows the stick's location is
+    # its made-up drive letter (Initialize-TestStick).
     function Set-TestPc {
         [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Test helper that only defines mocks.')]
         param($Stick, [string[]]$Installed = @('VMware', 'VirtualBox'))
@@ -244,7 +250,10 @@ BeforeAll {
         Mock -ModuleName PortableVM Invoke-PvmGetDisk { throw "No disk has the number $Number." }
         Mock -ModuleName PortableVM Invoke-PvmGetDisk { Get-TestDisk } -ParameterFilter { $Number -eq 3 }
         Mock -ModuleName PortableVM Invoke-PvmGetDeviceGuard { $null }
-        Mock -ModuleName PortableVM Invoke-PvmGetProcess { Get-TestProcess -Filter $Filter }
+        Mock -ModuleName PortableVM Invoke-PvmGetProcess { Get-TestProcess -Name $Name }
+        if (-not $script:onWindows) {
+            Mock -ModuleName PortableVM Get-PvmStickLocation { [pscustomobject]@{ Kind = 'DriveLetter'; Letter = $script:testStick.Letter; Path = $script:testStick.WindowsPath } }
+        }
         Mock -ModuleName PortableVM Invoke-PvmTestProcess { $false }
         Mock -ModuleName PortableVM Invoke-PvmStartProcess {}
         Mock -ModuleName PortableVM Invoke-PvmSetEnvironment {}
@@ -275,7 +284,7 @@ Describe 'Adapters' {
     It '<Name> throws when a test reaches it unmocked' -ForEach @(
         @{ Name = 'Invoke-PvmGetPartition'; Call = { Invoke-PvmGetPartition -DriveLetter 'Z' } }
         @{ Name = 'Invoke-PvmGetDisk'; Call = { Invoke-PvmGetDisk -Number 0 } }
-        @{ Name = 'Invoke-PvmGetProcess'; Call = { Invoke-PvmGetProcess -Filter "Name='none.exe'" } }
+        @{ Name = 'Invoke-PvmGetProcess'; Call = { Invoke-PvmGetProcess -Name 'none' } }
         @{ Name = 'Invoke-PvmTestProcess'; Call = { Invoke-PvmTestProcess -Name 'none' } }
         @{ Name = 'Invoke-PvmGetDeviceGuard'; Call = { Invoke-PvmGetDeviceGuard } }
         @{ Name = 'Invoke-PvmGetRegistryValue'; Call = { Invoke-PvmGetRegistryValue -Path 'HKLM:\SOFTWARE\None' -Name 'None' } }
@@ -326,6 +335,168 @@ Describe 'Stick identity' {
     It 'checks the signature before the size' {
         $disk = Get-TestDisk -Change @{ Signature = [uint32]0x5CA1AB1F; LogicalSectorSize = 4096 }
         Get-PvmStickProblem -Disk $disk -Partition (Get-TestPartition) -Settings (Get-TestSettingTable) | Should -BeLike 'This is not the expected USB stick*'
+    }
+}
+
+Describe 'Host-neutral rules' {
+    It 'take the host for Windows exactly where .NET says so' {
+        Test-PvmWindowsHost | Should -Be $script:onWindows
+    }
+
+    Context 'for paths' {
+        It 'forbid in a name the characters Windows forbids, on every system' {
+            $chars = Get-PvmForbiddenNameChar
+            $chars | Should -BeOfType ([char])
+            $codes = @($chars | ForEach-Object { [int]$_ } | Sort-Object)
+            $codes | Should -Be @(@(0..31) + @(34, 42, 47, 58, 60, 62, 63, 92, 124))
+            if ($script:onWindows) { $codes | Should -Be @([IO.Path]::GetInvalidFileNameChars() | ForEach-Object { [int]$_ } | Sort-Object) }
+        }
+
+        It 'join a path setting to the stick folder with this system''s separator: <Value>' -ForEach @(
+            @{ Value = 'VMware\Test VM.vmx' }, @{ Value = 'VMware/Test VM.vmx' }, @{ Value = 'a b\c d/Test VM.vmx' }
+        ) {
+            $root = Join-Path $TestDrive 'stick'
+            $joined = Join-PvmStickPath -Root $root -Path $Value
+            # On Windows exactly what Join-Path gave before, so no path the launcher uses changes there.
+            if ($script:onWindows) { $joined | Should -BeExactly (Join-Path $root $Value) }
+            else { $joined | Should -BeExactly ($root + '/' + $Value.Replace('\', '/')) }
+        }
+
+        It 'keep a file''s first version below the stick folder only in the case its name has, where the system compares names so' {
+            Mock -ModuleName PortableVM Test-PvmWindowsHost { $false }
+            $root = Join-Path $TestDrive 'Stick'
+            $backups = Join-Path $root 'LauncherData'
+            { Get-PvmBackupPath -Root $root -Backups $backups -Path (Join-Path (Join-Path $TestDrive 'stick') 'x.vmdk') -Suffix '.orig' } | Should -Throw
+            Get-PvmBackupPath -Root $root -Backups $backups -Path (Join-Path $root 'x.vmdk') -Suffix '.orig' | Should -BeExactly (Join-Path $backups 'x.vmdk.orig')
+        }
+
+        It 'keep a file''s first version below the stick folder in any case on Windows' {
+            Mock -ModuleName PortableVM Test-PvmWindowsHost { $true }
+            $root = Join-Path $TestDrive 'Stick'
+            $backups = Join-Path $root 'LauncherData'
+            $path = Join-Path (Join-Path $TestDrive 'stick') 'x.vmdk'
+            if ($script:onWindows) { Get-PvmBackupPath -Root $root -Backups $backups -Path $path -Suffix '.orig' | Should -BeExactly (Join-Path $backups 'x.vmdk.orig') }
+        }
+    }
+
+    Context 'for missing files' {
+        It 'say on a system that compares names in case that the name must match in case: <Program>' -ForEach @(
+            @{ Program = 'VMware'; File = 'none.vmx' }, @{ Program = 'VirtualBox'; File = 'none.vbox' }
+        ) {
+            Mock -ModuleName PortableVM Test-PvmWindowsHost { $false }
+            $path = Join-Path $TestDrive $File
+            $state = if ($Program -eq 'VMware') { Get-PvmVMwareState -Path $path } else { Get-PvmVirtualBoxState -Path $path }
+            $state.Reason | Should -BeExactly 'the file does not exist, and on this system the name in settings.psd1 must match its case'
+        }
+
+        It 'say on Windows only that the file does not exist' {
+            Mock -ModuleName PortableVM Test-PvmWindowsHost { $true }
+            (Get-PvmVMwareState -Path (Join-Path $TestDrive 'none.vmx')).Reason | Should -BeExactly 'the file does not exist'
+            (Get-PvmVirtualBoxState -Path (Join-Path $TestDrive 'none.vbox')).Reason | Should -BeExactly 'the file does not exist'
+        }
+    }
+
+    Context 'for raw-disk descriptors' {
+        It 'read a FLAT extent that names a device below /dev as a raw disk' {
+            $lines = @(ConvertFrom-PvmDescriptorText -Text "createType=`"fullDevice`"`nRW 3900000 FLAT `"/dev/sdb`" 0`n")
+            $extent = @($lines | Where-Object { $_.Kind -eq 'Extent' })
+            $extent.Count | Should -Be 1
+            $extent[0].Target | Should -BeExactly '/dev/sdb'
+        }
+
+        It 'refuse a FLAT extent that names <Target>, which is no device' -ForEach @(
+            @{ Target = '/dev/' }, @{ Target = '/devices/sdb' }, @{ Target = 'dev/sdb' }, @{ Target = '/srv/vm/stick-flat.vmdk' }
+            @{ Target = '/dev/../srv/vm' }, @{ Target = '/dev/./sdb' }, @{ Target = '/DEV/sdb' }
+        ) {
+            $thrown = try { $null = ConvertFrom-PvmDescriptorText -Text "RW 9 FLAT `"$Target`" 0" } catch { $_ }
+            $thrown.Exception.Message | Should -BeExactly 'line 1 has a FLAT extent that names a file, not a raw disk'
+        }
+
+        It 'name the disarmed device in the spelling of the device it replaces: <Target>' -ForEach @(
+            @{ Target = '\\.\PhysicalDrive1'; Device = '\\.\PortableVM-disarmed' }
+            @{ Target = '\\?\PhysicalDrive1'; Device = '\\.\PortableVM-disarmed' }
+            @{ Target = '/dev/sdb'; Device = '/dev/PortableVM-disarmed' }
+        ) {
+            Get-PvmDisarmedDevice -Target $Target | Should -BeExactly $Device
+        }
+
+        It 'disarm a /dev target in its own spelling and leave both disarmed spellings as they are' {
+            $text = "RW 10 FLAT `"/dev/sdb`" 0`r`nRW 2 FLAT `"\\.\PhysicalDrive1`" 0`nRW 3 FLAT `"/dev/PortableVM-disarmed`" 0`nRW 4 FLAT `"\\.\PortableVM-disarmed`" 0`nRW 1 FLAT `"/srv/vm/flat.vmdk`" 0`n"
+            $disarmed = ConvertTo-PvmDisarmedDescriptorText -Text $text
+            $disarmed | Should -BeExactly ("RW 10 FLAT `"/dev/PortableVM-disarmed`" 0`r`nRW 2 FLAT `"\\.\PortableVM-disarmed`" 0`nRW 3 FLAT `"/dev/PortableVM-disarmed`" 0`n" +
+                "RW 4 FLAT `"\\.\PortableVM-disarmed`" 0`nRW 1 FLAT `"/srv/vm/flat.vmdk`" 0`n")
+            ConvertTo-PvmDisarmedDescriptorText -Text $disarmed | Should -BeExactly $disarmed
+        }
+
+        It 'come back byte for byte after a disarm and an arm, and disarm the same again: <Case>' -ForEach @(
+            @{ Case = 'a Windows descriptor'; Device = '\\.\PhysicalDrive1'; Spelled = '\\.\PortableVM-disarmed' }
+            @{ Case = 'a Linux descriptor'; Device = '/dev/sdb'; Spelled = '/dev/PortableVM-disarmed' }
+        ) {
+            $original = (Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', $Device)
+            $disarmed = ConvertTo-PvmDisarmedDescriptorText -Text $original
+            $disarmed | Should -BeExactly ((Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', $Spelled))
+            $armed = ConvertTo-PvmDescriptorText -Text $disarmed -Layout @{ CreateType = 'fullDevice'; Extents = @("RW 3900000 FLAT `"$Device`" 0") }
+            $armed | Should -BeExactly $original
+            ConvertTo-PvmDisarmedDescriptorText -Text $armed | Should -BeExactly $disarmed
+        }
+
+        It 'arm a descriptor that names a /dev device for the stick''s raw disk on Windows' {
+            $text = (Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', '/dev/sdb')
+            ConvertTo-PvmDescriptorText -Text $text -Layout @{ CreateType = 'fullDevice'; Extents = @('RW 3900000 FLAT "\\.\PhysicalDrive3" 0') } |
+                Should -BeExactly ((Get-TestDescriptorText).Replace('PhysicalDrive1', 'PhysicalDrive3'))
+        }
+    }
+
+    Context 'for the stick''s location' {
+        It 'is the drive letter and the stick folder of a launcher on a drive: <Path>' -Tag 'WindowsOnly' -ForEach @(
+            @{ Path = 'X:\Launcher'; Root = 'X:\'; Letter = 'X' }
+            @{ Path = 'x:\Sticks\One\Launcher'; Root = 'x:\Sticks\One'; Letter = 'X' }
+        ) {
+            Mock -ModuleName PortableVM Test-PvmWindowsHost { $true }
+            $location = Get-PvmStickLocation -LauncherPath $Path -Root $Root
+            $location.Kind | Should -BeExactly 'DriveLetter'
+            $location.Letter | Should -BeExactly $Letter
+            $location.Path | Should -BeExactly $Root
+        }
+
+        It 'is none for a launcher without a drive letter: <Path>' -ForEach @(
+            @{ Path = '\\server\share\Launcher'; Root = '\\server\share' }
+            @{ Path = '\\?\X:\Launcher'; Root = '\\?\X:\' }
+            @{ Path = 'X:Launcher'; Root = 'X:' }
+        ) {
+            Mock -ModuleName PortableVM Test-PvmWindowsHost { $true }
+            Get-PvmStickLocation -LauncherPath $Path -Root $Root | Should -BeNullOrEmpty
+        }
+
+        It 'is none on a system other than Windows, for any path' -ForEach @(
+            @{ Path = 'X:\Launcher'; Root = 'X:\' }, @{ Path = '/media/user/STICK/Launcher'; Root = '/media/user/STICK' }
+        ) {
+            Mock -ModuleName PortableVM Test-PvmWindowsHost { $false }
+            Get-PvmStickLocation -LauncherPath $Path -Root $Root | Should -BeNullOrEmpty
+        }
+
+        It 'gives the partition, the disk and the raw device of a stick on a drive letter' {
+            Mock -ModuleName PortableVM Invoke-PvmGetPartition { Get-TestPartition } -ParameterFilter { $DriveLetter -ceq 'E' }
+            Mock -ModuleName PortableVM Invoke-PvmGetDisk { Get-TestDisk } -ParameterFilter { $Number -eq 3 }
+            $stick = Get-PvmStickDevice -Location ([pscustomobject]@{ Kind = 'DriveLetter'; Letter = 'E'; Path = 'E:\' }) -Names @{ VM = 'the VM'; Guest = 'the guest' }
+            $stick.Device | Should -BeExactly '\\.\PhysicalDrive3'
+            $stick.Disk.Number | Should -Be 3
+            $stick.Partition.Offset | Should -Be ([uint64]2500000 * 512)
+        }
+
+        It 'names the raw device of disk <Number> as Windows does' -ForEach @(@{ Number = 0 }, @{ Number = 3 }, @{ Number = 12 }) {
+            Get-PvmRawDevice -Disk ([pscustomobject]@{ Number = [uint32]$Number }) | Should -BeExactly "\\.\PhysicalDrive$Number"
+        }
+    }
+
+    Context 'for running programs' {
+        It 'ask Windows for the processes of the program names <Names> as before, with .exe' -ForEach @(
+            @{ Names = @('vmware-vmx'); Filter = "Name='vmware-vmx.exe'" }
+            @{ Names = @('VirtualBoxVM', 'VBoxHeadless'); Filter = "Name='VirtualBoxVM.exe' OR Name='VBoxHeadless.exe'" }
+            @{ Names = @('VirtualBox', 'VirtualBoxVM', 'VBoxHeadless'); Filter = "Name='VirtualBox.exe' OR Name='VirtualBoxVM.exe' OR Name='VBoxHeadless.exe'" }
+        ) {
+            ConvertTo-PvmProcessFilter -Name $Names | Should -BeExactly $Filter
+        }
     }
 }
 
@@ -1209,7 +1380,7 @@ Describe 'Hypervisor choice' {
     }
 }
 
-Describe 'A start' -Tag 'WindowsOnly' {
+Describe 'A start' {
     Context 'in VMware Workstation' {
         BeforeEach {
             $script:stick = Initialize-TestStick -Name 'vmware-stick'
@@ -1223,8 +1394,8 @@ Describe 'A start' -Tag 'WindowsOnly' {
             $result.Message | Should -BeNullOrEmpty
             Should -Invoke -CommandName Invoke-PvmGetPartition -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $DriveLetter -ceq $script:stick.Letter }
             Should -Invoke -CommandName Invoke-PvmGetDisk -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $Number -eq 3 }
-            Should -Invoke -CommandName Invoke-PvmGetProcess -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $Filter -ceq $script:vmwareFilter }
-            Should -Invoke -CommandName Invoke-PvmGetProcess -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $Filter -ceq $script:virtualBoxVmFilter }
+            Should -Invoke -CommandName Invoke-PvmGetProcess -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { ($Name -join ',') -ceq $script:vmwareNames }
+            Should -Invoke -CommandName Invoke-PvmGetProcess -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { ($Name -join ',') -ceq $script:virtualBoxVmNames }
             [IO.File]::ReadAllText($script:stick.VMwareDisk) | Should -BeLike '*RW 2500000 FLAT "\\.\PhysicalDrive3" 0*RW 1400000 ZERO*'
             [IO.File]::ReadAllText($script:stick.VMwareDisk) | Should -BeLike '*createType="fullDevice"*'
             [IO.File]::ReadAllText((Join-Path $script:stick.Backups 'VMware\stick.vmdk.orig')) |
@@ -1295,7 +1466,7 @@ Describe 'A start' -Tag 'WindowsOnly' {
             Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
         }
 
-        It 'stops without guessing, a dry run too, when <Case>' -ForEach @(
+        It 'stops without guessing, a dry run too, when <Case>' -Tag 'WindowsOnly' -ForEach @(
             @{ Case = 'the version before beside a copy cannot be read'; Held = 'old'
                 Message = 'A write of <copy> did not finish, and Test VM.vbox.previous.launcher-backup.pvm-old beside it cannot be read. Close the program that holds it, then start again. Nothing was started.'
             }
@@ -1514,7 +1685,7 @@ Describe 'A start' -Tag 'WindowsOnly' {
             }
         }
 
-        It 'leaves the .vbox as it was when VirtualBox.xml is read-only' {
+        It 'leaves the .vbox as it was when VirtualBox.xml is read-only' -Tag 'WindowsOnly' {
             $vbox = [IO.File]::ReadAllText($script:stick.Vbox)
             [IO.File]::SetAttributes($script:stick.VirtualBoxXml, 'ReadOnly')
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
@@ -1548,8 +1719,8 @@ Describe 'A start' -Tag 'WindowsOnly' {
             "$($script:stick.Vbox).launcher-backup" | Should -Not -Exist
             "$($script:stick.VirtualBoxXml).launcher-backup" | Should -Not -Exist
             [IO.File]::ReadAllText($script:stick.VirtualBoxDisk) | Should -BeExactly ((Get-TestDescriptorText -Newline "`n").Replace('PhysicalDrive1', 'PhysicalDrive3'))
-            Should -Invoke -CommandName Invoke-PvmGetProcess -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $Filter -ceq $script:vmwareFilter }
-            Should -Invoke -CommandName Invoke-PvmGetProcess -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $Filter -ceq $script:virtualBoxOpenFilter }
+            Should -Invoke -CommandName Invoke-PvmGetProcess -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { ($Name -join ',') -ceq $script:vmwareNames }
+            Should -Invoke -CommandName Invoke-PvmGetProcess -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { ($Name -join ',') -ceq $script:virtualBoxOpenNames }
             Should -Invoke -CommandName Invoke-PvmSetEnvironment -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter {
                 $Name -eq 'VBOX_USER_HOME' -and $Value -eq (Join-Path $script:stick.Root 'VirtualBox')
             }
@@ -1832,7 +2003,7 @@ Describe 'A start' -Tag 'WindowsOnly' {
             Get-TestLog -Path $script:stick.Log | Should -Contain 'Note: Memory Integrity is on, so the VM runs on top of Hyper-V (slower than native).'
         }
 
-        It 'starts although VERSION cannot be read' {
+        It 'starts although VERSION cannot be read' -Tag 'WindowsOnly' {
             $version = Join-Path $script:stick.Launcher 'VERSION'
             Write-TestFile -Path $version -Text "v0.2.0`n"
             $lock = [IO.File]::Open($version, 'Open', 'Read', 'None')
@@ -2633,14 +2804,14 @@ Describe 'The drive letter' -Tag 'WindowsOnly' {
         Get-PvmDriveLetter -Path $Path | Should -BeExactly $Letter
     }
 
-    Context 'in a run' -Tag 'WindowsOnly' {
+    Context 'in a run' {
         BeforeEach {
             $script:stick = Initialize-TestStick -Name 'letter-stick'
             Set-TestPc -Stick $script:stick -Installed 'VMware'
         }
         AfterEach { Remove-Item -LiteralPath $script:stick.Root -Recurse -Force }
 
-        It 'stops when the launcher does not run from a drive letter' {
+        It 'stops when the launcher does not run from a drive letter' -Tag 'WindowsOnly' {
             Mock -ModuleName PortableVM Get-PvmDriveLetter { $null }
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
             $result.ExitCode | Should -Be 1
@@ -2654,6 +2825,24 @@ Describe 'The drive letter' -Tag 'WindowsOnly' {
             $result.ExitCode | Should -Be 1
             $result.Message | Should -BeExactly "Windows has no partition with the drive letter $($script:stick.Letter):, so the launcher cannot tell which disk is the USB stick; a network drive or a drive made with subst has none. Start it with Start VM.cmd on the stick's own drive. Nothing was started."
             Should -Invoke -CommandName Invoke-PvmGetDisk -ModuleName PortableVM -Times 0 -Exactly
+        }
+
+        It 'stops with the Windows message when Windows finds no location for the stick' {
+            Mock -ModuleName PortableVM Get-PvmStickLocation { $null }
+            Mock -ModuleName PortableVM Test-PvmWindowsHost { $true }
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.Message | Should -BeExactly "The launcher runs from $($script:stick.Launcher), which is not on a drive with a letter, so it cannot tell which disk is the USB stick. Start it with Start VM.cmd on the stick's own drive. Nothing was started."
+        }
+
+        It 'stops before it reads a disk on a system where it cannot find the stick yet' {
+            Mock -ModuleName PortableVM Get-PvmStickLocation { $null }
+            Mock -ModuleName PortableVM Test-PvmWindowsHost { $false }
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly 'On this system the launcher cannot tell yet which disk is the USB stick; so far it starts the VM only on Windows. Nothing was started.'
+            Should -Invoke -CommandName Invoke-PvmGetPartition -ModuleName PortableVM -Times 0 -Exactly
+            Should -Invoke -CommandName Invoke-PvmGetDisk -ModuleName PortableVM -Times 0 -Exactly
+            (Get-TestLog -Path $script:stick.Log) | Should -Contain 'STOPPED: On this system the launcher cannot tell yet which disk is the USB stick; so far it starts the VM only on Windows. Nothing was started.'
         }
     }
 }
@@ -2676,7 +2865,7 @@ Describe 'Timings' {
         Format-PvmTiming -Times $context.Times | Should -BeExactly 'Timings: setup 5 ms, a 20 ms, b 11 ms, total 36 ms'
     }
 
-    Context 'in a run' -Tag 'WindowsOnly' {
+    Context 'in a run' {
         BeforeEach {
             $script:stick = Initialize-TestStick -Name 'timing-stick'
             Set-TestPc -Stick $script:stick -Installed 'VMware', 'VirtualBox'
@@ -2709,7 +2898,7 @@ Describe 'Timings' {
     }
 }
 
-Describe 'Dry-run parity' -Tag 'WindowsOnly' {
+Describe 'Dry-run parity' {
     It 'takes the decisions of a real start: <Case>' -ForEach @(
         @{ Case = 'VMware, nothing in the way'; Installed = @('VMware'); Change = @{}; Setup = {} }
         @{ Case = 'VirtualBox, nothing in the way'; Installed = @('VirtualBox'); Change = @{}; Setup = {} }
