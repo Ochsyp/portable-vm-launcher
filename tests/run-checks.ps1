@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Stop'
 
 # Import the module $Name at exactly $Version, after unloading any other version of it from this
 # session. PowerShell 7 on Windows does not look in Windows PowerShell's module folder of the
-# current user, so there it also takes the version from that folder, for this run only; both
+# current user, so there it also takes the version from that folder, for this run; both
 # pinned modules work in either engine. Throws naming the Install-Module command for the running
 # engine when that version is installed nowhere it looks.
 function Import-PinnedModule {
@@ -53,6 +53,8 @@ function Import-PinnedModule {
 }
 
 $repoRoot = Split-Path $PSScriptRoot -Parent
+# Import-PinnedModule may add a folder to it; the session that ran this script gets it back as it was.
+$previousModulePath = $env:PSModulePath
 $exitCode = 1
 Push-Location -LiteralPath $repoRoot
 try {
@@ -106,6 +108,7 @@ try {
     Write-Host "The checks stopped: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host $_.ScriptStackTrace
 } finally {
+    $env:PSModulePath = $previousModulePath
     Pop-Location
 }
 exit $exitCode
