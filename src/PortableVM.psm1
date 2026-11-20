@@ -108,7 +108,7 @@ function Get-PvmLogProblem {
 
 # Return the system's ANSI code page, in which the log and old settings files are written. Windows
 # PowerShell 5.1 calls it Default; PowerShell 7 calls UTF-8 Default and gives the ANSI code page
-# for code page 0.
+# for code page 0. Outside Windows there is no ANSI code page, and code page 0 is UTF-8.
 function Get-PvmAnsiEncoding {
     [CmdletBinding()]
     [OutputType([Text.Encoding])]
@@ -138,9 +138,9 @@ function Open-PvmAppendStream {
 }
 
 # Append the message $Message to the log file $Path as Format-PvmLogText gives it, with the time
-# now and this process's ID, and show it on the console. The text goes in one write through an
-# append-only handle that shares reading, writing and deletion, so that other launcher processes
-# can neither break it up nor block it; -WhatIf does not affect it, so a dry run logs what it would
+# now and this process's ID, and show it on the console. The text goes in one write through
+# Open-PvmAppendStream, which on Windows makes sure that other launcher processes can neither break
+# it up nor block it; -WhatIf does not affect it, so a dry run logs what it would
 # do. It never throws: a failed write keeps its cause for Get-PvmLogProblem and says so on the
 # console, unless an earlier failure of this run, the logs folder's included, is kept already.
 function Write-PvmLog {
