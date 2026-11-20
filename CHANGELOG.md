@@ -111,6 +111,16 @@ All notable changes to this project are listed here. The format follows
   that checks every file before it changes one. Repo checks that the module writes files only
   through the safe write, apart from its log, and deletes, moves or swaps a file only in that
   write or to put the log aside, and that the deploy tool writes files only through it.
+- The code also runs under PowerShell 7, the engine Linux uses; `Start VM.cmd` still runs it in
+  Windows PowerShell 5.1. On Windows the log is opened only to append in both engines, so a
+  write stays in one piece, and it stays in the system's ANSI code page. The lock check before
+  the prompt for administrator rights and the deploy tool's check of a file it moves work in
+  both engines too. When the clone's module does not load, the deploy tool reads it as the
+  running engine reads a script, ANSI or UTF-8, to say whether it does not parse.
+- CI runs the tests in PowerShell 7 on Windows and on Linux, beside the Windows PowerShell 5.1
+  job. `tests\run-checks.ps1` takes `-Tag` and `-ExcludeTag`; `WindowsOnly` marks a test that
+  needs Windows, and the Linux job leaves those out. In PowerShell 7 on Windows it uses the
+  pinned modules installed for Windows PowerShell.
 
 ### Changed
 

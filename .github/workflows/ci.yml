@@ -1,5 +1,5 @@
-# Runs PSScriptAnalyzer and Pester in Windows PowerShell 5.1, and the privacy scan over the
-# tracked files, on every push and pull request.
+# Runs PSScriptAnalyzer and Pester in Windows PowerShell 5.1, Pester in PowerShell 7 on Windows
+# and Linux, and the privacy scan over the tracked files, on every push and pull request.
 # Actions are pinned to commit SHAs; Dependabot proposes updates.
 name: ci
 
@@ -59,3 +59,41 @@ jobs:
       - name: Run the privacy scan over the tracked files
         shell: bash
         run: sh .githooks/privacy-scan --tracked
+
+  # The tests in PowerShell 7, the engine Linux uses: on Windows all of them, on Linux all but those
+  # tagged WindowsOnly. The analyzer runs in the job above. This job belongs to this repository,
+  # not to the repository standard, and stays when the standard is adopted.
+  pwsh:
+    name: pwsh (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Pester 6.2.0
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          Write-Host "PowerShell $($PSVersionTable.PSVersion)"
+          for ($attempt = 1; ; $attempt++) {
+            try {
+              Install-Module -Name Pester -RequiredVersion 6.2.0 -Repository PSGallery -Scope CurrentUser -Force -SkipPublisherCheck
+              break
+            } catch {
+              if ($attempt -ge 3) { throw }
+              Write-Host "Installing Pester failed, trying again: $($_.Exception.Message)"
+              Start-Sleep -Seconds 15
+            }
+          }
+      - name: Run tests/run-checks.ps1 without the analyzer
+        shell: pwsh
+        run: |
+          # Continue, so a line the checks write to stderr does not stop this step; the exit code decides.
+          $ErrorActionPreference = 'Continue'
+          if ($IsWindows) { ./tests/run-checks.ps1 -SkipAnalyzer } else { ./tests/run-checks.ps1 -SkipAnalyzer -ExcludeTag WindowsOnly }
+          exit $LASTEXITCODE

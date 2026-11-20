@@ -17,6 +17,33 @@ BeforeAll {
     $script:virtualBoxVmFilter = "Name='VirtualBoxVM.exe' OR Name='VBoxHeadless.exe'"
     $script:virtualBoxOpenFilter = "Name='VirtualBox.exe' OR Name='VirtualBoxVM.exe' OR Name='VBoxHeadless.exe'"
 
+    # Return the system's ANSI code page, read from the registry, in which the launcher writes its
+    # log: a test of the log checks the launcher's bytes against it, not against the launcher's
+    # own choice of encoding.
+    function Get-TestAnsiEncoding {
+        [Text.Encoding]::GetEncoding([int](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\CodePage').ACP)
+    }
+
+    # Create and return the mutex named $Name with a security descriptor that denies this user
+    # every right to it, as when an elevated run holds the lock. .NET Framework and .NET take the
+    # descriptor in different calls.
+    function New-TestDeniedMutex {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Test helper that makes a mutex of this process only.')]
+        param([string]$Name)
+        $security = [System.Security.AccessControl.MutexSecurity]::new()
+        $security.AddAccessRule([System.Security.AccessControl.MutexAccessRule]::new([System.Security.Principal.WindowsIdentity]::GetCurrent().User,
+                [System.Security.AccessControl.MutexRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Deny))
+        $created = $false
+        if ($PSVersionTable.PSEdition -eq 'Desktop') {
+            $mutex = [System.Threading.Mutex]::new($false, $Name, [ref]$created, $security)
+        } else {
+            $acl = [Type]::GetType('System.Threading.MutexAcl, System.Threading.AccessControl', $true)
+            $mutex = $acl::Create($false, $Name, [ref]$created, $security)
+        }
+        if (-not $created) { $mutex.Dispose(); throw "The mutex $Name existed already." }
+        $mutex
+    }
+
     # Write $Text to the file $Path as UTF-8 without a BOM, creating its folder.
     function Write-TestFile {
         param([string]$Path, [string]$Text)
@@ -148,7 +175,7 @@ BeforeAll {
     function Get-TestLog {
         param([string]$Path, [switch]$Timings)
         $prefix = '\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}[+-]\d\d:\d\d \[' + $PID + '\]  '
-        @(foreach ($line in [IO.File]::ReadAllLines($Path, [Text.Encoding]::Default)) {
+        @(foreach ($line in [IO.File]::ReadAllLines($Path, (Get-TestAnsiEncoding))) {
                 if ($line -notmatch $prefix) { throw "A log line lacks the prefix: $line" }
                 $message = $line -replace $prefix, ''
                 if ($Timings -or -not $message.StartsWith('Timings: ')) { $message }
@@ -302,7 +329,7 @@ Describe 'Stick identity' {
     }
 }
 
-Describe 'Safe writes' {
+Describe 'Safe writes' -Tag 'WindowsOnly' {
     BeforeAll {
         # Return the names in the test folder, hidden ones included.
         function Get-TestName { @(Get-ChildItem -LiteralPath $script:folder -Force -Name | Sort-Object) }
@@ -610,7 +637,7 @@ Describe 'Raw-disk descriptors' {
         ConvertTo-PvmDescriptorText -Text $disarmed -Layout $layout | Should -BeExactly ((Get-TestDescriptorText).Replace('PhysicalDrive1', 'PhysicalDrive3'))
     }
 
-    Context 'on disk' {
+    Context 'on disk' -Tag 'WindowsOnly' {
         BeforeEach {
             Mock -ModuleName PortableVM Write-Host {}
             $script:descriptor = Join-Path $TestDrive 'descriptor\stick.vmdk'
@@ -957,7 +984,7 @@ Describe 'Drive letters' {
         ConvertTo-PvmDriveLetterText -Text $text -Root 'D:\Portable\Stick' -Letter 'E' | Should -BeExactly $text
     }
 
-    Context 'in a file' {
+    Context 'in a file' -Tag 'WindowsOnly' {
         BeforeEach {
             Mock -ModuleName PortableVM Write-Host {}
             $script:file = Join-Path $TestDrive 'letters\VirtualBox.xml'
@@ -1182,7 +1209,7 @@ Describe 'Hypervisor choice' {
     }
 }
 
-Describe 'A start' {
+Describe 'A start' -Tag 'WindowsOnly' {
     Context 'in VMware Workstation' {
         BeforeEach {
             $script:stick = Initialize-TestStick -Name 'vmware-stick'
@@ -1946,7 +1973,7 @@ Describe 'A start' {
     }
 }
 
-Describe 'The log' {
+Describe 'The log' -Tag 'WindowsOnly' {
     BeforeEach {
         Mock -ModuleName PortableVM Write-Host {}
         & (Get-Module PortableVM) { $script:PvmLogProblem = '' }
@@ -1988,8 +2015,7 @@ Describe 'The log' {
     # tests\Repo.Tests.ps1 pins the one write; this test shows the lines staying together while
     # another writer holds the log open for appending.
     It 'appends a message with its lines together while another writer holds the log open' {
-        $other = [IO.FileStream]::new($script:log, [IO.FileMode]::Append, [Security.AccessControl.FileSystemRights]::AppendData,
-            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete), 4096, [IO.FileOptions]::None)
+        $other = Open-PvmAppendStream -Path $script:log
         try {
             $bytes = [Text.Encoding]::ASCII.GetBytes("other 1`r`n")
             $other.Write($bytes, 0, $bytes.Length)
@@ -2009,10 +2035,11 @@ Describe 'The log' {
         $lines[3] | Should -BeExactly 'other 2'
     }
 
-    It 'writes ANSI, as the log was before' {
+    It 'writes in the system''s ANSI code page, as Windows PowerShell 5.1 always has, also under PowerShell 7' {
+        (Get-PvmAnsiEncoding).CodePage | Should -Be (Get-TestAnsiEncoding).CodePage
         Write-PvmLog -Path $script:log -Message "caf$([char]0xE9)"
         $bytes = [IO.File]::ReadAllBytes($script:log)
-        $expected = [Text.Encoding]::Default.GetBytes("caf$([char]0xE9)`r`n")
+        $expected = (Get-TestAnsiEncoding).GetBytes("caf$([char]0xE9)`r`n")
         [Convert]::ToBase64String($bytes, $bytes.Length - $expected.Length, $expected.Length) | Should -BeExactly ([Convert]::ToBase64String($expected))
     }
 
@@ -2138,7 +2165,7 @@ Describe 'Log rotation' {
         }
     }
 
-    Context 'in a run' {
+    Context 'in a run' -Tag 'WindowsOnly' {
         BeforeEach {
             $script:stick = Initialize-TestStick -Name 'rotation-stick'
             Set-TestPc -Stick $script:stick -Installed 'VMware'
@@ -2184,14 +2211,14 @@ Describe 'Log rotation' {
             finally { $holder.Dispose() }
             $result.ExitCode | Should -Be 0
             $script:movedLog | Should -Not -Exist
-            [Text.Encoding]::Default.GetString([IO.File]::ReadAllBytes($script:stick.Log)) |
+            (Get-TestAnsiEncoding).GetString([IO.File]::ReadAllBytes($script:stick.Log)) |
                 Should -BeLike '*  Note: the log could not be moved aside, because it is open in another program; this run adds to it.*'
             Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
         }
     }
 }
 
-Describe 'Log failures' {
+Describe 'Log failures' -Tag 'WindowsOnly' {
     BeforeEach {
         $script:stick = Initialize-TestStick -Name 'log-stick'
         Set-TestPc -Stick $script:stick -Installed 'VMware'
@@ -2269,7 +2296,7 @@ Describe 'Log failures' {
     }
 }
 
-Describe 'Single instance' {
+Describe 'Single instance' -Tag 'WindowsOnly' {
     BeforeEach {
         $script:stick = Initialize-TestStick -Name 'lock-stick'
         Set-TestPc -Stick $script:stick -Installed 'VMware'
@@ -2364,7 +2391,7 @@ Describe 'Single instance' {
     }
 }
 
-Describe 'The lock''s mutex' {
+Describe 'The lock''s mutex' -Tag 'WindowsOnly' {
     BeforeAll {
         # Run $Script with $Arguments in a runspace of its own on a new thread, wait for it and
         # return its output. Disposing the runspace ends that thread.
@@ -2449,14 +2476,8 @@ Describe 'The lock''s mutex' {
     }
 
     It 'is busy when this process may not open it, as when an elevated run holds it' {
-        # A security descriptor that denies this user every right to the mutex, after its creation.
-        $security = [System.Security.AccessControl.MutexSecurity]::new()
-        $security.AddAccessRule([System.Security.AccessControl.MutexAccessRule]::new([System.Security.Principal.WindowsIdentity]::GetCurrent().User,
-                [System.Security.AccessControl.MutexRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Deny))
-        $created = $false
-        $holder = [System.Threading.Mutex]::new($false, $script:name, [ref]$created, $security)
+        $holder = New-TestDeniedMutex -Name $script:name
         try {
-            $created | Should -BeTrue
             $lock = Enter-PvmMutex -Name $script:name
             $lock.State | Should -BeExactly 'Busy'
             $lock.Mutex | Should -BeNullOrEmpty
@@ -2503,7 +2524,7 @@ Describe 'The lock''s mutex' {
     }
 }
 
-Describe 'Unexpected errors' {
+Describe 'Unexpected errors' -Tag 'WindowsOnly' {
     BeforeEach {
         $script:stick = Initialize-TestStick -Name 'error-stick'
         Set-TestPc -Stick $script:stick -Installed 'VMware', 'VirtualBox'
@@ -2599,7 +2620,7 @@ Describe 'Unexpected errors' {
     }
 }
 
-Describe 'The drive letter' {
+Describe 'The drive letter' -Tag 'WindowsOnly' {
     It 'is the root of a path with a drive letter, in upper case: <Path>' -ForEach @(
         @{ Path = 'X:\Launcher'; Letter = 'X' }
         @{ Path = 'x:\Folder\Launcher'; Letter = 'X' }
@@ -2612,7 +2633,7 @@ Describe 'The drive letter' {
         Get-PvmDriveLetter -Path $Path | Should -BeExactly $Letter
     }
 
-    Context 'in a run' {
+    Context 'in a run' -Tag 'WindowsOnly' {
         BeforeEach {
             $script:stick = Initialize-TestStick -Name 'letter-stick'
             Set-TestPc -Stick $script:stick -Installed 'VMware'
@@ -2655,7 +2676,7 @@ Describe 'Timings' {
         Format-PvmTiming -Times $context.Times | Should -BeExactly 'Timings: setup 5 ms, a 20 ms, b 11 ms, total 36 ms'
     }
 
-    Context 'in a run' {
+    Context 'in a run' -Tag 'WindowsOnly' {
         BeforeEach {
             $script:stick = Initialize-TestStick -Name 'timing-stick'
             Set-TestPc -Stick $script:stick -Installed 'VMware', 'VirtualBox'
@@ -2688,7 +2709,7 @@ Describe 'Timings' {
     }
 }
 
-Describe 'Dry-run parity' {
+Describe 'Dry-run parity' -Tag 'WindowsOnly' {
     It 'takes the decisions of a real start: <Case>' -ForEach @(
         @{ Case = 'VMware, nothing in the way'; Installed = @('VMware'); Change = @{}; Setup = {} }
         @{ Case = 'VirtualBox, nothing in the way'; Installed = @('VirtualBox'); Change = @{}; Setup = {} }

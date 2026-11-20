@@ -176,10 +176,12 @@ function Import-DeployModule {
         while ($null -ne $exception.InnerException) { $exception = $exception.InnerException }
         $code = if (($exception.HResult -band 0xFFFF0000) -eq 0x80070000) { $exception.HResult -band 0xFFFF } else { 0 }
         # ParseFile would report a file it cannot read as a parse error, so the text is read first,
-        # decoded as Windows PowerShell 5.1 decodes a script: by its byte order mark, else as ANSI.
+        # decoded as the running engine reads a script: by its byte order mark, else as ANSI in
+        # Windows PowerShell 5.1 and as UTF-8 in PowerShell 7.
         $parseErrors = @()
         try {
-            $text = [IO.File]::ReadAllText($module, [Text.Encoding]::Default)
+            $encoding = if ($PSVersionTable.PSEdition -eq 'Desktop') { [Text.Encoding]::Default } else { New-Object System.Text.UTF8Encoding $false }
+            $text = [IO.File]::ReadAllText($module, $encoding)
             $errors = $null
             $null = [System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$errors)
             $parseErrors = @($errors)
@@ -393,11 +395,20 @@ function Get-DeployFreePath {
 # other program has it open. A migration checks each file it moves this way before its first
 # change.
 function Assert-DeployWriteAccess {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseCompatibleTypes', '', Justification = 'FileSystemAclExtensions is used only under PowerShell 7.')]
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path)
     try {
+        # .NET Framework and .NET name the handle with these rights differently; other systems
+        # have no delete right on a file, and their share modes only hold between .NET handles.
         $rights = [Security.AccessControl.FileSystemRights]'Read, Write, Delete'
-        $stream = New-Object System.IO.FileStream $Path, ([IO.FileMode]::Open), $rights, ([IO.FileShare]::None), 4096, ([IO.FileOptions]::None)
+        if ($PSVersionTable.PSEdition -eq 'Desktop') {
+            $stream = New-Object System.IO.FileStream $Path, ([IO.FileMode]::Open), $rights, ([IO.FileShare]::None), 4096, ([IO.FileOptions]::None)
+        } elseif ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            $stream = [System.IO.FileSystemAclExtensions]::Create([IO.FileInfo]::new($Path), [IO.FileMode]::Open, $rights, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $null)
+        } else {
+            $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        }
         $stream.Dispose()
     } catch {
         Write-Verbose "Cannot open $Path to move it: $($_.Exception.Message)"

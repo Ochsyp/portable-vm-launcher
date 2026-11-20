@@ -14,6 +14,12 @@ BeforeAll {
     # A made-up name with letters outside ASCII that Windows-1252 holds too, so it also tests ANSI.
     $script:sampleName = 'K' + [char]0x00E9 + 'l' + [char]0x00F8 + 'n' + [char]0x00EF
 
+    # Return the system's ANSI code page, read from the registry: the encoding of old settings
+    # files, which Windows PowerShell 5.1 calls Default.
+    function Get-TestAnsiEncoding {
+        [Text.Encoding]::GetEncoding([int](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\CodePage').ACP)
+    }
+
     # Write the bytes $Bytes to TestDrive\$Name and return the path.
     function Write-TestByte {
         param([string]$Name, [byte[]]$Bytes)
@@ -78,16 +84,16 @@ Describe 'Reading a settings file' {
         Get-ImportError -Path $path | Should -BeExactly 'it holds characters outside ASCII but no byte order mark; save it as UTF-8 with BOM'
     }
 
-    It 'reads a file without a byte order mark as ANSI with -Legacy, as the launcher before schema 2 did' {
-        $bytes = [Text.Encoding]::Default.GetBytes("@{ GuestName = '$script:sampleName' }")
+    It 'reads a file without a byte order mark as ANSI with -Legacy, as the launcher before schema 2 did' -Tag 'WindowsOnly' {
+        $bytes = (Get-TestAnsiEncoding).GetBytes("@{ GuestName = '$script:sampleName' }")
         $path = Write-TestByte -Name 'ansi.psd1' -Bytes $bytes
-        (Import-PvmDataFile -Path $path -Legacy)['GuestName'] | Should -BeExactly ([Text.Encoding]::Default.GetString($bytes) -replace "^@\{ GuestName = '|' \}$", '')
+        (Import-PvmDataFile -Path $path -Legacy)['GuestName'] | Should -BeExactly ((Get-TestAnsiEncoding).GetString($bytes) -replace "^@\{ GuestName = '|' \}$", '')
         Get-ImportError -Path $path | Should -BeLike '*save it as UTF-8 with BOM'
     }
 
-    It 'reads a file without a byte order mark as ANSI with -Legacy also when it holds UTF-8, as the launcher before schema 2 did' {
+    It 'reads a file without a byte order mark as ANSI with -Legacy also when it holds UTF-8, as the launcher before schema 2 did' -Tag 'WindowsOnly' {
         $bytes = (New-Object System.Text.UTF8Encoding $false).GetBytes("@{ GuestName = '$script:sampleName' }")
-        ConvertFrom-PvmDataFileByte -Bytes $bytes -Legacy | Should -BeExactly ([Text.Encoding]::Default.GetString($bytes))
+        ConvertFrom-PvmDataFileByte -Bytes $bytes -Legacy | Should -BeExactly ((Get-TestAnsiEncoding).GetString($bytes))
     }
 
     It 'refuses bytes that are no valid UTF-8 after a UTF-8 byte order mark' {
@@ -225,7 +231,7 @@ Describe 'Checking settings against schema 2' {
         ($problems -contains 'VmSectors: must be above DataPartitionStart and at most StickSectors') | Should -Be $Problem
     }
 
-    It 'refuses a path setting <Value>' -ForEach @(
+    It 'refuses a path setting <Value>' -Tag 'WindowsOnly' -ForEach @(
         @{ Value = '' }, @{ Value = '.' }, @{ Value = '..' }, @{ Value = 'VMware\..\Test VM.vmx' }, @{ Value = 'VMware\.\Test VM.vmx' }
         @{ Value = 'VMware.\Test VM.vmx' }, @{ Value = 'VMware \Test VM.vmx' }, @{ Value = 'VMware\\Test VM.vmx' }, @{ Value = 'VMware\CON.vmx' }
         @{ Value = 'NUL.vmx' }, @{ Value = 'com1.vmx' }, @{ Value = 'C:\VMware\Test VM.vmx' }, @{ Value = 'C:Test VM.vmx' }
@@ -237,7 +243,7 @@ Describe 'Checking settings against schema 2' {
         $problems | Should -BeExactly @("VMwareVmx: must name a .vmx file below the folder that holds Launcher and LauncherData, without a drive, '.' or '..'")
     }
 
-    It 'accepts a path setting <Value>, which Windows reads as written' -ForEach @(
+    It 'accepts a path setting <Value>, which Windows reads as written' -Tag 'WindowsOnly' -ForEach @(
         @{ Value = 'VMware\Test VM.vmx' }, @{ Value = 'VMware/Test VM.VMX' }, @{ Value = 'Test VM.vmx' }
         @{ Value = 'a b\c d\Test VM.vmx' }, @{ Value = 'VMware\CONFIG.vmx' }, @{ Value = 'VMware\.hidden\Test VM.vmx' }
     ) {
@@ -320,7 +326,7 @@ Describe 'Importing the settings' {
         $lines.Count | Should -Be 12
     }
 
-    It 'stops when the file is open in another program, naming the cause but no path, and keeps the message from Windows aside' {
+    It 'stops when the file is open in another program, naming the cause but no path, and keeps the message from Windows aside' -Tag 'WindowsOnly' {
         $path = Write-TestByte -Name 'held.psd1' -Bytes ([Text.Encoding]::ASCII.GetBytes('@{ SchemaVersion = 2 }'))
         $held = [IO.File]::Open($path, 'Open', 'Read', 'None')
         try {
@@ -342,7 +348,11 @@ Describe 'Importing the settings' {
         $message | Should -BeExactly 'LauncherData\settings.psd1 is missing. Copy examples\settings.example.psd1 there and fill it in.'
         $path = Write-TestByte -Name 'syntax.psd1' -Bytes ([Text.Encoding]::ASCII.GetBytes('@{'))
         $message = try { $null = Import-PvmSetting -Path $path } catch { Get-PvmStopMessage -ErrorRecord $_ }
-        $message | Should -BeExactly 'LauncherData\settings.psd1 cannot be read: line 1 is no valid PowerShell data (IncompleteHashLiteral).'
+        # The parser of each engine names the error itself: IncompleteHashLiteral in Windows
+        # PowerShell 5.1, MissingEndCurlyBrace in PowerShell 7.
+        $errors = $null
+        $null = [System.Management.Automation.Language.Parser]::ParseInput('@{', [ref]$null, [ref]$errors)
+        $message | Should -BeExactly "LauncherData\settings.psd1 cannot be read: line 1 is no valid PowerShell data ($($errors[0].ErrorId))."
     }
 
     It 'returns the checked settings with the defaults' {
@@ -505,7 +515,7 @@ Describe 'The data folder' {
         $paths.OldSettings | Should -BeExactly (Join-Path $TestDrive 'stick\Launcher\settings.psd1')
     }
 
-    It 'keeps a file''s first version at its path below the stick folder' {
+    It 'keeps a file''s first version at its path below the stick folder' -Tag 'WindowsOnly' {
         $root = Join-Path $TestDrive 'stick'
         $backups = Join-Path $root 'LauncherData\backups'
         Get-PvmBackupPath -Root $root -Backups $backups -Path (Join-Path $root 'VMware\stick.vmdk') -Suffix '.orig' |

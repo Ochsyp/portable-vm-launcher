@@ -11,6 +11,12 @@ BeforeAll {
     . (Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1')
     . (Join-Path $script:repoRoot 'tools\Get-StickInventory.ps1')
 
+    # Return the system's ANSI code page, read from the registry: the encoding of old settings
+    # files, which Windows PowerShell 5.1 calls Default.
+    function Get-TestAnsiEncoding {
+        [Text.Encoding]::GetEncoding([int](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Nls\CodePage').ACP)
+    }
+
     # Write $Text to the file $Path as UTF-8 without a BOM, creating its folder.
     function Write-TestFile {
         param([string]$Path, [string]$Text)
@@ -123,7 +129,7 @@ AfterAll {
     Remove-Module PortableVM -ErrorAction SilentlyContinue
 }
 
-Describe 'Deploy-PortableVM' {
+Describe 'Deploy-PortableVM' -Tag 'WindowsOnly' {
     BeforeEach {
         Initialize-TestClone
         $script:target = Join-Path $TestDrive 'target'
@@ -280,10 +286,15 @@ Describe 'Deploy-PortableVM' {
         @{ Case = 'does not parse'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $false; Failure = $null
             Bytes = { [Text.Encoding]::ASCII.GetBytes("function {`r`n") } }
         # Windows PowerShell 5.1 reads a script without a byte order mark as ANSI: there a dash in
-        # UTF-8 ends a string early, and the curly quotes of Windows-1252 make one.
-        @{ Case = 'does not parse as ANSI, although it parses as UTF-8'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $true; Failure = $null
+        # UTF-8 ends a string early, and the curly quotes of Windows-1252 make one. PowerShell 7
+        # reads it as UTF-8, so the same bytes give the opposite results there.
+        @{ Case = 'does not parse as ANSI, although it parses as UTF-8'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $true; Failure = $null; Engine = 'Desktop'
             Bytes = { (New-Object System.Text.UTF8Encoding $false).GetBytes("`$dash = `"a $([char]0x2014) b`"`r`n") } }
-        @{ Case = 'stops while it loads, although it does not parse as UTF-8'; Cause = ''; Held = $false; Ansi = $true; Failure = $null
+        @{ Case = 'stops while it loads, although it does not parse as UTF-8'; Cause = ''; Held = $false; Ansi = $true; Failure = $null; Engine = 'Desktop'
+            Bytes = { [byte[]]([Text.Encoding]::ASCII.GetBytes('$m = ') + 0x93 + [Text.Encoding]::ASCII.GetBytes('a (b') + 0x94 + [Text.Encoding]::ASCII.GetBytes("`r`nthrow 'stopped while it loads'`r`n")) } }
+        @{ Case = 'stops while it loads, although it does not parse as ANSI'; Cause = ''; Held = $false; Ansi = $false; Failure = $null; Engine = 'Core'
+            Bytes = { (New-Object System.Text.UTF8Encoding $false).GetBytes("`$dash = `"a $([char]0x2014) b`"`r`nthrow 'stopped while it loads'`r`n") } }
+        @{ Case = 'does not parse as UTF-8, although it parses as ANSI'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $false; Failure = $null; Engine = 'Core'
             Bytes = { [byte[]]([Text.Encoding]::ASCII.GetBytes('$m = ') + 0x93 + [Text.Encoding]::ASCII.GetBytes('a (b') + 0x94 + [Text.Encoding]::ASCII.GetBytes("`r`nthrow 'stopped while it loads'`r`n")) } }
         # With a byte order mark, PowerShell reads UTF-8, where a curly quote ends a string.
         @{ Case = 'does not parse as UTF-8 with a byte order mark'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $false; Failure = $null
@@ -308,7 +319,11 @@ Describe 'Deploy-PortableVM' {
                 [Management.Automation.ParseException]::new([Management.Automation.Language.ParseError[]]@([Management.Automation.Language.ParseError]::new($extent, 'ContentBlocked', 'X:\clone\src\PortableVM.psm1 is blocked.')))
             } }
     ) {
-        if ($Ansi -and [Text.Encoding]::Default.CodePage -ne 1252) {
+        if ($_.Engine -and $_.Engine -ne $PSVersionTable.PSEdition) {
+            Set-ItResult -Skipped -Because "the case is one of the $($_.Engine) edition of PowerShell"
+            return
+        }
+        if ($Ansi -and (Get-TestAnsiEncoding).CodePage -ne 1252) {
             Set-ItResult -Skipped -Because 'the case needs Windows-1252 as the ANSI code page'
             return
         }
@@ -351,7 +366,7 @@ Describe 'Deploy-PortableVM' {
     }
 }
 
-Describe 'Deploy-PortableVM -MigrateSettings' {
+Describe 'Deploy-PortableVM -MigrateSettings' -Tag 'WindowsOnly' {
     BeforeEach {
         Initialize-TestClone
         $script:target = Join-Path $TestDrive 'target'
@@ -726,7 +741,7 @@ Describe 'Deploy-PortableVM -MigrateSettings' {
 
     It 'reads a schema 1 file in ANSI as the launcher before LauncherData did' {
         $text = (Get-TestSettingsText).Replace("# The stick's settings", "# $script:sampleName").Replace("'VMware\Test VM.vmx'", "'VMware\$script:sampleName.vmx'")
-        [IO.File]::WriteAllBytes((Join-Path $script:target 'Launcher\settings.psd1'), [Text.Encoding]::Default.GetBytes($text))
+        [IO.File]::WriteAllBytes((Join-Path $script:target 'Launcher\settings.psd1'), (Get-TestAnsiEncoding).GetBytes($text))
         $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings
         (Import-PvmDataFile -Path (Join-Path $script:target 'LauncherData\settings.psd1'))['VMwareVmx'] | Should -BeExactly "VMware\$script:sampleName.vmx"
     }
@@ -739,7 +754,7 @@ Describe 'Deploy-PortableVM -MigrateSettings' {
     }
 }
 
-Describe 'Get-DeployVmProcess' {
+Describe 'Get-DeployVmProcess' -Tag 'WindowsOnly' {
     It 'looks for every VMware and VirtualBox VM process' {
         Mock Get-CimInstance {}
         $null = Get-DeployVmProcess
@@ -749,7 +764,7 @@ Describe 'Get-DeployVmProcess' {
     }
 }
 
-Describe 'Get-DeployCause' {
+Describe 'Get-DeployCause' -Tag 'WindowsOnly' {
     BeforeAll {
         # Get-DeployCause asks the launcher's module for the cause of an error from Windows.
         Import-Module (Join-Path $script:repoRoot 'src\PortableVM.psm1') -Force -Global
@@ -808,7 +823,7 @@ Describe 'Get-DeployCause' {
     }
 }
 
-Describe 'Rename-DeployItem' {
+Describe 'Rename-DeployItem' -Tag 'WindowsOnly' {
     BeforeAll {
         Import-Module (Join-Path $script:repoRoot 'src\PortableVM.psm1') -Force -Global
     }
@@ -882,7 +897,7 @@ Describe 'Rename-DeployItem' {
     }
 }
 
-Describe 'Get-DeployVersion' {
+Describe 'Get-DeployVersion' -Tag 'WindowsOnly' {
     It 'calls a folder that is no git clone version unknown' {
         $folder = Join-Path $TestDrive 'not-a-clone'
         $null = New-Item -ItemType Directory -Path $folder -Force
@@ -894,7 +909,7 @@ Describe 'Get-DeployVersion' {
     }
 }
 
-Describe 'Get-StickInventory' {
+Describe 'Get-StickInventory' -Tag 'WindowsOnly' {
     BeforeAll {
         # The stick is disk 3: a guest partition, then the Data partition.
         Mock Get-InventoryPartition { [pscustomobject]@{ DiskNumber = 3; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512; DriveLetter = [char]'Q' } }
