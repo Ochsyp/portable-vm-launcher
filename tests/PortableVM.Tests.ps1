@@ -836,6 +836,92 @@ Describe 'Raw-disk descriptors' {
         ConvertTo-PvmDescriptorText -Text $disarmed -Layout $layout | Should -BeExactly ((Get-TestDescriptorText).Replace('PhysicalDrive1', 'PhysicalDrive3'))
     }
 
+    # VMware ends an extent line with a blank when it writes the descriptor, and a rewrite only for
+    # that would replace the copy of the version before it at every VMware start.
+    It 'count descriptors as the same when they differ only in <Case>' -ForEach @(
+        @{ Case = "VMware's blank at the end of a FLAT extent line"
+            Old = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0 `r`n# end`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n# end`r`n"
+        }
+        @{ Case = 'blanks and tabs at the end of a FLAT extent line'
+            Old = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0 `t `r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n"
+        }
+        @{ Case = 'a blank at the end of a ZERO extent line, with LF'
+            Old = "createType=`"partitionedDevice`"`nRW 2 FLAT `"\\.\PhysicalDrive1`" 0`nRW 7 ZERO `nddb.x = `"1`"`n"
+            New = "createType=`"partitionedDevice`"`nRW 2 FLAT `"\\.\PhysicalDrive1`" 0`nRW 7 ZERO`nddb.x = `"1`"`n"
+        }
+        @{ Case = 'a blank at the end of the createType line'
+            Old = "createType=`"fullDevice`" `r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n"
+        }
+        @{ Case = 'a blank at the end of a last extent line without a line ending'
+            Old = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0 "
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0"
+        }
+        @{ Case = 'case, as before the redesign'
+            Old = "createType=`"fullDevice`"`r`nrw 9 flat `"\\.\physicaldrive1`" 0`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n"
+        }
+    ) {
+        Test-PvmSameDescriptorText -Old $Old -New $New | Should -BeTrue
+    }
+
+    # {0} in Old stands at the end of the line that differs, and takes each of the blanks in turn.
+    It 'never count descriptors as the same when they differ in <Case>, whatever blanks end the line' -ForEach @(
+        @{ Case = 'the device target'
+            Old = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0{0}`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+        }
+        @{ Case = 'the size of a FLAT extent'
+            Old = "createType=`"fullDevice`"`r`nRW 10 FLAT `"\\.\PhysicalDrive1`" 0{0}`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n"
+        }
+        @{ Case = 'the size of a ZERO extent'
+            Old = "createType=`"partitionedDevice`"`r`nRW 2 FLAT `"\\.\PhysicalDrive1`" 0`r`nRW 8 ZERO{0}`r`n"
+            New = "createType=`"partitionedDevice`"`r`nRW 2 FLAT `"\\.\PhysicalDrive1`" 0`r`nRW 7 ZERO`r`n"
+        }
+        @{ Case = 'the access mode'
+            Old = "createType=`"fullDevice`"`r`nRDONLY 9 FLAT `"\\.\PhysicalDrive1`" 0{0}`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n"
+        }
+        @{ Case = 'the offset'
+            Old = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 7{0}`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n"
+        }
+        @{ Case = 'the createType value'
+            Old = "createType=`"partitionedDevice`"{0}`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n"
+        }
+        @{ Case = 'the number of extents'
+            Old = "createType=`"fullDevice`"`r`nRW 2 FLAT `"\\.\PhysicalDrive1`" 0`r`nRW 7 ZERO{0}`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 2 FLAT `"\\.\PhysicalDrive1`" 0`r`n"
+        }
+        @{ Case = 'blanks before an extent line'
+            Old = "createType=`"fullDevice`"`r`n RW 9 FLAT `"\\.\PhysicalDrive1`" 0{0}`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n"
+        }
+        @{ Case = 'blanks inside an extent line'
+            Old = "createType=`"fullDevice`"`r`nRW  9 FLAT `"\\.\PhysicalDrive1`" 0{0}`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n"
+        }
+        @{ Case = 'the line ending'
+            Old = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0{0}`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n"
+        }
+        @{ Case = 'blanks at the end of a line the launcher does not rewrite'
+            Old = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n# end{0}`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n# end`r`n"
+        }
+    ) {
+        foreach ($blank in @(' ', "`t", " `t ")) {
+            Test-PvmSameDescriptorText -Old ($Old -f $blank) -New $New | Should -BeFalse -Because "the line ends with [$blank]"
+        }
+        if ($Case -ne 'blanks at the end of a line the launcher does not rewrite') {
+            Test-PvmSameDescriptorText -Old ($Old -f '') -New $New | Should -BeFalse -Because 'no blank ends the line'
+        }
+    }
+
     Context 'on disk' -Tag 'WindowsOnly' {
         BeforeEach {
             Mock -ModuleName PortableVM Write-Host {}
@@ -881,6 +967,39 @@ Describe 'Raw-disk descriptors' {
             $script:backup | Should -Not -Exist
             $script:previous | Should -Not -Exist
             Get-TestLog -Path $script:log | Should -BeExactly @('stick.vmdk already points at the stick')
+        }
+
+        It 'are left alone, byte for byte, when they point at the stick and differ only in <Case>' -ForEach @(
+            @{ Case = "VMware's blank at the end of the extent line"; Find = 'PhysicalDrive1" 0'; Replace = 'PhysicalDrive1" 0 '; Layout = @{ CreateType = 'fullDevice'; Extents = @('RW 3900000 FLAT "\\.\PhysicalDrive1" 0') } }
+            @{ Case = 'a tab at the end of the createType line'; Find = 'createType="fullDevice"'; Replace = "createType=`"fullDevice`"`t"; Layout = @{ CreateType = 'fullDevice'; Extents = @('RW 3900000 FLAT "\\.\PhysicalDrive1" 0') } }
+            @{ Case = 'a blank at the end of a ZERO extent line'
+                Find = "createType=`"fullDevice`"`r`n`r`n# Extent description`r`nRW 3900000 FLAT `"\\.\PhysicalDrive1`" 0"
+                Replace = "createType=`"partitionedDevice`"`r`n`r`n# Extent description`r`nRW 2500000 FLAT `"\\.\PhysicalDrive1`" 0`r`nRW 1400000 ZERO "
+                Layout = @{ CreateType = 'partitionedDevice'; Extents = @('RW 2500000 FLAT "\\.\PhysicalDrive1" 0', 'RW 1400000 ZERO') }
+            }
+        ) {
+            $text = (Get-TestDescriptorText).Replace($Find, $Replace)
+            $text | Should -Not -BeExactly (Get-TestDescriptorText)
+            Write-TestFile -Path $script:descriptor -Text $text
+            $before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:descriptor))
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout $Layout @script:copies -WhatIf
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout $Layout @script:copies
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:descriptor)) | Should -BeExactly $before
+            $script:backup | Should -Not -Exist
+            $script:previous | Should -Not -Exist
+            Get-TestLog -Path $script:log | Should -BeExactly @('stick.vmdk already points at the stick', 'stick.vmdk already points at the stick')
+        }
+
+        It 'are rewritten byte for byte as before when a real change comes with a blank at the end of the extent line' {
+            $old = (Get-TestDescriptorText).Replace('PhysicalDrive1" 0', 'PhysicalDrive1" 0 ')
+            Write-TestFile -Path $script:descriptor -Text $old
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout $script:layout @script:copies
+            $expected = $script:latin1.GetBytes((Get-TestDescriptorText).Replace('PhysicalDrive1', 'PhysicalDrive3'))
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:descriptor)) | Should -BeExactly ([Convert]::ToBase64String($expected))
+            $disarmed = $script:latin1.GetBytes($old.Replace('\\.\PhysicalDrive1', '\\.\PortableVM-disarmed'))
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:backup)) | Should -BeExactly ([Convert]::ToBase64String($disarmed))
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:previous)) | Should -BeExactly ([Convert]::ToBase64String($disarmed))
+            Get-TestLog -Path $script:log | Should -BeExactly @('stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0')
         }
 
         It 'are only logged under -WhatIf' {
