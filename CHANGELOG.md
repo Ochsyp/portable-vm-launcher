@@ -193,6 +193,10 @@ Compared with the launcher on a stick before the redesign:
   the launcher does not understand stops the start, naming the line: an extent other than FLAT
   on a raw disk or ZERO, extents apart from each other, `createType` set twice, a line of no
   known kind, a disk image or binary content. Before, such a file could be half rewritten.
+- A raw-disk descriptor that already points at the stick is left alone when it differs only by
+  blanks or tabs at the end of an extent or `createType` line. VMware ends an extent line with a
+  blank when it writes the file, so before, every VMware start rewrote the descriptor and
+  replaced its `.previous` copy for nothing. Any other difference is still written.
 - The drive-letter fix ignores the case of folder names, takes a `$` in a folder name literally,
   matches an `&` as VirtualBox writes it (`&amp;`), and works when the stick folder is a drive
   root: there it moves only the paths on the stick's old letter, which the paths to the VM's own

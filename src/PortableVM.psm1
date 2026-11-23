@@ -1525,6 +1525,29 @@ function ConvertTo-PvmDescriptorText {
     $result
 }
 
+# Return whether rewriting the descriptor text $Old as $New would change nothing that matters: case
+# does not count, nor do blanks at the end of an extent or createType line, which VMware adds when
+# it writes the file. Throws a FormatException when the launcher does not understand either text.
+function Test-PvmSameDescriptorText {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Old,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$New
+    )
+    $blanks = [char[]]@(' ', "`t")
+    $texts = foreach ($text in $Old, $New) {
+        $builder = New-Object System.Text.StringBuilder
+        foreach ($line in ConvertFrom-PvmDescriptorText -Text $text) {
+            $rewritten = $line.Kind -eq 'Extent' -or ($line.Kind -eq 'Key' -and $line.Key -eq 'createType')
+            $value = if ($rewritten) { $line.Text.TrimEnd($blanks) } else { $line.Text }
+            $null = $builder.Append($value).Append($line.Ending)
+        }
+        $builder.ToString()
+    }
+    $texts[0] -eq $texts[1]
+}
+
 # Return the text of a new VMware descriptor for $Layout: a header, the Extents of $Layout and a
 # disk database for an IDE disk of virtual hardware version 20, with CRLF line endings.
 function Get-PvmVMwareDescriptorText {
@@ -1822,12 +1845,12 @@ function Get-PvmDescriptorChange {
     try {
         $text = ConvertFrom-PvmDescriptorData -Bytes $bytes
         $new = ConvertTo-PvmDescriptorText -Text $text -Layout $Layout
+        $same = Test-PvmSameDescriptorText -Old $text -New $new
     } catch [FormatException] {
         throw (Get-PvmStopException -Message "Unexpected content in $Path - $($_.Exception.Message). Nothing was started.")
     }
     $name = [IO.Path]::GetFileName($Path)
-    # -eq ignores case, as before the redesign, so a change of case alone is not written.
-    if ($new -eq $text) {
+    if ($same) {
         Write-PvmLog -Path $LogPath -Message "$name already points at the stick"
         return $null
     }
