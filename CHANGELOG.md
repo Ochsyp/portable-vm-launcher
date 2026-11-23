@@ -20,8 +20,8 @@ All notable changes to this project are listed here. The format follows
   is deleted.
 - `tools\Deploy-PortableVM.ps1`, which copies the launcher from a clone to a stick. It checks
   every copy against the clone, writes `VERSION` and `SHA256SUMS`, swaps `Launcher.new` in and
-  keeps the old launcher as `Launcher.previous`, leaves `LauncherData` as it is, moves an older
-  launcher `.cmd` into `Launcher.previous`, and deletes nothing.
+  keeps the old launcher as `Launcher.previous`, leaves `LauncherData` as it is, and moves an older
+  launcher `.cmd` into `Launcher.previous`.
 - `tools\Get-StickInventory.ps1`, a read-only report on the stick, its VM files and the PC that
   prints only check names with yes, no or unknown, for a first look at a real stick.
 - `tests\PortableVM.Tests.ps1` and `tests\Tools.Tests.ps1`: characterisation tests of the
@@ -209,5 +209,10 @@ Compared with the launcher on a stick before the redesign:
   disarmed copies through the safe write. It stops at a leftover copy instead of overwriting
   it: before it changes anything at one beside the staged `Start VM.cmd.new`, and at one beside
   a copy it disarms, whose step `-Verbose` names.
+- A deploy keeps one earlier launcher and needs no folder moved by hand. Once the new launcher is
+  in place and checked, it deletes the copy before it, and only when every file in that copy is
+  what a deploy wrote; anything else stops the deploy before its first change. It never touches
+  `LauncherData`, the VM files or any other folder. A deploy that is cut off leaves the older copy
+  as `Launcher.previous.remove`, and the next one finishes the removal or names the renames to do.
 
 [Unreleased]: https://github.com/Ochsyp/portable-vm-launcher/commits/main

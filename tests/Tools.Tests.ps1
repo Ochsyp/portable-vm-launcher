@@ -167,7 +167,7 @@ Describe 'Deploy-PortableVM' -Tag 'WindowsOnly' {
         Join-Path $script:target 'Start VM.cmd.new' | Should -Not -Exist
         [IO.File]::ReadAllText((Join-Path $script:target 'Start VM.cmd')) | Should -BeExactly ([IO.File]::ReadAllText((Join-Path $script:clone 'Start VM.cmd')))
         [IO.File]::ReadAllText((Join-Path $script:target 'VMware\Test VM.vmx')) | Should -BeExactly "displayName = `"Test VM`"`r`n"
-        Format-DeployReport -Result $result | Should -BeExactly @('deployed v0.0.0-test (Update).', 'old launcher .cmd files moved into Launcher.previous: 1.')
+        Format-DeployReport -Result $result | Should -BeExactly @('deployed v0.0.0-test (Update).', 'old launcher .cmd files moved into Launcher.previous: 1.', 'Launcher.previous holds version unknown.')
     }
 
     It 'stops before it changes anything at <Left>, which an earlier deploy left' -ForEach @(
@@ -209,7 +209,7 @@ Describe 'Deploy-PortableVM' -Tag 'WindowsOnly' {
         @{ Case = 'with Launcher.new left over'; Setup = { $null = New-Item -ItemType Directory -Path (Join-Path $script:target 'Launcher.new') }; Extra = @{}; Message = 'Launcher.new is left from an earlier deploy*' }
         @{ Case = 'with Start VM.cmd.new left over'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Start VM.cmd.new') -Text 'rem x' }; Extra = @{}; Message = "'Start VM.cmd.new' is left from an earlier deploy*" }
         @{ Case = 'with LauncherData.new left over'; Setup = { $null = New-Item -ItemType Directory -Path (Join-Path $script:target 'LauncherData.new') }; Extra = @{}; Message = 'LauncherData.new is left from a migration whose staging did not finish*' }
-        @{ Case = 'with Launcher.previous in place'; Setup = { $null = New-Item -ItemType Directory -Path (Join-Path $script:target 'Launcher.previous') }; Extra = @{}; Message = 'Launcher.previous holds the launcher that the last deploy replaced.*' }
+        @{ Case = 'with a Launcher.previous that is not its own copy'; Setup = { $null = New-Item -ItemType Directory -Path (Join-Path $script:target 'Launcher.previous') }; Extra = @{}; Message = 'Launcher.previous is not a launcher copy that a deploy wrote and nothing changed since*so nothing was changed.*' }
         @{ Case = 'with a Start VM.cmd that does not start the launcher'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Start VM.cmd') -Text 'rem mine' }; Extra = @{}; Message = "'Start VM.cmd' at the target does not start the launcher.*" }
         @{ Case = 'when Launcher holds a file named like the old .cmd'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Launcher\Start Old.cmd') -Text 'rem x' }; Extra = @{}; Message = 'Launcher holds a file with the name of an old launcher .cmd*' }
         @{ Case = 'with schema 2 settings in Launcher'; Setup = { Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text (Get-TestSchema2Text) }; Extra = @{}; Message = 'Launcher\settings.psd1 holds schema 2 settings, but the launcher reads them from LauncherData\settings.psd1.*' }
@@ -354,7 +354,7 @@ Describe 'Deploy-PortableVM' -Tag 'WindowsOnly' {
         $result.Applied | Should -BeFalse
         $result.Mode | Should -BeExactly 'Update'
         Get-TestTree -Root $script:target | Should -BeExactly $before
-        Format-DeployReport -Result $result | Should -BeExactly @('would deploy v0.0.0-test (Update).', 'old launcher .cmd files to move into Launcher.previous: 1.')
+        Format-DeployReport -Result $result | Should -BeExactly @('would deploy v0.0.0-test (Update).', 'old launcher .cmd files to move into Launcher.previous: 1.', 'Launcher.previous would hold version unknown.')
         Mock Get-DeployVmProcess { 'VirtualBoxVM.exe' }
         { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -WhatIf } | Should -Throw -ExpectedMessage 'A VM runs on this PC*'
     }
@@ -363,6 +363,390 @@ Describe 'Deploy-PortableVM' -Tag 'WindowsOnly' {
         Write-TestFile -Path (Join-Path $script:target 'Start Slash.cmd') -Text 'start "" -File "%~dp0\Launcher\Old-Launcher.ps1"'
         Write-TestFile -Path (Join-Path $script:target 'Start Old.cmdx') -Text 'start "" -File "%~dp0Launcher\x.ps1"'
         @(Find-DeployLauncherCmd -Folder $script:target | ForEach-Object { $_.Name } | Sort-Object) | Should -BeExactly @('Start Old.cmd', 'Start Slash.cmd')
+    }
+}
+
+Describe 'Deploy-PortableVM keeps one previous launcher' -Tag 'WindowsOnly' {
+    BeforeAll {
+        # Write the folder $Path as a deploy of version $Version leaves it, with the clone's .cmd
+        # unless -NoCmd is given.
+        function Initialize-TestOwnCopy {
+            param([string]$Path, [string]$Version, [switch]$NoCmd)
+            $null = New-Item -ItemType Directory -Path $Path -Force
+            $lines = foreach ($name in 'Start-PortableVM.ps1', 'PortableVM.psm1') {
+                $file = Join-Path $Path $name
+                [IO.File]::WriteAllText($file, "# $name of $Version`r`n", $script:utf8)
+                '{0}  {1}' -f (Get-DeployHash -Path $file), $name
+            }
+            [IO.File]::WriteAllText((Join-Path $Path 'SHA256SUMS'), (($lines -join "`n") + "`n"), [Text.Encoding]::ASCII)
+            [IO.File]::WriteAllText((Join-Path $Path 'VERSION'), "$Version`n", [Text.Encoding]::ASCII)
+            if (-not $NoCmd) { [IO.File]::Copy((Join-Path $script:clone 'Start VM.cmd'), (Join-Path $Path 'Start VM.cmd')) }
+        }
+
+        # Return the sorted names directly in the target folder.
+        function Get-TestTargetName {
+            @(Get-ChildItem -LiteralPath $script:target -Force -Name | Sort-Object)
+        }
+
+        # Return the text of the VERSION file in the target's folder $Name, without its line end.
+        function Get-TestVersion {
+            param([string]$Name)
+            [IO.File]::ReadAllText((Join-Path (Join-Path $script:target $Name) 'VERSION')).TrimEnd("`n")
+        }
+
+        # Point a junction at $Path to the folder $To, and remember it so it is removed after the
+        # test without touching what it points at.
+        function Add-TestJunction {
+            param([string]$Path, [string]$To)
+            $null = New-Item -ItemType Junction -Path $Path -Target $To
+            $script:junctions += $Path
+        }
+    }
+
+    BeforeEach {
+        Initialize-TestClone
+        $script:junctions = @()
+        $script:target = Join-Path $TestDrive 'target'
+        Remove-Item -LiteralPath $script:target -Recurse -Force -ErrorAction SilentlyContinue
+        Write-TestFile -Path (Join-Path $script:target 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        Write-TestFile -Path (Join-Path $script:target 'VMware\Test VM.vmx') -Text "displayName = `"Test VM`"`r`n"
+        Initialize-TestOwnCopy -Path (Join-Path $script:target 'Launcher') -Version 'v1' -NoCmd
+        Initialize-TestOwnCopy -Path (Join-Path $script:target 'Launcher.previous') -Version 'v0'
+        [IO.File]::Copy((Join-Path $script:clone 'Start VM.cmd'), (Join-Path $script:target 'Start VM.cmd'))
+        $script:previous = Join-Path $script:target 'Launcher.previous'
+        $script:removal = Join-Path $script:target 'Launcher.previous.remove'
+        Mock Get-DeployVmProcess { @() }
+        Mock Get-DeployVersion { 'v2' }
+    }
+
+    AfterEach {
+        foreach ($junction in $script:junctions) {
+            if (Test-DeployEntry -Path $junction) { [IO.Directory]::Delete($junction) }
+        }
+    }
+
+    It 'replaces the copy two versions old, and reports what it holds and what it removed' {
+        $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target
+        Get-TestTargetName | Should -BeExactly @('Launcher', 'Launcher.previous', 'LauncherData', 'Start VM.cmd', 'VMware')
+        Get-TestVersion -Name 'Launcher' | Should -BeExactly 'v2'
+        Get-TestVersion -Name 'Launcher.previous' | Should -BeExactly 'v1'
+        Format-DeployReport -Result $result | Should -BeExactly @(
+            'deployed v2 (Update).'
+            'old launcher .cmd files moved into Launcher.previous: 1.'
+            'Launcher.previous holds version v1.'
+            'removed the older launcher copy, version v0.'
+        )
+    }
+
+    It 'needs no hand step for two deploys in a row' {
+        $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target
+        Mock Get-DeployVersion { 'v3' }
+        $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target
+        $result.Applied | Should -BeTrue
+        Get-TestTargetName | Should -BeExactly @('Launcher', 'Launcher.previous', 'LauncherData', 'Start VM.cmd', 'VMware')
+        Get-TestVersion -Name 'Launcher' | Should -BeExactly 'v3'
+        Get-TestVersion -Name 'Launcher.previous' | Should -BeExactly 'v2'
+    }
+
+    It 'leaves LauncherData, the VM files, hand-named launcher folders and other folders byte for byte' {
+        Initialize-TestOwnCopy -Path (Join-Path $script:target 'Launcher.before-abc') -Version 'v-1'
+        Write-TestFile -Path (Join-Path $script:target 'Other\file.txt') -Text 'mine'
+        $names = 'LauncherData', 'VMware', 'Launcher.before-abc', 'Other'
+        $before = @($names | ForEach-Object { Get-TestTree -Root (Join-Path $script:target $_) })
+        $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target
+        @($names | ForEach-Object { Get-TestTree -Root (Join-Path $script:target $_) }) | Should -BeExactly $before
+    }
+
+    It 'stops before any change when Launcher.previous <Case>' -ForEach @(
+        @{ Case = 'holds an extra file'; Damage = { Write-TestFile -Path (Join-Path $script:previous 'notes.txt') -Text 'x' } }
+        @{ Case = 'holds a hidden extra file'; Damage = { $f = Join-Path $script:previous 'desktop.ini'; Write-TestFile -Path $f -Text 'x'; [IO.File]::SetAttributes($f, 'Hidden') } }
+        @{ Case = 'holds a subfolder'; Damage = { $null = New-Item -ItemType Directory -Path (Join-Path $script:previous 'sub') } }
+        @{ Case = 'holds an empty subfolder named like a code file'; Damage = { $f = Join-Path $script:previous 'PortableVM.psm1'; [IO.File]::Delete($f); $null = New-Item -ItemType Directory -Path $f } }
+        @{ Case = 'holds a changed code file'; Damage = { [IO.File]::AppendAllText((Join-Path $script:previous 'PortableVM.psm1'), '# changed') } }
+        @{ Case = 'lacks a code file'; Damage = { [IO.File]::Delete((Join-Path $script:previous 'PortableVM.psm1')) } }
+        @{ Case = 'lacks SHA256SUMS'; Damage = { [IO.File]::Delete((Join-Path $script:previous 'SHA256SUMS')) } }
+        @{ Case = 'lacks VERSION'; Damage = { [IO.File]::Delete((Join-Path $script:previous 'VERSION')) } }
+        @{ Case = 'has a changed SHA256SUMS'; Damage = { $f = Join-Path $script:previous 'SHA256SUMS'; $t = [IO.File]::ReadAllText($f); [IO.File]::WriteAllText($f, $(if ($t[0] -eq 'a') { 'b' } else { 'a' }) + $t.Substring(1)) } }
+        @{ Case = 'has SHA256SUMS with CRLF'; Damage = { $f = Join-Path $script:previous 'SHA256SUMS'; [IO.File]::WriteAllText($f, [IO.File]::ReadAllText($f).Replace("`n", "`r`n")) } }
+        @{ Case = 'has SHA256SUMS that names a path outside it'; Damage = { $f = Join-Path $script:previous 'SHA256SUMS'; [IO.File]::WriteAllText($f, [IO.File]::ReadAllText($f).Replace('  PortableVM.psm1', '  ..\PortableVM.psm1')) } }
+        @{ Case = 'has SHA256SUMS that names a file twice'; Damage = { $f = Join-Path $script:previous 'SHA256SUMS'; $t = [IO.File]::ReadAllText($f); [IO.File]::WriteAllText($f, $t + $t) } }
+        @{ Case = 'has an empty SHA256SUMS'; Damage = { [IO.File]::WriteAllText((Join-Path $script:previous 'SHA256SUMS'), '') } }
+        @{ Case = 'has a VERSION of two lines'; Damage = { [IO.File]::WriteAllText((Join-Path $script:previous 'VERSION'), "v0`nv1`n") } }
+        @{ Case = 'has a VERSION with CRLF'; Damage = { [IO.File]::WriteAllText((Join-Path $script:previous 'VERSION'), "v0`r`n") } }
+        @{ Case = 'has a VERSION without a line end'; Damage = { [IO.File]::WriteAllText((Join-Path $script:previous 'VERSION'), 'v0') } }
+        @{ Case = 'has a VERSION with a space'; Damage = { [IO.File]::WriteAllText((Join-Path $script:previous 'VERSION'), "v 0`n") } }
+        @{ Case = 'holds a changed Start VM.cmd'; Damage = { [IO.File]::AppendAllText((Join-Path $script:previous 'Start VM.cmd'), 'rem changed') } }
+        @{ Case = 'holds an old settings.psd1'; Damage = { Write-TestFile -Path (Join-Path $script:previous 'settings.psd1') -Text (Get-TestSettingsText) } }
+        @{ Case = 'holds a read-only file'; Damage = { [IO.File]::SetAttributes((Join-Path $script:previous 'VERSION'), 'ReadOnly') } }
+        @{ Case = 'is itself read-only'; Damage = { [IO.File]::SetAttributes($script:previous, 'Directory, ReadOnly') } }
+        @{ Case = 'holds a junction'; Damage = { Add-TestJunction -Path (Join-Path $script:previous 'link') -To (Join-Path $script:target 'VMware') } }
+        @{ Case = 'is a junction to a copy'; Damage = {
+                $real = Join-Path $script:target 'real'
+                [IO.Directory]::Move($script:previous, $real)
+                Add-TestJunction -Path $script:previous -To $real
+            } }
+        @{ Case = 'is a file'; Damage = { [IO.Directory]::Delete($script:previous, $true); Write-TestFile -Path $script:previous -Text 'x' } }
+    ) {
+        & $Damage
+        $before = Get-TestTree -Root $script:target
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
+            Should -Throw -ExpectedMessage 'Launcher.previous is not a launcher copy that a deploy wrote and nothing changed since*so nothing was changed.*'
+        Get-TestTree -Root $script:target | Should -BeExactly $before
+        # A read-only folder cannot be emptied by the next test's clean-up.
+        if (Test-Path -LiteralPath $script:previous -PathType Container) { [IO.File]::SetAttributes($script:previous, 'Directory') }
+    }
+
+    It 'stops at a copy whose file another program holds, since it cannot be checked' {
+        $before = Get-TestTree -Root $script:target
+        $held = [IO.File]::Open((Join-Path $script:previous 'PortableVM.psm1'), 'Open', 'Read', 'None')
+        try {
+            { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
+                Should -Throw -ExpectedMessage 'Launcher.previous is not a launcher copy that a deploy wrote and nothing changed since (it cannot be read)*'
+        } finally { $held.Dispose() }
+        Get-TestTree -Root $script:target | Should -BeExactly $before
+    }
+
+    It 'sees a junction whose target is gone as something at that name, and not as a copy' {
+        $gone = Join-Path $script:target 'gone'
+        $null = New-Item -ItemType Directory -Path $gone
+        $link = Join-Path $script:target 'dangling'
+        Add-TestJunction -Path $link -To $gone
+        [IO.Directory]::Delete($gone)
+        Test-DeployEntry -Path $link | Should -BeTrue
+        Test-DeployEntry -Path (Join-Path $script:target 'nothing') | Should -BeFalse
+        (Get-DeployOwnCopy -Folder $link -CmdSource (Join-Path $script:clone 'Start VM.cmd')).Problem | Should -Not -BeNullOrEmpty
+    }
+
+    It 'reads its own copy with its version and the files it may delete' {
+        $copy = Get-DeployOwnCopy -Folder $script:previous -CmdSource (Join-Path $script:clone 'Start VM.cmd')
+        $copy.Problem | Should -BeNullOrEmpty
+        $copy.Version | Should -BeExactly 'v0'
+        @($copy.Files | Sort-Object) | Should -BeExactly @('PortableVM.psm1', 'SHA256SUMS', 'Start VM.cmd', 'Start-PortableVM.ps1', 'VERSION')
+    }
+
+    It 'accepts a copy without a .cmd' {
+        [IO.File]::Delete((Join-Path $script:previous 'Start VM.cmd'))
+        (Get-DeployOwnCopy -Folder $script:previous -CmdSource (Join-Path $script:clone 'Start VM.cmd')).Problem | Should -BeNullOrEmpty
+    }
+
+    It 'lets a file that appears after the check survive with its folder' {
+        [IO.Directory]::Move($script:previous, $script:removal)
+        $copy = Get-DeployOwnCopy -Folder $script:removal -CmdSource (Join-Path $script:clone 'Start VM.cmd')
+        Write-TestFile -Path (Join-Path $script:removal 'late.txt') -Text 'late'
+        { Remove-DeployOwnCopy -Folder $script:removal -Files $copy.Files } | Should -Throw
+        @(Get-ChildItem -LiteralPath $script:removal -Force -Name) | Should -BeExactly @('late.txt')
+    }
+
+    It 'deletes only a folder of the fixed name' {
+        $copy = Get-DeployOwnCopy -Folder $script:previous -CmdSource (Join-Path $script:clone 'Start VM.cmd')
+        $before = Get-TestTree -Root $script:previous
+        { Remove-DeployOwnCopy -Folder $script:previous -Files $copy.Files } | Should -Throw -ExpectedMessage '*only*Launcher.previous.remove*'
+        Get-TestTree -Root $script:previous | Should -BeExactly $before
+    }
+
+    It 'keeps the older copy and says so when a file appears in it before the last check' {
+        # The check of the new launcher is the last step before the older copy's own check.
+        Mock Test-DeployStagedCode {
+            Write-TestFile -Path (Join-Path $script:removal 'late.txt') -Text 'late'
+            $true
+        }
+        $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target
+        $result.Applied | Should -BeTrue
+        Join-Path $script:removal 'late.txt' | Should -Exist
+        Join-Path $script:removal 'VERSION' | Should -Exist
+        $lines = @(Format-DeployReport -Result $result)
+        $lines | Should -Not -Contain 'removed the older launcher copy, version v0.'
+        $lines[-1] | Should -BeLike 'the older launcher copy stays in Launcher.previous.remove: *Check what it holds, then move it away before the next deploy.'
+    }
+
+    It 'deletes nothing when the new launcher fails its last check' {
+        Mock Test-DeployStagedCode { $false }
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
+            Should -Throw -ExpectedMessage 'The new launcher in Launcher does not match the clone*nothing was deleted*Launcher.previous.remove back to Launcher.previous*'
+        Get-TestVersion -Name 'Launcher.previous.remove' | Should -BeExactly 'v0'
+        Get-TestVersion -Name 'Launcher.previous' | Should -BeExactly 'v1'
+        Get-TestVersion -Name 'Launcher' | Should -BeExactly 'v2'
+    }
+
+    It 'deletes nothing when the last check of the new launcher cannot read it' {
+        Mock Test-DeployStagedCode { throw 'held' }
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
+            Should -Throw -ExpectedMessage 'The new launcher in Launcher does not match the clone*nothing was deleted*'
+        Get-TestVersion -Name 'Launcher.previous.remove' | Should -BeExactly 'v0'
+    }
+
+    It 'deletes nothing when the .cmd in place differs from the clone at the last check' {
+        Mock Rename-DeployItem {
+            [IO.Directory]::Move($Path, (Join-Path (Split-Path $Path) $NewName))
+            if ($NewName -eq 'Start VM.cmd') { [IO.File]::AppendAllText((Join-Path (Split-Path $Path) $NewName), 'rem changed') }
+        }
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
+            Should -Throw -ExpectedMessage 'The new launcher in Launcher does not match the clone*nothing was deleted*'
+        Get-TestVersion -Name 'Launcher.previous.remove' | Should -BeExactly 'v0'
+    }
+
+    It 'puts everything back when the rename to <NewName> of <From> fails' -ForEach @(
+        @{ From = 'Launcher.previous'; NewName = 'Launcher.previous.remove'; Message = "Launcher.previous could not be renamed, so the stick's launcher is unchanged.*" }
+        @{ From = 'Launcher'; NewName = 'Launcher.previous'; Message = "Launcher could not be renamed, so the stick's launcher is unchanged.*" }
+        @{ From = 'Launcher.new'; NewName = 'Launcher'; Message = 'Launcher.new could not take the place of Launcher, so Launcher is back as it was.*' }
+    ) {
+        $script:failFrom = $From
+        $script:failName = $NewName
+        Mock Rename-DeployItem {
+            if ((Split-Path $Path -Leaf) -eq $script:failFrom -and $NewName -eq $script:failName) { throw 'held' }
+            [IO.Directory]::Move($Path, (Join-Path (Split-Path $Path) $NewName))
+        }
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } | Should -Throw -ExpectedMessage $Message
+        Get-TestVersion -Name 'Launcher' | Should -BeExactly 'v1'
+        Get-TestVersion -Name 'Launcher.previous' | Should -BeExactly 'v0'
+        $script:removal | Should -Not -Exist
+        Join-Path $script:target 'Start VM.cmd' | Should -Exist
+    }
+
+    It 'names the exact renames when <Case>' -ForEach @(
+        @{ Case = 'Launcher.previous.remove cannot go back after Launcher stayed'; Fail = @('Launcher>Launcher.previous', 'Launcher.previous.remove>Launcher.previous')
+            Message = '*Rename Launcher.previous.remove back to Launcher.previous*Launcher.new and ''Start VM.cmd.new''*'; Left = @('Launcher', 'Launcher.new', 'Launcher.previous.remove') }
+        @{ Case = 'Launcher cannot be put back'; Fail = @('Launcher.new>Launcher', 'Launcher.previous>Launcher')
+            Message = 'Launcher is missing: Launcher.previous holds the launcher that was in use. Rename Launcher.previous back to Launcher, then Launcher.previous.remove back to Launcher.previous*'; Left = @('Launcher.new', 'Launcher.previous', 'Launcher.previous.remove') }
+        @{ Case = 'Launcher went back but the older copy cannot'; Fail = @('Launcher.new>Launcher', 'Launcher.previous.remove>Launcher.previous')
+            Message = 'Launcher is back as it was, but Launcher.previous.remove could not be renamed back. Rename Launcher.previous.remove back to Launcher.previous*'; Left = @('Launcher', 'Launcher.new', 'Launcher.previous.remove') }
+    ) {
+        $script:failRenames = $Fail
+        Mock Rename-DeployItem {
+            if ($script:failRenames -contains "$(Split-Path $Path -Leaf)>$NewName") { throw 'held' }
+            [IO.Directory]::Move($Path, (Join-Path (Split-Path $Path) $NewName))
+        }
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } | Should -Throw -ExpectedMessage $Message
+        @(Get-TestTargetName | Where-Object { $_ -like 'Launcher*' -and $_ -ne 'LauncherData' }) | Should -BeExactly $Left
+    }
+
+    It 'keeps the older copy and names the steps when the .cmd cannot be put in place' {
+        Mock Move-Item { throw 'held' }
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
+            Should -Throw -ExpectedMessage "The new launcher is in Launcher, but its .cmd is not in place yet.*The next deploy then removes Launcher.previous.remove.*"
+        Get-TestVersion -Name 'Launcher.previous.remove' | Should -BeExactly 'v0'
+    }
+
+    Context 'after a deploy that was cut off' {
+        It 'stops and names the renames, with <Case>' -ForEach @(
+            @{ Case = 'the older copy renamed'; Step = {
+                    [IO.Directory]::Move($script:previous, $script:removal)
+                    Initialize-TestOwnCopy -Path (Join-Path $script:target 'Launcher.new') -Version 'v2' -NoCmd
+                    [IO.File]::Copy((Join-Path $script:clone 'Start VM.cmd'), (Join-Path $script:target 'Start VM.cmd.new'))
+                }; Message = 'Launcher.previous.remove is left from a deploy that stopped, and Launcher.previous is missing. Rename Launcher.previous.remove back to Launcher.previous, remove Launcher.new and ''Start VM.cmd.new'' if they are there, then deploy again.' }
+            @{ Case = 'Launcher renamed too'; Step = {
+                    [IO.Directory]::Move($script:previous, $script:removal)
+                    [IO.Directory]::Move((Join-Path $script:target 'Launcher'), $script:previous)
+                    Initialize-TestOwnCopy -Path (Join-Path $script:target 'Launcher.new') -Version 'v2' -NoCmd
+                    [IO.File]::Copy((Join-Path $script:clone 'Start VM.cmd'), (Join-Path $script:target 'Start VM.cmd.new'))
+                }; Message = 'The target has no Launcher folder, but Launcher.previous holds the launcher that a deploy that stopped replaced. Rename Launcher.previous back to Launcher, then Launcher.previous.remove back to Launcher.previous, remove Launcher.new and ''Start VM.cmd.new'' if they are there, then deploy again.' }
+            @{ Case = 'only the older copy left'; Step = {
+                    [IO.Directory]::Move($script:previous, $script:removal)
+                    [IO.Directory]::Delete((Join-Path $script:target 'Launcher'), $true)
+                }; Message = 'The target has no Launcher or Launcher.previous folder, but Launcher.previous.remove holds an older launcher. Rename Launcher.previous.remove to Launcher, remove Launcher.new and ''Start VM.cmd.new'' if they are there, then deploy again.' }
+            @{ Case = 'the new launcher in place but not its .cmd'; Step = {
+                    [IO.Directory]::Move($script:previous, $script:removal)
+                    [IO.Directory]::Move((Join-Path $script:target 'Launcher'), $script:previous)
+                    Initialize-TestOwnCopy -Path (Join-Path $script:target 'Launcher') -Version 'v2' -NoCmd
+                    [IO.File]::Copy((Join-Path $script:clone 'Start VM.cmd'), (Join-Path $script:target 'Start VM.cmd.new'))
+                }; Message = "The new launcher is in Launcher, but its .cmd is not in place yet. Move the old launcher .cmd files at the stick's root into Launcher.previous, then rename 'Start VM.cmd.new' to 'Start VM.cmd', then deploy again." }
+        ) {
+            & $Step
+            $before = Get-TestTree -Root $script:target
+            { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } | Should -Throw -ExpectedMessage $Message
+            Get-TestTree -Root $script:target | Should -BeExactly $before
+        }
+
+        It 'finishes the removal that was left, then deploys' {
+            [IO.Directory]::Move($script:previous, $script:removal)
+            [IO.Directory]::Move((Join-Path $script:target 'Launcher'), $script:previous)
+            Initialize-TestOwnCopy -Path (Join-Path $script:target 'Launcher') -Version 'v1b' -NoCmd
+            [IO.File]::Copy((Join-Path $script:target 'Start VM.cmd'), (Join-Path $script:previous 'Start VM.cmd'))
+            $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target
+            Get-TestTargetName | Should -BeExactly @('Launcher', 'Launcher.previous', 'LauncherData', 'Start VM.cmd', 'VMware')
+            Get-TestVersion -Name 'Launcher' | Should -BeExactly 'v2'
+            Get-TestVersion -Name 'Launcher.previous' | Should -BeExactly 'v1b'
+            $lines = @(Format-DeployReport -Result $result)
+            $lines | Should -Contain 'removed the older launcher copy, version v0.'
+            $lines | Should -Contain 'removed the older launcher copy, version v1.'
+        }
+
+        It 'stops at a removal cut off half way and asks to remove the rest by hand' {
+            [IO.Directory]::Move($script:previous, $script:removal)
+            [IO.Directory]::Move((Join-Path $script:target 'Launcher'), $script:previous)
+            Initialize-TestOwnCopy -Path (Join-Path $script:target 'Launcher') -Version 'v2' -NoCmd
+            [IO.File]::Delete((Join-Path $script:removal 'PortableVM.psm1'))
+            $before = Get-TestTree -Root $script:target
+            { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
+                Should -Throw -ExpectedMessage 'Launcher.previous.remove is not a launcher copy that a deploy wrote and nothing changed since*Check what it holds, remove it or move it away, then deploy again.'
+            Get-TestTree -Root $script:target | Should -BeExactly $before
+        }
+
+        It 'finishes no removal while the launcher in use is not unchanged' {
+            [IO.Directory]::Move($script:previous, $script:removal)
+            [IO.Directory]::Move((Join-Path $script:target 'Launcher'), $script:previous)
+            Initialize-TestOwnCopy -Path (Join-Path $script:target 'Launcher') -Version 'v2' -NoCmd
+            [IO.File]::AppendAllText((Join-Path $script:target 'Launcher\PortableVM.psm1'), '# changed')
+            $before = Get-TestTree -Root $script:target
+            { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
+                Should -Throw -ExpectedMessage 'Launcher does not match its SHA256SUMS*Launcher.previous.remove*'
+            Get-TestTree -Root $script:target | Should -BeExactly $before
+        }
+
+        It 'stops with the staged files named when the left removal fails, and keeps the launcher' {
+            [IO.Directory]::Move($script:previous, $script:removal)
+            [IO.Directory]::Move((Join-Path $script:target 'Launcher'), $script:previous)
+            Initialize-TestOwnCopy -Path (Join-Path $script:target 'Launcher') -Version 'v1b' -NoCmd
+            Mock Remove-DeployOwnCopy { throw 'held' }
+            { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
+                Should -Throw -ExpectedMessage "Launcher.previous.remove could not be removed, so nothing the launcher uses was changed. Remove Launcher.new and 'Start VM.cmd.new', move Launcher.previous.remove away, then deploy again.*"
+            Get-TestVersion -Name 'Launcher' | Should -BeExactly 'v1b'
+            Get-TestVersion -Name 'Launcher.previous.remove' | Should -BeExactly 'v0'
+        }
+
+        It 'says under -WhatIf that it would remove both, and changes nothing' {
+            [IO.Directory]::Move($script:previous, $script:removal)
+            [IO.Directory]::Move((Join-Path $script:target 'Launcher'), $script:previous)
+            Initialize-TestOwnCopy -Path (Join-Path $script:target 'Launcher') -Version 'v1b' -NoCmd
+            $before = Get-TestTree -Root $script:target
+            $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -WhatIf
+            Get-TestTree -Root $script:target | Should -BeExactly $before
+            $lines = @(Format-DeployReport -Result $result)
+            $lines | Should -Contain 'would remove the older launcher copy, version v0.'
+            $lines | Should -Contain 'would remove the older launcher copy, version v1.'
+        }
+    }
+
+    It 'changes nothing under -WhatIf and says what it would remove' {
+        $before = Get-TestTree -Root $script:target
+        $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -WhatIf
+        $result.Applied | Should -BeFalse
+        Get-TestTree -Root $script:target | Should -BeExactly $before
+        Format-DeployReport -Result $result | Should -BeExactly @(
+            'would deploy v2 (Update).'
+            'old launcher .cmd files to move into Launcher.previous: 1.'
+            'Launcher.previous would hold version v1.'
+            'would remove the older launcher copy, version v0.'
+        )
+    }
+
+    It 'never deletes the Launcher.previous of a migration, which holds the old settings' {
+        Remove-Item -LiteralPath (Join-Path $script:target 'LauncherData'), $script:previous -Recurse -Force
+        Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text (Get-TestSettingsText)
+        $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings
+        Join-Path $script:previous 'settings.psd1' | Should -Exist
+        $before = Get-TestTree -Root $script:target
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
+            Should -Throw -ExpectedMessage 'Launcher.previous is not a launcher copy that a deploy wrote and nothing changed since*'
+        Get-TestTree -Root $script:target | Should -BeExactly $before
+    }
+
+    It 'still refuses a migration while Launcher.previous is there, whatever it holds' {
+        Write-TestFile -Path (Join-Path $script:target 'Launcher\settings.psd1') -Text (Get-TestSettingsText)
+        $before = Get-TestTree -Root $script:target
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -MigrateSettings } |
+            Should -Throw -ExpectedMessage 'Launcher.previous holds the launcher that the last deploy replaced. A migration keeps the old settings there, so move it away first.'
+        Get-TestTree -Root $script:target | Should -BeExactly $before
     }
 }
 
@@ -433,6 +817,7 @@ Describe 'Deploy-PortableVM -MigrateSettings' -Tag 'WindowsOnly' {
             'VirtualBox copies moved to LauncherData\backups\legacy: 2.'
             'other copies left beside the VM files: 2.'
             'old launcher .cmd files moved into Launcher.previous: 1.'
+            'Launcher.previous holds version unknown.'
         )
     }
 

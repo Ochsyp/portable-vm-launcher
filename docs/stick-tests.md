@@ -182,6 +182,28 @@ minute before:
 By hand, the owner starts the VM twice, and each time uses the guest and shuts it down from
 inside; never pull the stick while a VM runs.
 
+## Checks for keeping one previous launcher
+
+The deploy now replaces the earlier launcher copy. The launcher's own code does not change, so no
+VM start is needed. Repeated deploys and every failure case run on a scratch folder in the tests,
+never on the stick. Before the pull request is merged, from an elevated PowerShell, with VirtualBox
+closed for a minute before:
+
+1. Record the hash of every file below the stick folder, except the launcher's log.
+2. Run a VMware dry run with the launcher on the stick, and keep its lines and exit code outside
+   the repository.
+3. Deploy (README, *Install or update*), with nothing moved aside by hand. The report names the
+   version `Launcher.previous` now holds and the version it removed.
+4. Run the same dry run. After dropping the prefixes and the `Timings:` lines, its lines equal
+   those of step 2 apart from the version line and a wait line, and the exit code is the same.
+5. Compare with step 1: `Launcher.previous` holds the launcher that was in `Launcher`, unchanged,
+   plus the `.cmd`. The older copy is gone and no `Launcher.previous.remove` is left. Every other
+   file, `LauncherData` and the VM files included, has its old hash, apart from the log.
+
+Folders named by hand are not the tool's to remove. A last, separate step, which can be skipped
+and cannot be undone, removes such a folder only if it passes the same check as the deploy's own
+copy, and says what it removed and what it left.
+
 ## Rules for the real stick
 
 - Never switch VirtualBox's host I/O cache off for the stick's controller.

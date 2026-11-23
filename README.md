@@ -110,7 +110,7 @@ and the VM files:
 | `LauncherData\logs\launcher.log` | The log of every run (see [Log](#log)); full or older logs are kept beside it as `launcher-<date>-<time>.log` |
 | `LauncherData\backups\` | The first version of each file the launcher rewrites, and the version before its latest rewrite (`*.previous.*`), at its path below the stick folder; descriptor copies are disarmed |
 | `LauncherData\backups\legacy\` | What `-MigrateSettings` moved there: the old settings file and the copies the launcher used to keep beside the VM files |
-| `Launcher.previous\` | The launcher that the last deploy replaced |
+| `Launcher.previous\` | The one earlier launcher: the one that the last deploy replaced |
 | `VMware\` | The VMware VM (`.vmx`) and its raw-disk descriptor |
 | `VirtualBox\` | The VirtualBox home: `VirtualBox.xml`, the VM folder and its descriptor |
 
@@ -193,8 +193,15 @@ VM runs on the PC. On a stick without a `Launcher` folder it installs the launch
 it builds the new launcher in `Launcher.new` and checks every copy against the clone before it
 changes anything. Then the old `Launcher` becomes `Launcher.previous`, an older launcher `.cmd`
 at the stick's root moves in there too, and `Start VM.cmd` takes its place. `LauncherData` and
-the VM folders stay as they are. The tool deletes nothing, so remove or move away
-`Launcher.previous` before the next deploy. `-WhatIf` runs the checks only.
+the VM folders stay as they are. `-WhatIf` runs the checks only and says what it would remove.
+
+A deploy keeps one earlier launcher, so no folder has to be moved by hand between deploys. A
+deploy deletes one thing: the earlier launcher copy that the new `Launcher.previous` replaces, and
+only when every file in it is what a deploy wrote. It never touches `LauncherData`, the VM files
+or any other folder. The older copy waits as `Launcher.previous.remove` until the new launcher is
+in place and checked. A `Launcher.previous` that holds anything else, such as the old settings
+after a migration, stops the deploy before its first change, and the message says what to move
+away. If a deploy is cut off, the next one finishes the removal or names the renames to do.
 
 A stick whose settings are still in `Launcher\settings.psd1`, from a launcher before phase 3,
 needs one deploy with `-MigrateSettings`; try it with `-WhatIf` first, which prints the plan:
@@ -220,7 +227,8 @@ differently as UTF-8 and as ANSI is refused until it is saved with one.
 
 To go back, rename `Launcher` to any other name, rename `Launcher.previous` to `Launcher`, and
 move the old `.cmd` from it back to the stick's root. After a migration, `Launcher.previous`
-still holds the old settings file, so the old launcher finds it; `Start VM.cmd` can stay.
+still holds the old settings file, so the old launcher finds it; `Start VM.cmd` can stay. Going
+back reaches one version. For an older one, check out that commit in the clone and deploy it.
 
 ## Public interface
 

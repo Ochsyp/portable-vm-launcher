@@ -311,11 +311,30 @@ Describe 'Static guards' {
             ForEach-Object { $_.Member.Extent.Text } | Where-Object { $allowed -cnotcontains $_ } | Should -BeNullOrEmpty
     }
 
-    It 'keep the deploy tool from deleting anything: no Remove-Item, Clear-*, .Delete or -Force that replaces, and files written only through the safe write' {
+    It 'let the deploy tool delete only its own older copy, in one function, one file at a time and without recursion' {
+        $ast = Get-SourceAst -Path (Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1')
+        $deletes = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $args[0].Member.Extent.Text -eq 'Delete' }, $true))
+        @($deletes | ForEach-Object { $_.Extent.Text -replace '\(.*', '' } | Sort-Object) | Should -BeExactly @('[IO.Directory]::Delete', '[IO.File]::Delete')
+        @($deletes | ForEach-Object { Get-SourceFunctionName -Ast $_ } | Sort-Object -Unique) | Should -BeExactly @('Remove-DeployOwnCopy')
+        $folderDelete = $deletes | Where-Object { $_.Extent.Text -like '`[IO.Directory`]*' }
+        $folderDelete.Arguments.Count | Should -Be 2
+        $folderDelete.Arguments[1].Extent.Text | Should -BeExactly '$false'
+        # One caller, which names the folder only through the one fixed name.
+        $calls = @(Get-SourceCommand -Ast $ast | Where-Object { $_.Name -eq 'Remove-DeployOwnCopy' })
+        $calls.Count | Should -Be 1
+        $calls[0].Function | Should -BeExactly 'Complete-DeployRemoval'
+        $caller = $ast.Find({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Complete-DeployRemoval' }, $true)
+        $caller.Extent.Text | Should -Match ([regex]::Escape('$folder = Join-Path $Target $RemovalFolderName'))
+        $names = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] -and $args[0].Left.Extent.Text -eq '$RemovalFolderName' }, $true))
+        $names.Count | Should -Be 1
+        $names[0].Right.Extent.Text | Should -BeExactly "'Launcher.previous.remove'"
+    }
+
+    It 'keep the deploy tool from any other delete: no Remove-Item, Clear-* or -Force that replaces, and files written only through the safe write' {
         $ast = Get-SourceAst -Path (Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1')
         Get-SourceCommand -Ast $ast | Where-Object { $_.Name -in 'Remove-Item', 'Clear-Content', 'Clear-Item' } | Should -BeNullOrEmpty
-        # A rename is the one change of a file or folder that the tool makes by itself.
-        @(Get-SourceFileChange -Ast $ast) | Should -BeExactly @('Move in Rename-DeployItem')
+        # Besides the guarded delete above, a rename is the one change the tool makes by itself.
+        @(Get-SourceFileChange -Ast $ast | Sort-Object) | Should -BeExactly @('Delete in Remove-DeployOwnCopy', 'Delete in Remove-DeployOwnCopy', 'Move in Rename-DeployItem')
         # Move-Item -Force would replace, and so delete, an existing file.
         $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandParameterAst] -and $args[0].ParameterName -eq 'Force' }, $true) |
             Where-Object { $_.Parent.GetCommandName() -ne 'Import-Module' -and $_.Parent.GetCommandName() -ne 'New-Item' -and $_.Parent.GetCommandName() -ne 'Get-ChildItem' } |
