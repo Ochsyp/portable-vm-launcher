@@ -506,6 +506,38 @@ Describe 'Deploy-PortableVM keeps one previous launcher' -Tag 'WindowsOnly' {
         Get-TestTree -Root $script:target | Should -BeExactly $before
     }
 
+    It 'keeps the good copy and stops before any change when Launcher <Case>' -ForEach @(
+        @{ Case = 'holds a changed code file'; Damage = { [IO.File]::AppendAllText((Join-Path $script:target 'Launcher\PortableVM.psm1'), '# changed') } }
+        @{ Case = 'holds an extra file'; Damage = { Write-TestFile -Path (Join-Path $script:target 'Launcher\notes.txt') -Text 'x' } }
+        @{ Case = 'lacks its VERSION'; Damage = { [IO.File]::Delete((Join-Path $script:target 'Launcher\VERSION')) } }
+    ) {
+        & $Damage
+        $before = Get-TestTree -Root $script:target
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
+            Should -Throw -ExpectedMessage 'Launcher is not a launcher copy that a deploy wrote and nothing changed since (*), so replacing it would cost the copy in Launcher.previous, and nothing was changed. Rename Launcher.previous to keep it, then deploy again.'
+        Get-TestTree -Root $script:target | Should -BeExactly $before
+    }
+
+    It 'replaces a damaged Launcher once Launcher.previous has another name, which it leaves alone' {
+        [IO.File]::AppendAllText((Join-Path $script:target 'Launcher\PortableVM.psm1'), '# changed')
+        $kept = Join-Path $script:target 'Launcher.kept'
+        [IO.Directory]::Move($script:previous, $kept)
+        $before = Get-TestTree -Root $kept
+        $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target
+        $result.Applied | Should -BeTrue
+        Get-TestVersion -Name 'Launcher' | Should -BeExactly 'v2'
+        Get-TestTree -Root $kept | Should -BeExactly $before
+    }
+
+    It 'keeps the good copy when a deploy that failed its last check is run again' {
+        [IO.Directory]::Delete($script:previous, $true)
+        Mock Test-DeployStagedCode { $false }
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } | Should -Throw -ExpectedMessage 'The new launcher in Launcher does not match the clone*'
+        [IO.File]::AppendAllText((Join-Path $script:target 'Launcher\PortableVM.psm1'), '# damaged')
+        { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } | Should -Throw -ExpectedMessage 'Launcher is not a launcher copy*'
+        Get-TestVersion -Name 'Launcher.previous' | Should -BeExactly 'v1'
+    }
+
     It 'sees a junction whose target is gone as something at that name, and not as a copy' {
         $gone = Join-Path $script:target 'gone'
         $null = New-Item -ItemType Directory -Path $gone

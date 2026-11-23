@@ -30,7 +30,8 @@
 #
 # It refuses, changing nothing, while a VM runs on this PC, when the settings fail the checks, when
 # Launcher.new, "Start VM.cmd.new" or LauncherData.new is left from an earlier deploy, when
-# Launcher.previous is not its own unchanged copy, or when a .cmd at -Target is in the way. A
+# Launcher.previous, or the Launcher that would replace it, is not its own unchanged copy, or when
+# a .cmd at -Target is in the way. A
 # migration also refuses while Launcher.previous exists, an old settings file without a byte order
 # mark whose values read differently as UTF-8 and as ANSI, and, when it resumes, two settings files
 # that differ. A deploy cut off in the swap leaves Launcher.previous.remove: the next one finishes
@@ -846,12 +847,17 @@ function Invoke-PvmDeploy {
             if ($removalCopy.Problem) {
                 throw "Launcher.previous.remove is not a launcher copy that a deploy wrote and nothing changed since ($($removalCopy.Problem)), so nothing was changed. Check what it holds, remove it or move it away, then deploy again."
             }
-            # The removal is finished only when the launcher that replaced this copy is intact.
-            $launcherCopy = Get-DeployOwnCopy -Folder $launcher -CmdSource $cmdSource
-            if ($launcherCopy.Problem) {
+        }
+        # Launcher becomes the only way back, so an older copy goes only when Launcher is intact.
+        $launcherCopy = Get-DeployOwnCopy -Folder $launcher -CmdSource $cmdSource
+        if ($launcherCopy.Problem) {
+            if ($hasRemoval) {
                 throw ("Launcher does not match its SHA256SUMS ($($launcherCopy.Problem)), so the older copy in Launcher.previous.remove stays and nothing was changed. " +
                     "To go back, rename Launcher to another name, Launcher.previous to Launcher and Launcher.previous.remove to Launcher.previous, and move '$CmdName' from the new Launcher to the stick's root, over the one there. Then deploy again.")
             }
+            throw "Launcher is not a launcher copy that a deploy wrote and nothing changed since ($($launcherCopy.Problem)), so replacing it would cost the copy in Launcher.previous, and nothing was changed. Rename Launcher.previous to keep it, then deploy again."
+        }
+        if ($hasRemoval) {
             $finishRemoval = $true
             $removing += $removalCopy.Version
         }

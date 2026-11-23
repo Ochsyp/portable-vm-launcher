@@ -211,8 +211,9 @@ Compared with the launcher on a stick before the redesign:
   a copy it disarms, whose step `-Verbose` names.
 - A deploy keeps one earlier launcher and needs no folder moved by hand. Once the new launcher is
   in place and checked, it deletes the copy before it, and only when every file in that copy is
-  what a deploy wrote; anything else stops the deploy before its first change. It never touches
-  `LauncherData`, the VM files or any other folder. A deploy that is cut off leaves the older copy
-  as `Launcher.previous.remove`, and the next one finishes the removal or names the renames to do.
+  what a deploy wrote; anything else, or a changed `Launcher` that would take its place, stops the
+  deploy before its first change. It never touches `LauncherData`, the VM files or any other
+  folder. A deploy that is cut off leaves the older copy as `Launcher.previous.remove`, and the
+  next one finishes the removal or names the renames to do.
 
 [Unreleased]: https://github.com/Ochsyp/portable-vm-launcher/commits/main

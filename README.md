@@ -201,7 +201,9 @@ only when every file in it is what a deploy wrote. It never touches `LauncherDat
 or any other folder. The older copy waits as `Launcher.previous.remove` until the new launcher is
 in place and checked. A `Launcher.previous` that holds anything else, such as the old settings
 after a migration, stops the deploy before its first change, and the message says what to move
-away. If a deploy is cut off, the next one finishes the removal or names the renames to do.
+away. A changed `Launcher` stops it too while a `Launcher.previous` exists, because that
+`Launcher` would become the only way back. If a deploy is cut off, the next one finishes the
+removal or names the renames to do.
 
 A stick whose settings are still in `Launcher\settings.psd1`, from a launcher before phase 3,
 needs one deploy with `-MigrateSettings`; try it with `-WhatIf` first, which prints the plan:
