@@ -10,9 +10,13 @@
 # log and the launcher's backups live in LauncherData, which a deploy leaves alone. A deploy needs
 # a LauncherData\settings.psd1 that passes the clone's settings checks. Without a Launcher folder
 # it installs the launcher. Otherwise it builds Launcher.new from src\ with a VERSION from git
-# describe and a SHA256SUMS of the code, and checks every copy against the clone; then Launcher
-# becomes Launcher.previous, Launcher.new becomes Launcher, the old launcher .cmd files at -Target
-# move into Launcher.previous and "Start VM.cmd" takes their place.
+# describe and a SHA256SUMS of the code, and checks every copy against the clone; then
+# Launcher.previous becomes Launcher.previous.remove, Launcher becomes Launcher.previous,
+# Launcher.new becomes Launcher, the old launcher .cmd files at -Target move into Launcher.previous
+# and "Start VM.cmd" takes their place. Once the new launcher is checked again,
+# Launcher.previous.remove is deleted, so one earlier launcher stays. Only a copy that a deploy
+# wrote and nothing changed since is ever deleted (Get-DeployOwnCopy); any other Launcher.previous
+# stops the deploy before its first change.
 #
 # A stick that still keeps its settings in Launcher\settings.psd1, as the launcher before
 # LauncherData did (schema 1), needs one run with -MigrateSettings. It checks everything first and
@@ -25,15 +29,18 @@
 # the old launcher works until then, and the same command finishes a migration that stopped.
 #
 # It refuses, changing nothing, while a VM runs on this PC, when the settings fail the checks, when
-# Launcher.new, "Start VM.cmd.new", LauncherData.new or Launcher.previous is left from an earlier
-# deploy, or when a .cmd at -Target is in the way. A migration also refuses an old settings file
-# without a byte order mark whose values read differently as UTF-8 and as ANSI, and, when it
-# resumes, two settings files that differ. It deletes nothing, changes no VM file, and its messages
-# name no full path, so that no folder name from the stick or above the clone shows: of an error
-# from Windows or PowerShell, which can quote one, it prints only the cause, and -Verbose shows the
-# message and the copies a migration moves. PowerShell's own errors about the command line, such as
-# an unknown parameter, come before the script runs and name its path. When a step fails it says
-# what is left to fix by hand.
+# Launcher.new, "Start VM.cmd.new" or LauncherData.new is left from an earlier deploy, when
+# Launcher.previous, or the Launcher that would replace it, is not its own unchanged copy, when
+# Launcher holds file for file the commit it would write, or when a .cmd at -Target is in the way.
+# A migration also refuses while Launcher.previous exists, an old settings file without a byte
+# order mark whose values read differently as UTF-8 and as ANSI, and, when it resumes, two settings
+# files that differ. A deploy cut off in the swap leaves Launcher.previous.remove: the next one
+# finishes its removal, or stops and names the renames to do. It deletes nothing else, changes no
+# VM file, and its messages name no full path, so that no folder name from the stick or above the
+# clone shows: of an error from Windows or PowerShell, which can quote one, it prints only the
+# cause, and -Verbose shows the message and the copies a migration moves. PowerShell's own errors
+# about the command line, such as an unknown parameter, come before the script runs and name its
+# path. When a step fails it says what is left to fix by hand.
 # -WhatIf runs the checks and prints the plan only. Exits 0 when done, 1 when it refused or failed.
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -55,6 +62,12 @@ $VmProcessFilter = "Name LIKE 'vmware-vmx%' OR Name='VirtualBoxVM.exe' OR Name='
 $LauncherCmdPattern = '(?i)%~dp0\\?Launcher\\[^"\r\n]*\.ps1'
 # A *.vmdk.orig of this size or more holds disk data, not a copy of a descriptor, and stays.
 $MaxDescriptorBytes = 1MB
+# The one folder this tool may delete.
+$RemovalFolderName = 'Launcher.previous.remove'
+# VERSION and each SHA256SUMS line exactly as a deploy writes them. A listed name holds no path, so
+# a deletion cannot leave the folder.
+$OwnCopyVersionPattern = '\A[0-9A-Za-z][0-9A-Za-z._+-]{0,127}\n\z'
+$OwnCopySumPattern = '\A([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._-]*\.(?:ps1|psm1))\z'
 
 # Return the version of the clone at $RepositoryPath as git describe gives it: the nearest tag,
 # else the commit, with -dirty for uncommitted changes; 'unknown' when git cannot tell.
@@ -152,6 +165,121 @@ function Rename-DeployItem {
             Start-Sleep -Milliseconds 500
         }
     }
+}
+
+# Return whether anything has the name $Path, also a link whose target is gone, which Test-Path
+# does not see.
+function Test-DeployEntry {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)][string]$Path)
+    [int](New-Object IO.DirectoryInfo $Path).Attributes -ne -1
+}
+
+# Return the version in the VERSION file of the launcher folder $Folder, or 'unknown' when it has
+# none in the form a deploy writes.
+function Get-DeployFolderVersion {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Folder)
+    try {
+        $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Join-Path $Folder 'VERSION')))
+        if ($text -cmatch $OwnCopyVersionPattern) { return $text.TrimEnd("`n") }
+    } catch {
+        Write-Verbose "VERSION cannot be read: $($_.Exception.Message)"
+    }
+    'unknown'
+}
+
+# Check whether $Folder is a launcher copy that a deploy wrote and nothing changed since: a real
+# folder with only SHA256SUMS, VERSION, the code files SHA256SUMS names with those hashes, and at
+# most a Start VM.cmd equal to $CmdSource, none of them a link, read-only, hidden or a system file.
+# Returns Problem ('' for such a copy, else a reason that names no file), Version and Files, the
+# names a deletion may remove. What cannot be read counts as a problem.
+function Get-DeployOwnCopy {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$Folder,
+        [Parameter(Mandatory)][string]$CmdSource
+    )
+    try {
+        $blocked = [IO.FileAttributes]'ReadOnly, Hidden, System, ReparsePoint'
+        $attributes = (New-Object IO.DirectoryInfo $Folder).Attributes
+        if ([int]$attributes -eq -1 -or -not $attributes.HasFlag([IO.FileAttributes]::Directory)) { throw 'it is no folder' }
+        if ([int]($attributes -band $blocked) -ne 0) { throw 'it is a link, or marked read-only, hidden or system' }
+        $items = @(Get-ChildItem -LiteralPath $Folder -Force)
+        foreach ($item in $items) {
+            if ($item.PSIsContainer) { throw 'it holds a subfolder' }
+            if ([int]($item.Attributes -band $blocked) -ne 0) { throw 'it holds a link, or a file marked read-only, hidden or system' }
+        }
+        $names = @($items | ForEach-Object { $_.Name })
+        foreach ($name in 'SHA256SUMS', 'VERSION') {
+            if ($names -cnotcontains $name) { throw "it has no $name" }
+        }
+        # Any byte outside ASCII decodes to a question mark, which neither pattern allows.
+        $versionText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Join-Path $Folder 'VERSION')))
+        if ($versionText -cnotmatch $OwnCopyVersionPattern) { throw 'its VERSION is not one line with a version' }
+        $lines = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Join-Path $Folder 'SHA256SUMS'))).Split([char]10)
+        if ($lines.Count -lt 2 -or $lines[-1] -cne '') { throw 'its SHA256SUMS is not in the form a deploy writes' }
+        $listed = @{}
+        foreach ($line in $lines[0..($lines.Count - 2)]) {
+            if ($line -cnotmatch $OwnCopySumPattern) { throw 'its SHA256SUMS is not in the form a deploy writes' }
+            $hash = $Matches[1]
+            $name = $Matches[2]
+            if ($listed.ContainsKey($name)) { throw 'its SHA256SUMS names a file twice' }
+            $listed[$name] = $hash
+        }
+        $code = @($listed.Keys)
+        $hasCmd = $names -ccontains $CmdName
+        $allowed = $code + 'SHA256SUMS', 'VERSION' + @(if ($hasCmd) { $CmdName })
+        foreach ($name in $names) {
+            if ($allowed -cnotcontains $name) { throw 'it holds a file that a deploy did not write' }
+        }
+        foreach ($name in $code) {
+            if ($names -cnotcontains $name) { throw 'a code file that its SHA256SUMS names is missing' }
+            if ((Get-DeployHash -Path (Join-Path $Folder $name)) -cne $listed[$name]) { throw 'a code file differs from its SHA256SUMS' }
+        }
+        if ($hasCmd -and (Get-DeployHash -Path (Join-Path $Folder $CmdName)) -cne (Get-DeployHash -Path $CmdSource)) {
+            throw "its '$CmdName' differs from the clone's"
+        }
+        [pscustomobject]@{ Problem = ''; Version = $versionText.TrimEnd("`n"); Files = @($code + @(if ($hasCmd) { $CmdName }) + 'VERSION', 'SHA256SUMS') }
+    } catch {
+        $reason = if (Test-DeployOwnMessage -ErrorRecord $_) { $_.Exception.Message } else { 'it cannot be read' }
+        Write-Verbose "Launcher copy check: $($_.Exception.Message)"
+        [pscustomobject]@{ Problem = $reason; Version = ''; Files = @() }
+    }
+}
+
+# Delete the launcher copy $Folder through the names in $Files, then the empty folder without
+# recursion, so a file that appeared after the check survives with its folder. This is the only
+# place where the tool deletes anything, and it serves only the fixed folder name.
+function Remove-DeployOwnCopy {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][string]$Folder,
+        [Parameter(Mandatory)][string[]]$Files
+    )
+    if ((Split-Path $Folder -Leaf) -cne $RemovalFolderName) { throw "Remove-DeployOwnCopy deletes only $RemovalFolderName." }
+    if (-not $PSCmdlet.ShouldProcess($RemovalFolderName, 'Delete the older launcher copy')) { return }
+    foreach ($name in $Files) { [IO.File]::Delete((Join-Path $Folder $name)) }
+    [IO.Directory]::Delete($Folder, $false)
+}
+
+# Check Launcher.previous.remove at $Target once more, delete it and return the version it held.
+# Throws with the reason, deleting nothing, when the check fails.
+function Complete-DeployRemoval {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$Target,
+        [Parameter(Mandatory)][string]$CmdSource
+    )
+    $folder = Join-Path $Target $RemovalFolderName
+    $copy = Get-DeployOwnCopy -Folder $folder -CmdSource $CmdSource
+    if ($copy.Problem) { throw $copy.Problem }
+    Remove-DeployOwnCopy -Folder $folder -Files $copy.Files
+    $copy.Version
 }
 
 # Import the launcher's module from the clone at $RepositoryPath, whose settings checks and
@@ -612,10 +740,13 @@ function Move-DeployLegacyData {
 # describes; -MigrateSettings, with the optional -VmDisplayName and -GuestName, moves schema 1
 # settings to LauncherData first. Throws with the reason, before any change, when a check fails; a
 # failure after the first change says what is left to do. Returns Version; Mode, which is Install
-# (no Launcher folder), Update (settings in LauncherData), Migrate (schema 1 settings) or Resume (a
-# migration that stopped after it created LauncherData); MovedCmdCount, the old launcher .cmd files
-# moved into Launcher.previous; Plan, a migration's plan (Get-DeployMigrationPlan); and Applied,
-# $false under -WhatIf.
+# (no Launcher folder), Update (settings in LauncherData), Migrate (schema 1 settings), Resume (a
+# migration that stopped after it created LauncherData) or Finish (Launcher holds this commit
+# already, and only a removal left by an earlier deploy is done); MovedCmdCount, the old launcher
+# .cmd files moved into Launcher.previous; Plan, a migration's plan (Get-DeployMigrationPlan); Applied, $false
+# under -WhatIf; PreviousVersion, what Launcher.previous holds afterwards; Removing and Removed,
+# the versions of the older copies it would delete and did delete; and RemovalProblem, why an older
+# copy stayed after a deploy that otherwise worked.
 function Invoke-PvmDeploy {
     [CmdletBinding(SupportsShouldProcess)]
     [OutputType([pscustomobject])]
@@ -629,6 +760,7 @@ function Invoke-PvmDeploy {
     $launcher = Join-Path $Target 'Launcher'
     $staged = Join-Path $Target 'Launcher.new'
     $previous = Join-Path $Target 'Launcher.previous'
+    $removal = Join-Path $Target $RemovalFolderName
     $data = Join-Path $Target 'LauncherData'
     $dataStaged = Join-Path $Target 'LauncherData.new'
     $oldSettings = Join-Path $launcher 'settings.psd1'
@@ -651,11 +783,25 @@ function Invoke-PvmDeploy {
 
     # What an earlier deploy left.
     $hasLauncher = Test-Path -LiteralPath $launcher -PathType Container
-    if (-not $hasLauncher -and (Test-Path -LiteralPath $previous)) {
-        throw "The target has no Launcher folder, but Launcher.previous holds the launcher that an interrupted deploy replaced. Rename Launcher.previous back to Launcher, remove $leftovers if they are there, then deploy again."
-    }
-    if (Test-Path -LiteralPath $previous) {
-        throw 'Launcher.previous holds the launcher that the last deploy replaced. Remove it or move it away first.'
+    $hasPrevious = Test-DeployEntry -Path $previous
+    $hasRemoval = Test-DeployEntry -Path $removal
+    if (-not $hasLauncher) {
+        if ($hasPrevious -and $hasRemoval) {
+            throw "The target has no Launcher folder, but Launcher.previous holds the launcher that a deploy that stopped replaced. Rename Launcher.previous back to Launcher, then Launcher.previous.remove back to Launcher.previous, remove $leftovers if they are there, then deploy again."
+        }
+        if ($hasPrevious) {
+            throw "The target has no Launcher folder, but Launcher.previous holds the launcher that an interrupted deploy replaced. Rename Launcher.previous back to Launcher, remove $leftovers if they are there, then deploy again."
+        }
+        if ($hasRemoval) {
+            throw "The target has no Launcher or Launcher.previous folder, but Launcher.previous.remove holds an older launcher. Rename Launcher.previous.remove to Launcher, remove $leftovers if they are there, then deploy again."
+        }
+    } elseif ($hasRemoval) {
+        if (-not $hasPrevious) {
+            throw "Launcher.previous.remove is left from a deploy that stopped, and Launcher.previous is missing. Rename Launcher.previous.remove back to Launcher.previous, remove $leftovers if they are there, then deploy again."
+        }
+        if ((Test-Path -LiteralPath $cmdStaged) -and -not (Test-Path -LiteralPath $staged)) {
+            throw "The new launcher is in Launcher, but its .cmd is not in place yet. Move the old launcher .cmd files at the stick's root into Launcher.previous, then rename '$CmdName.new' to '$CmdName', then deploy again."
+        }
     }
     if (Test-Path -LiteralPath $dataStaged) {
         throw "LauncherData.new is left from a migration whose staging did not finish, and nothing the launcher uses was changed. Remove LauncherData.new, and $leftovers if they are there, then run the same command again."
@@ -685,6 +831,38 @@ function Invoke-PvmDeploy {
     } else {
         if ($MigrateSettings) { throw 'The settings are in LauncherData already, so there is nothing to migrate. Deploy without -MigrateSettings.' }
         $mode = 'Update'
+    }
+
+    # Only the tool's own unchanged copies may be replaced. A migration keeps the old settings in
+    # Launcher.previous, so it never replaces one.
+    $removing = @()
+    $finishRemoval = $false
+    if ($hasPrevious) {
+        if ($mode -ne 'Update') { throw 'Launcher.previous holds the launcher that the last deploy replaced. A migration keeps the old settings there, so move it away first.' }
+        $previousCopy = Get-DeployOwnCopy -Folder $previous -CmdSource $cmdSource
+        if ($previousCopy.Problem) {
+            throw "Launcher.previous is not a launcher copy that a deploy wrote and nothing changed since ($($previousCopy.Problem)), so nothing was changed. Check what it holds, remove it or move it away, then deploy again."
+        }
+        if ($hasRemoval) {
+            $removalCopy = Get-DeployOwnCopy -Folder $removal -CmdSource $cmdSource
+            if ($removalCopy.Problem) {
+                throw "Launcher.previous.remove is not a launcher copy that a deploy wrote and nothing changed since ($($removalCopy.Problem)), so nothing was changed. Check what it holds, remove it or move it away, then deploy again."
+            }
+        }
+        # Launcher becomes the only way back, so an older copy goes only when Launcher is intact.
+        $launcherCopy = Get-DeployOwnCopy -Folder $launcher -CmdSource $cmdSource
+        if ($launcherCopy.Problem) {
+            if ($hasRemoval) {
+                throw ("Launcher does not match its SHA256SUMS ($($launcherCopy.Problem)), so the older copy in Launcher.previous.remove stays and nothing was changed. " +
+                    "To go back, rename Launcher to another name, Launcher.previous to Launcher and Launcher.previous.remove to Launcher.previous, and move '$CmdName' from the new Launcher to the stick's root, over the one there. Then deploy again.")
+            }
+            throw "Launcher is not a launcher copy that a deploy wrote and nothing changed since ($($launcherCopy.Problem)), so replacing it would cost the copy in Launcher.previous, and nothing was changed. Rename Launcher.previous to keep it, then deploy again. The changed Launcher then becomes Launcher.previous, which the next deploy refuses until it is moved away."
+        }
+        if ($hasRemoval) {
+            $finishRemoval = $true
+            $removing += $removalCopy.Version
+        }
+        $removing += $previousCopy.Version
     }
     $plan = $null
     if ($mode -eq 'Install' -or $mode -eq 'Update') {
@@ -718,6 +896,30 @@ function Invoke-PvmDeploy {
     $hashes = @{}
     foreach ($source in $sources) { $hashes[$source] = Get-DeployHash -Path $source }
     $sums = (@($sources | ForEach-Object { '{0}  {1}' -f $hashes[$_], (Split-Path $_ -Leaf) }) -join "`n") + "`n"
+    # Deploying the commit that Launcher holds would only push the earlier version out, so it
+    # stops. A removal that such a deploy left is still finished.
+    if ($mode -eq 'Update') {
+        $same = $false
+        try { $same = Test-DeployStagedCode -Folder $launcher -Sources $sources -Sums $sums -Version $version }
+        catch { Write-Verbose "Launcher cannot be compared with the clone: $($_.Exception.Message)" }
+        if ($same) {
+            # The root .cmd is part of the last check, so it must match before anything is deleted.
+            $cmdSame = $false
+            try { $cmdSame = (Test-Path -LiteralPath $cmdTarget -PathType Leaf) -and (Get-DeployHash -Path $cmdTarget) -eq (Get-DeployHash -Path $cmdSource) }
+            catch { Write-Verbose "The root .cmd cannot be compared with the clone: $($_.Exception.Message)" }
+            if (-not $finishRemoval) {
+                $keeps = if ($hasPrevious) { " and Launcher.previous keeps version $($previousCopy.Version)" } else { '' }
+                $next = if ($cmdSame) { ' There is nothing to write again: a Launcher that differs from the clone in any file is replaced as usual.' }
+                else { " Only '$CmdName' at the stick's root differs from the clone's: copy the clone's '$CmdName' there by hand." }
+                throw "Launcher already holds $version, file for file the commit this deploy would write, so nothing was changed$keeps.$next"
+            }
+            if (-not $cmdSame) {
+                throw "Launcher already holds $version, but '$CmdName' at the stick's root differs from the clone's, so Launcher.previous.remove stays and nothing was changed. Copy the clone's '$CmdName' to the stick's root, then deploy again."
+            }
+            $mode = 'Finish'
+            $removing = @($removalCopy.Version)
+        }
+    }
     $reuseCode = $false
     $reuseCmd = $false
     if (Test-Path -LiteralPath $staged) {
@@ -731,11 +933,23 @@ function Invoke-PvmDeploy {
         if (-not $reuseCmd) { throw "'$CmdName.new' is left from an earlier deploy and holds only copies. Remove it first." }
     }
 
-    $result = [pscustomobject]@{ Version = $version; Mode = $mode; MovedCmdCount = $oldCmds.Count; Plan = $plan; Applied = $false }
+    $previousVersion = if ($mode -eq 'Finish') { $previousCopy.Version } elseif ($hasLauncher) { Get-DeployFolderVersion -Folder $launcher } else { '' }
+    $result = [pscustomobject]@{
+        Version = $version; Mode = $mode; MovedCmdCount = $oldCmds.Count; Plan = $plan; Applied = $false
+        PreviousVersion = $previousVersion; Removing = $removing; Removed = @(); RemovalProblem = ''
+    }
     # The target is not named, since the stick's folder names can be private.
-    if (-not $PSCmdlet.ShouldProcess('the -Target folder', "Deploy the launcher $version")) { return $result }
+    $action = if ($mode -eq 'Finish') { 'Finish the removal of Launcher.previous.remove' } else { "Deploy the launcher $version" }
+    if (-not $PSCmdlet.ShouldProcess('the -Target folder', $action)) { return $result }
     # That was the one question -Confirm asks: the steps below run as one unit, without asking again.
     $ConfirmPreference = 'None'
+
+    if ($mode -eq 'Finish') {
+        try { $result.Removed = @(Complete-DeployRemoval -Target $Target -CmdSource $cmdSource) }
+        catch { throw "Launcher already holds $version, but Launcher.previous.remove could not be removed, and nothing else was changed. Check what it holds, remove it or move it away. $(Format-DeployCause -ErrorRecord $_)" }
+        $result.Applied = $true
+        return $result
+    }
 
     # Everything is staged and checked first, so a failed copy changes nothing the launcher uses.
     try {
@@ -790,10 +1004,31 @@ function Invoke-PvmDeploy {
         $result.Applied = $true
         return $result
     }
+
+    # A removal left by a deploy that stopped makes room for this one. Staging came first, so a
+    # failed copy costs no earlier launcher.
+    if ($finishRemoval) {
+        try { $result.Removed = @(Complete-DeployRemoval -Target $Target -CmdSource $cmdSource) }
+        catch { throw "Launcher.previous.remove could not be removed, so nothing the launcher uses was changed. Remove $leftovers, move Launcher.previous.remove away, then deploy again. $(Format-DeployCause -ErrorRecord $_)" }
+    }
+
+    # Until the last check passes, the older copy waits as Launcher.previous.remove, so a deploy
+    # that fails or is cut off never costs the way back.
+    $rotate = $hasPrevious
+    $backToPrevious = if ($rotate) { ', then Launcher.previous.remove back to Launcher.previous' } else { '' }
+    if ($rotate) {
+        try { Rename-DeployItem -Path $previous -NewName $RemovalFolderName }
+        catch { throw "Launcher.previous could not be renamed, so the stick's launcher is unchanged. A window, console or program probably has the folder or a file in it open: close it, remove $leftovers, then deploy again. $(Format-DeployCause -ErrorRecord $_)" }
+    }
     try {
         Rename-DeployItem -Path $launcher -NewName 'Launcher.previous'
     } catch {
-        throw "Launcher could not be renamed, so the stick's launcher is unchanged. A window, console or program probably has the Launcher folder or a file in it open: close it, remove $leftovers, then deploy again. $(Format-DeployCause -ErrorRecord $_)"
+        $reason = Format-DeployCause -ErrorRecord $_
+        if ($rotate) {
+            try { Rename-DeployItem -Path $removal -NewName 'Launcher.previous' }
+            catch { throw "Launcher could not be renamed, so the stick's launcher is unchanged, but Launcher.previous.remove could not be renamed back. Rename Launcher.previous.remove back to Launcher.previous, remove $leftovers, then deploy again. $reason" }
+        }
+        throw "Launcher could not be renamed, so the stick's launcher is unchanged. A window, console or program probably has the Launcher folder or a file in it open: close it, remove $leftovers, then deploy again. $reason"
     }
     try {
         Rename-DeployItem -Path $staged -NewName 'Launcher'
@@ -802,7 +1037,11 @@ function Invoke-PvmDeploy {
         try {
             Rename-DeployItem -Path $previous -NewName 'Launcher'
         } catch {
-            throw "Launcher is missing: Launcher.previous holds the launcher that was in use. Rename Launcher.previous back to Launcher, remove $leftovers, then deploy again. $reason"
+            throw "Launcher is missing: Launcher.previous holds the launcher that was in use. Rename Launcher.previous back to Launcher$backToPrevious, remove $leftovers, then deploy again. $reason"
+        }
+        if ($rotate) {
+            try { Rename-DeployItem -Path $removal -NewName 'Launcher.previous' }
+            catch { throw "Launcher is back as it was, but Launcher.previous.remove could not be renamed back. Rename Launcher.previous.remove back to Launcher.previous, remove $leftovers, then deploy again. $reason" }
         }
         throw "Launcher.new could not take the place of Launcher, so Launcher is back as it was. Remove $leftovers, then deploy again. $reason"
     }
@@ -810,9 +1049,28 @@ function Invoke-PvmDeploy {
         foreach ($old in $oldCmds) { Move-Item -LiteralPath $old.FullName -Destination (Join-Path $previous $old.Name) }
         Rename-DeployItem -Path $cmdStaged -NewName $CmdName
     } catch {
-        throw "The new launcher is in Launcher, but its .cmd is not in place yet. Move the old launcher .cmd files at the stick's root into Launcher.previous, then rename '$CmdName.new' to '$CmdName'. $(Format-DeployCause -ErrorRecord $_)"
+        $next = if ($rotate) { ' The next deploy then removes Launcher.previous.remove.' } else { '' }
+        throw "The new launcher is in Launcher, but its .cmd is not in place yet. Move the old launcher .cmd files at the stick's root into Launcher.previous, then rename '$CmdName.new' to '$CmdName'.$next $(Format-DeployCause -ErrorRecord $_)"
+    }
+
+    # The last check: nothing older is deleted unless the launcher in place is the clone's.
+    $checked = $false
+    try {
+        $checked = (Test-DeployStagedCode -Folder $launcher -Sources $sources -Sums $sums -Version $version) -and
+        (Get-DeployHash -Path $cmdTarget) -eq (Get-DeployHash -Path $cmdSource)
+    } catch {
+        Write-Verbose "The new launcher cannot be read back: $($_.Exception.Message)"
+    }
+    if (-not $checked) {
+        throw ("The new launcher in Launcher does not match the clone, so nothing was deleted. To go back, rename Launcher to another name and Launcher.previous back to Launcher$backToPrevious, " +
+            "and move '$CmdName' from the restored Launcher to the stick's root, over the one there. Then deploy again.")
     }
     $result.Applied = $true
+    if ($rotate) {
+        # The new launcher works by now, so a copy that cannot go is a note, not a failed deploy.
+        try { $result.Removed = @($result.Removed) + @(Complete-DeployRemoval -Target $Target -CmdSource $cmdSource) }
+        catch { $result.RemovalProblem = (Get-DeployCause -ErrorRecord $_).TrimEnd('.') }
+    }
     $result
 }
 
@@ -825,7 +1083,11 @@ function Format-DeployReport {
     param([Parameter(Mandatory)][pscustomobject]$Result)
     $done = $Result.Applied
     $moved = if ($done) { 'moved' } else { 'to move' }
-    "$(if ($done) { 'deployed' } else { 'would deploy' }) $($Result.Version) ($($Result.Mode))."
+    if ($Result.Mode -eq 'Finish') {
+        "Launcher already holds $($Result.Version); $(if ($done) { 'finished' } else { 'would finish' }) the removal that an earlier deploy left."
+    } else {
+        "$(if ($done) { 'deployed' } else { 'would deploy' }) $($Result.Version) ($($Result.Mode))."
+    }
     $plan = $Result.Plan
     if ($plan) {
         if ($Result.Mode -eq 'Resume') {
@@ -838,7 +1100,16 @@ function Format-DeployReport {
         "VirtualBox copies $moved to LauncherData\backups\legacy: $($plan.VirtualBoxCopies)."
         "other copies left beside the VM files: $($plan.KeptCopies)."
     }
-    if ($Result.Mode -ne 'Install') { "old launcher .cmd files $moved into Launcher.previous: $($Result.MovedCmdCount)." }
+    if ($Result.Mode -ne 'Install') {
+        if ($Result.Mode -ne 'Finish') { "old launcher .cmd files $moved into Launcher.previous: $($Result.MovedCmdCount)." }
+        "Launcher.previous $(if ($done) { 'holds' } else { 'would hold' }) version $($Result.PreviousVersion)."
+    }
+    foreach ($older in @(if ($done) { $Result.Removed } else { $Result.Removing })) {
+        "$(if ($done) { 'removed' } else { 'would remove' }) the older launcher copy, version $older."
+    }
+    if ($Result.RemovalProblem) {
+        "the older launcher copy stays in Launcher.previous.remove: $($Result.RemovalProblem). Check what it holds, then move it away before the next deploy."
+    }
 }
 
 # Run only when started as a script, not when a test dot-sources this file for its functions.
