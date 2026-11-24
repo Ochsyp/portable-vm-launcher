@@ -203,7 +203,8 @@ in place and checked. A `Launcher.previous` that holds anything else, such as th
 after a migration, stops the deploy before its first change, and the message says what to move
 away. A changed `Launcher` stops it too while a `Launcher.previous` exists, because that
 `Launcher` would become the only way back. If a deploy is cut off, the next one finishes the
-removal or names the renames to do.
+removal or names the renames to do. A deploy of the commit that `Launcher` already holds, file
+for file, stops before any change, so the earlier version stays in `Launcher.previous`.
 
 A stick whose settings are still in `Launcher\settings.psd1`, from a launcher before phase 3,
 needs one deploy with `-MigrateSettings`; try it with `-WhatIf` first, which prints the plan:

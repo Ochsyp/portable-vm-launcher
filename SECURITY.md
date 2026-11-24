@@ -56,5 +56,7 @@ or commits: they identify one stick and the PCs it was used on.
   no source calls a Storage command other than a read, or a CIM or WMI method, that the
   inventory tool calls nothing that writes, that the module writes files only through its safe
   write, the log aside, and deletes only the copies that write makes, and that the deploy tool
-  deletes nothing and writes files only through that safe write.
+  writes files only through that safe write. The deploy tool deletes one thing: the earlier
+  launcher copy that the new `Launcher.previous` replaces, and only when every file in it is what
+  a deploy wrote. It never touches `LauncherData`, the VM files or any other folder.
 - Dependabot keeps the pinned GitHub Actions up to date.

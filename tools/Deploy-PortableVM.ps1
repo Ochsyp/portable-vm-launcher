@@ -30,17 +30,17 @@
 #
 # It refuses, changing nothing, while a VM runs on this PC, when the settings fail the checks, when
 # Launcher.new, "Start VM.cmd.new" or LauncherData.new is left from an earlier deploy, when
-# Launcher.previous, or the Launcher that would replace it, is not its own unchanged copy, or when
-# a .cmd at -Target is in the way. A
-# migration also refuses while Launcher.previous exists, an old settings file without a byte order
-# mark whose values read differently as UTF-8 and as ANSI, and, when it resumes, two settings files
-# that differ. A deploy cut off in the swap leaves Launcher.previous.remove: the next one finishes
-# its removal, or stops and names the renames to do. It deletes nothing else, changes no VM file,
-# and its messages name no full path, so that no folder name from the stick or above the clone
-# shows: of an error from Windows or PowerShell, which can quote one, it prints only the cause, and
-# -Verbose shows the message and the copies a migration moves. PowerShell's own errors about the
-# command line, such as an unknown parameter, come before the script runs and name its path. When
-# a step fails it says what is left to fix by hand.
+# Launcher.previous, or the Launcher that would replace it, is not its own unchanged copy, when
+# Launcher holds file for file the commit it would write, or when a .cmd at -Target is in the way.
+# A migration also refuses while Launcher.previous exists, an old settings file without a byte
+# order mark whose values read differently as UTF-8 and as ANSI, and, when it resumes, two settings
+# files that differ. A deploy cut off in the swap leaves Launcher.previous.remove: the next one
+# finishes its removal, or stops and names the renames to do. It deletes nothing else, changes no
+# VM file, and its messages name no full path, so that no folder name from the stick or above the
+# clone shows: of an error from Windows or PowerShell, which can quote one, it prints only the
+# cause, and -Verbose shows the message and the copies a migration moves. PowerShell's own errors
+# about the command line, such as an unknown parameter, come before the script runs and name its
+# path. When a step fails it says what is left to fix by hand.
 # -WhatIf runs the checks and prints the plan only. Exits 0 when done, 1 when it refused or failed.
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -740,8 +740,9 @@ function Move-DeployLegacyData {
 # describes; -MigrateSettings, with the optional -VmDisplayName and -GuestName, moves schema 1
 # settings to LauncherData first. Throws with the reason, before any change, when a check fails; a
 # failure after the first change says what is left to do. Returns Version; Mode, which is Install
-# (no Launcher folder), Update (settings in LauncherData), Migrate (schema 1 settings) or Resume (a
-# migration that stopped after it created LauncherData); MovedCmdCount, the old launcher .cmd files
+# (no Launcher folder), Update (settings in LauncherData), Migrate (schema 1 settings), Resume (a
+# migration that stopped after it created LauncherData) or Finish (Launcher holds this commit
+# already, and only a removal left by an earlier deploy is done); MovedCmdCount, the old launcher .cmd files
 # moved into Launcher.previous; Plan, a migration's plan (Get-DeployMigrationPlan); Applied, $false
 # under -WhatIf; PreviousVersion, what Launcher.previous holds afterwards; Removing and Removed,
 # the versions of the older copies it would delete and did delete; and RemovalProblem, why an older
@@ -895,6 +896,21 @@ function Invoke-PvmDeploy {
     $hashes = @{}
     foreach ($source in $sources) { $hashes[$source] = Get-DeployHash -Path $source }
     $sums = (@($sources | ForEach-Object { '{0}  {1}' -f $hashes[$_], (Split-Path $_ -Leaf) }) -join "`n") + "`n"
+    # Deploying the commit that Launcher holds would only push the earlier version out, so it
+    # stops. A removal that such a deploy left is still finished.
+    if ($mode -eq 'Update') {
+        $same = $false
+        try { $same = Test-DeployStagedCode -Folder $launcher -Sources $sources -Sums $sums -Version $version }
+        catch { Write-Verbose "Launcher cannot be compared with the clone: $($_.Exception.Message)" }
+        if ($same) {
+            if (-not $finishRemoval) {
+                $keeps = if ($hasPrevious) { " and Launcher.previous keeps version $($previousCopy.Version)" } else { '' }
+                throw "Launcher already holds $version, file for file the commit this deploy would write, so nothing was changed$keeps. There is nothing to write again: a Launcher that differs from the clone in any file is replaced as usual."
+            }
+            $mode = 'Finish'
+            $removing = @($removalCopy.Version)
+        }
+    }
     $reuseCode = $false
     $reuseCmd = $false
     if (Test-Path -LiteralPath $staged) {
@@ -908,7 +924,7 @@ function Invoke-PvmDeploy {
         if (-not $reuseCmd) { throw "'$CmdName.new' is left from an earlier deploy and holds only copies. Remove it first." }
     }
 
-    $previousVersion = if ($hasLauncher) { Get-DeployFolderVersion -Folder $launcher } else { '' }
+    $previousVersion = if ($mode -eq 'Finish') { $previousCopy.Version } elseif ($hasLauncher) { Get-DeployFolderVersion -Folder $launcher } else { '' }
     $result = [pscustomobject]@{
         Version = $version; Mode = $mode; MovedCmdCount = $oldCmds.Count; Plan = $plan; Applied = $false
         PreviousVersion = $previousVersion; Removing = $removing; Removed = @(); RemovalProblem = ''
@@ -917,6 +933,13 @@ function Invoke-PvmDeploy {
     if (-not $PSCmdlet.ShouldProcess('the -Target folder', "Deploy the launcher $version")) { return $result }
     # That was the one question -Confirm asks: the steps below run as one unit, without asking again.
     $ConfirmPreference = 'None'
+
+    if ($mode -eq 'Finish') {
+        try { $result.Removed = @(Complete-DeployRemoval -Target $Target -CmdSource $cmdSource) }
+        catch { throw "Launcher already holds $version, but Launcher.previous.remove could not be removed, and nothing else was changed. Check what it holds, remove it or move it away. $(Format-DeployCause -ErrorRecord $_)" }
+        $result.Applied = $true
+        return $result
+    }
 
     # Everything is staged and checked first, so a failed copy changes nothing the launcher uses.
     try {
@@ -1050,7 +1073,11 @@ function Format-DeployReport {
     param([Parameter(Mandatory)][pscustomobject]$Result)
     $done = $Result.Applied
     $moved = if ($done) { 'moved' } else { 'to move' }
-    "$(if ($done) { 'deployed' } else { 'would deploy' }) $($Result.Version) ($($Result.Mode))."
+    if ($Result.Mode -eq 'Finish') {
+        "Launcher already holds $($Result.Version); $(if ($done) { 'finished' } else { 'would finish' }) the removal that an earlier deploy left."
+    } else {
+        "$(if ($done) { 'deployed' } else { 'would deploy' }) $($Result.Version) ($($Result.Mode))."
+    }
     $plan = $Result.Plan
     if ($plan) {
         if ($Result.Mode -eq 'Resume') {
@@ -1064,7 +1091,7 @@ function Format-DeployReport {
         "other copies left beside the VM files: $($plan.KeptCopies)."
     }
     if ($Result.Mode -ne 'Install') {
-        "old launcher .cmd files $moved into Launcher.previous: $($Result.MovedCmdCount)."
+        if ($Result.Mode -ne 'Finish') { "old launcher .cmd files $moved into Launcher.previous: $($Result.MovedCmdCount)." }
         "Launcher.previous $(if ($done) { 'holds' } else { 'would hold' }) version $($Result.PreviousVersion)."
     }
     foreach ($older in @(if ($done) { $Result.Removed } else { $Result.Removing })) {

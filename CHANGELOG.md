@@ -214,6 +214,7 @@ Compared with the launcher on a stick before the redesign:
   what a deploy wrote; anything else, or a changed `Launcher` that would take its place, stops the
   deploy before its first change. It never touches `LauncherData`, the VM files or any other
   folder. A deploy that is cut off leaves the older copy as `Launcher.previous.remove`, and the
-  next one finishes the removal or names the renames to do.
+  next one finishes the removal or names the renames to do. A deploy of the commit that
+  `Launcher` already holds stops before any change, so the earlier version stays.
 
 [Unreleased]: https://github.com/Ochsyp/portable-vm-launcher/commits/main

@@ -577,8 +577,10 @@ Describe 'Deploy-PortableVM keeps one previous launcher' -Tag 'WindowsOnly' {
     }
 
     It 'keeps the older copy and says so when a file appears in it before the last check' {
-        # The check of the new launcher is the last step before the older copy's own check.
+        # The check of the new launcher is the last step before the older copy's own check. The
+        # same function first compares Launcher with the clone, before the older copy moves.
         Mock Test-DeployStagedCode {
+            if (-not (Test-Path -LiteralPath $script:removal)) { return $false }
             Write-TestFile -Path (Join-Path $script:removal 'late.txt') -Text 'late'
             $true
         }
@@ -760,6 +762,63 @@ Describe 'Deploy-PortableVM keeps one previous launcher' -Tag 'WindowsOnly' {
             'Launcher.previous would hold version v1.'
             'would remove the older launcher copy, version v0.'
         )
+    }
+
+    Context 'a repeated deploy of the commit that Launcher holds' {
+        It 'stops and keeps the earlier version as Launcher.previous' {
+            $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target
+            { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
+                Should -Throw -ExpectedMessage 'Launcher already holds v2, file for file the commit this deploy would write, so nothing was changed and Launcher.previous keeps version v1.*'
+            Get-TestVersion -Name 'Launcher.previous' | Should -BeExactly 'v1'
+            Get-TestVersion -Name 'Launcher' | Should -BeExactly 'v2'
+        }
+
+        It 'leaves the whole scratch stick byte for byte as it was' {
+            $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target
+            $before = Get-TestTree -Root $script:target
+            { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } | Should -Throw -ExpectedMessage 'Launcher already holds v2*'
+            Get-TestTree -Root $script:target | Should -BeExactly $before
+        }
+
+        It 'stops also without a Launcher.previous, and says that nothing needs writing again' {
+            $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target
+            [IO.Directory]::Delete($script:previous, $true)
+            $before = Get-TestTree -Root $script:target
+            { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
+                Should -Throw -ExpectedMessage 'Launcher already holds v2, file for file the commit this deploy would write, so nothing was changed. There is nothing to write again: a Launcher that differs from the clone in any file is replaced as usual.'
+            Get-TestTree -Root $script:target | Should -BeExactly $before
+        }
+
+        It 'deploys over a Launcher with the same version but other code' {
+            [IO.Directory]::Delete((Join-Path $script:target 'Launcher'), $true)
+            Initialize-TestOwnCopy -Path (Join-Path $script:target 'Launcher') -Version 'v2' -NoCmd
+            $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target
+            $result.Applied | Should -BeTrue
+            Get-TestVersion -Name 'Launcher.previous' | Should -BeExactly 'v2'
+            [IO.File]::ReadAllText((Join-Path $script:target 'Launcher\Start-PortableVM.ps1')) | Should -BeExactly "# new script`r`n"
+        }
+
+        It 'only finishes a removal that a deploy of the same commit left, and keeps Launcher and Launcher.previous' {
+            $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target
+            Initialize-TestOwnCopy -Path $script:removal -Version 'v0'
+            $launcherTree = Get-TestTree -Root (Join-Path $script:target 'Launcher')
+            $previousTree = Get-TestTree -Root $script:previous
+            $plan = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -WhatIf
+            Format-DeployReport -Result $plan | Should -BeExactly @(
+                'Launcher already holds v2; would finish the removal that an earlier deploy left.'
+                'Launcher.previous would hold version v1.'
+                'would remove the older launcher copy, version v0.'
+            )
+            $result = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target
+            $script:removal | Should -Not -Exist
+            Get-TestTree -Root (Join-Path $script:target 'Launcher') | Should -BeExactly $launcherTree
+            Get-TestTree -Root $script:previous | Should -BeExactly $previousTree
+            Format-DeployReport -Result $result | Should -BeExactly @(
+                'Launcher already holds v2; finished the removal that an earlier deploy left.'
+                'Launcher.previous holds version v1.'
+                'removed the older launcher copy, version v0.'
+            )
+        }
     }
 
     It 'never deletes the Launcher.previous of a migration, which holds the old settings' {
