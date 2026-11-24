@@ -1789,6 +1789,8 @@ Describe 'Compare-StickDryRun: files and the listing' -Tag 'WindowsOnly' {
     It 'masks paths, numbers, UUIDs and the names it is given in the deploy''s lines' {
         Format-CompareSafe -Text 'Deploy-PortableVM: X:\Kelda\stick 12345678 5ca1ab1e-0000-4000-8000-000000000001 Kelda VM, \\server\share' -Private 'Kelda VM' |
             Should -BeExactly 'Deploy-PortableVM: <path> <number> <uuid> <private>, <path>'
+        Format-CompareSafe -Text 'Deploy-PortableVM: deployed 1234567 (Update), 7654321' -Version '1234567' |
+            Should -BeExactly 'Deploy-PortableVM: deployed 1234567 (Update), <number>'
     }
 }
 
@@ -2066,6 +2068,8 @@ Describe 'Compare-StickDryRun: a check on a scratch stick' -Tag 'WindowsOnly' {
         Copy-Item -LiteralPath $script:stick -Destination (Join-Path $TestDrive 'cstick2') -Recurse
         $result = Invoke-StickCompare -RepositoryPath $script:clone -OutputFolder $script:out -Folder $script:run -ListOnly
         $result.Lines[-1] | Should -BeLike 'RESULT: FAILED - found 2 folders with Launcher and LauncherData*'
+        # A refusal before the stick is known still saves its reason for the first window.
+        [IO.File]::ReadAllLines((Join-Path $script:run 'output.txt'))[-1] | Should -BeExactly $result.Lines[-1]
         Remove-Item -LiteralPath (Join-Path $TestDrive 'cstick2') -Recurse -Force
     }
 

@@ -207,9 +207,11 @@ function Format-CompareSafe {
     [OutputType([string])]
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
-        [string[]]$Private = @()
+        [string[]]$Private = @(),
+        [string]$Version
     )
-    $t = $Text
+    # The clone's version is no value from the stick, so it stays readable.
+    $t = if ($Version) { $Text.Replace($Version, "`0") } else { $Text }
     foreach ($value in @($Private | Where-Object { $_ -and $_.Length -ge 3 } | Sort-Object Length -Descending)) {
         $t = [regex]::Replace($t, [regex]::Escape($value), '<private>', 'IgnoreCase')
     }
@@ -217,7 +219,9 @@ function Format-CompareSafe {
     $t = [regex]::Replace($t, '\\\\[^\s"'']*', '<path>')
     $t = [regex]::Replace($t, '(?i)users[\\/][^\s"'']*', '<path>')
     $t = [regex]::Replace($t, '(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b', '<uuid>')
-    [regex]::Replace($t, '\d{7,}', '<number>')
+    $t = [regex]::Replace($t, '\d{7,}', '<number>')
+    if ($Version) { $t = $t.Replace("`0", $Version) }
+    $t
 }
 
 # --- Log lines ---------------------------------------------------------------------------------
@@ -294,7 +298,8 @@ function Get-CompareDecision {
 
 # Return how the lines $After differ from the lines $Before, compared exactly, as a list of
 # Before and After: a changed line has both, a removed line only Before ($null After) and an added
-# line only After. Lines in common stay aligned, so one added line is one difference.
+# line only After. Lines in common stay aligned, so one added line is one difference. Between two
+# common lines, removed and added lines pair up in order, and the rest stay removed or added.
 function Get-CompareDifference {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -845,7 +850,7 @@ function Invoke-CompareCheck {
     }
     $deploy = Invoke-CompareDeploy -RepositoryPath $RepositoryPath -Target $Target
     Add-CompareLine "  deploy: exit code $($deploy.Exit)"
-    foreach ($line in $deploy.Lines) { Add-CompareLine "  $(Format-CompareSafe -Text $line -Private $private)" }
+    foreach ($line in $deploy.Lines) { Add-CompareLine "  $(Format-CompareSafe -Text $line -Private $private -Version $Clone.Version)" }
     if ($deploy.Exit -ne 0 -or @($deploy.Lines | Where-Object { $_ -ceq "Deploy-PortableVM: deployed $($Clone.Version) (Update)." }).Count -ne 1) {
         throw (ConvertTo-CompareStop -Reason 'the deploy did not pass')
     }
@@ -920,8 +925,9 @@ function Invoke-StickCompare {
     )
     $script:CompareOutput = New-Object System.Collections.Generic.List[string]
     $exitCode = 1
-    # output.txt is saved only once the run folder is known to be off the stick and the repository.
-    $canSave = $false
+    # output.txt is saved unless the run folder is in the repository or on the stick, so a refusal
+    # before the stick is known still reaches the first window.
+    $canSave = -not (Test-CompareBelow -Path $Folder -Folder $RepositoryPath)
     try {
         $expected = @($ExpectChange | Where-Object { $null -ne $_ } | ForEach-Object { ConvertFrom-CompareExpectation -Text $_ })
         if (-not $Target) {
@@ -936,10 +942,10 @@ function Invoke-StickCompare {
         if (Test-CompareBelow -Path $Target -Folder $RepositoryPath) { throw (ConvertTo-CompareStop -Reason 'the -Target folder is in the repository; nothing was changed') }
         foreach ($path in $OutputFolder, $Folder) {
             if ((Test-CompareBelow -Path $path -Folder $Target) -or (Test-CompareBelow -Path $path -Folder $RepositoryPath)) {
+                $canSave = $false
                 throw (ConvertTo-CompareStop -Reason 'the output folder is on the stick or in the repository, where the check must not write; nothing was changed')
             }
         }
-        $canSave = $true
         $clone = Get-CompareClone -RepositoryPath $RepositoryPath
 
         # The listing comes first, so that what the check expects of the folders is read from the

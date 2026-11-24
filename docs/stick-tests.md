@@ -248,7 +248,9 @@ where it was not:
 -ExpectChange 'descriptor would be pointed at the stick => descriptor already points at the stick'
 ```
 
-`'=> <kind>'` expects an added line and `'<kind> =>'` a removed one. Each expected change must
+`'=> <kind>'` expects an added line and `'<kind> =>'` a removed one. Where several lines in a row
+differ, the removed and added ones pair up in order, and the output names each pair. Each
+expected change must
 happen, on one line per pair of dry runs at most; any other difference fails the check. Read the
 listing before writing an expectation about the stick's folders: `-ListOnly` prints and saves it
 and changes nothing.
