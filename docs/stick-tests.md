@@ -21,6 +21,8 @@ Such tests run in this order, and a step starts only after the one before it pas
    `.vmx`, `.vbox`, `VirtualBox.xml` and the descriptors) is in a folder on the PC outside the
    repository.
 
+Every check on the stick starts with the dry-run check below.
+
 ## Phase 1 checks
 
 Phase 1 moves the launcher's logic into a module without changing a decision. Before its pull
@@ -203,6 +205,61 @@ closed for a minute before:
 Folders named by hand are not the tool's to remove. A last, separate step, which can be skipped
 and cannot be undone, removes such a folder only if it passes the same check as the deploy's own
 copy, and says what it removed and what it left.
+
+## The dry-run check of a pull request
+
+`tools\Compare-StickDryRun.ps1` is the first part of every stick check. Run it from the clone at
+the pull request's pushed commit, with the stick plugged in, VMware and VirtualBox closed and no
+VM running:
+
+```text
+powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Compare-StickDryRun.ps1 -Target X:\
+```
+
+`-Target` is the folder that holds `Launcher` and `LauncherData`. Without it, the tool takes the
+one such folder at a drive's root or one level below. It asks for administrator rights in a
+second window and prints that window's result. It starts no VM. Then it:
+
+1. lists the stick's top folders and files and the kinds of what they hold, and saves that
+   listing as `listing.txt` on the PC. A name the tool does not know shows as
+   `other folder <n>` or `other file <n>`;
+2. refuses, changing nothing, while a VM runs, when a write or deploy was left unfinished, when
+   the clone is not clean at its pushed commit, or when the stick holds that commit already;
+3. runs a dry run with the launcher on the stick, and deploys nothing if it fails;
+4. deploys the clone through `tools\Deploy-PortableVM.ps1`;
+5. runs the same dry run again and compares the two line by line, apart from the version line,
+   the `Timings:` line, a wait line and the note on a log moved aside;
+6. checks that `Launcher.previous` holds what `Launcher` held, that `Launcher` and
+   `Start VM.cmd` are the clone's, that every other file has its old hash, apart from the log,
+   and that the top-level names are those of the listing, apart from `Launcher.previous` and
+   the launcher's `.cmd`.
+
+The last line is `RESULT: PASSED - ...` or `RESULT: FAILED - <reason>`, with exit code 0 or 1.
+The output names kinds of log lines, such as `stick found` or `using VMware`, and counts. A line
+the tool does not know is an `other line`; it is still compared, so it cannot pass unnoticed. Raw
+log lines stay in memory. The listing and the output are saved in a folder for each run below
+`%LOCALAPPDATA%\PortableVM\stick-checks`, or below `-OutputFolder`.
+
+What a pull request expects to change goes into `-ExpectChange`, one entry per changed line, as
+the kinds of the line before and after. For a pull request that points a descriptor at the stick
+where it was not:
+
+```text
+-ExpectChange 'descriptor would be pointed at the stick => descriptor already points at the stick'
+```
+
+`'=> <kind>'` expects an added line and `'<kind> =>'` a removed one. Each expected change must
+happen, on one line per pair of dry runs at most; any other difference fails the check. Read the
+listing before writing an expectation about the stick's folders: `-ListOnly` prints and saves it
+and changes nothing.
+
+`-AlsoVirtualBox` adds a second pair of dry runs with `Hypervisor` set to VirtualBox, for a pull
+request that touches that path. The tool first keeps the settings' bytes in the output folder on
+the PC, writes the change through the launcher's safe write, and puts the bytes back after each
+VirtualBox dry run; the run folder keeps that copy. If a run is cut off in between, the next run stops and says how to put the
+settings back.
+
+The check after a VM start is not part of the tool; a pull request that needs one asks for it.
 
 ## Rules for the real stick
 

@@ -1684,7 +1684,7 @@ Describe 'Compare-StickDryRun: the comparison of two dry runs' {
     ) {
         $after = & $Edit @($script:run)
         $result = Test-CompareChange -Pairs @(Get-TestPair -Before $script:run -After $after)
-        $result.Problems | Should -BeExactly @('the as configured dry runs differ in 1 line(s) that no -ExpectChange names')
+        $result.Problems | Should -BeExactly @('the dry runs (as configured) differ in 1 line(s) that no -ExpectChange names')
         $result.Lines | Should -Contain "  as configured: unexpected change: '$Kinds'"
         ($result.Lines -join "`n") | Should -Not -Match '5CA1AB1E|disk 4'
     }
@@ -1705,7 +1705,7 @@ Describe 'Compare-StickDryRun: the comparison of two dry runs' {
         $twice = @($script:run[0..4]) + @('other.vmdk already points at the stick') + @($script:run[5..7])
         $twiceAfter = @($after[0..4]) + @('other.vmdk -> RW 1 FLAT "x" 0') + @($after[5..7])
         (Test-CompareChange -Pairs @(Get-TestPair -Before $twice -After $twiceAfter) -Expected $expected).Problems |
-            Should -BeExactly @('the as configured dry runs differ in 1 line(s) that no -ExpectChange names')
+            Should -BeExactly @('the dry runs (as configured) differ in 1 line(s) that no -ExpectChange names')
     }
 
     It 'lets an expectation match once in each pair, and fails one that did not happen' {
@@ -1717,7 +1717,7 @@ Describe 'Compare-StickDryRun: the comparison of two dry runs' {
     }
 
     It 'fails runs whose exit codes differ' {
-        (Test-CompareChange -Pairs @(Get-TestPair -Before $script:run -After $script:run -AfterExit 1)).Problems | Should -BeExactly @('the as configured dry runs ended with different exit codes')
+        (Test-CompareChange -Pairs @(Get-TestPair -Before $script:run -After $script:run -AfterExit 1)).Problems | Should -BeExactly @('the dry runs (as configured) ended with different exit codes')
     }
 
     It 'reads an expectation for a changed, an added and a removed line, and refuses any other form' {
@@ -1900,7 +1900,8 @@ Describe 'Compare-StickDryRun: a check on a scratch stick' -Tag 'WindowsOnly' {
     It 'prints and saves nothing from the stick: no path, name, number or ID' {
         $result = Invoke-TestCompare -Arguments @{ AlsoVirtualBox = $true }
         $result.ExitCode | Should -Be 0
-        $saved = @(Get-ChildItem -LiteralPath $script:run -File | ForEach-Object { [IO.File]::ReadAllText($_.FullName) }) -join "`n"
+        # The run folder also keeps the bytes of the settings from before -AlsoVirtualBox, which stay on the PC.
+        $saved = @('listing.txt', 'output.txt' | ForEach-Object { [IO.File]::ReadAllText((Join-Path $script:run $_)) }) -join "`n"
         foreach ($text in @(($result.Lines -join "`n"), $saved)) {
             foreach ($value in @($script:stick, 'Kelda', 'diary', '5CA1AB1E', 'PhysicalDrive', 'Test VM', 'Q:\')) { $text.Contains($value) | Should -BeFalse -Because $value }
         }
@@ -1932,7 +1933,7 @@ Describe 'Compare-StickDryRun: a check on a scratch stick' -Tag 'WindowsOnly' {
         Mock Invoke-CompareLauncher { Add-TestRun -Target $Target; 1 }
         $before = Get-TestStickState
         $result = Invoke-TestCompare
-        $result.Lines[-1] | Should -BeExactly 'RESULT: FAILED - the dry run as configured with the launcher on the stick ended with exit code 1; nothing was deployed'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: FAILED - the dry run (as configured) with the launcher on the stick ended with exit code 1; nothing was deployed'
         Get-TestStickState | Should -BeExactly $before
         Should -Invoke Invoke-CompareDeploy -Times 0 -Exactly
     }
@@ -1951,14 +1952,14 @@ Describe 'Compare-StickDryRun: a check on a scratch stick' -Tag 'WindowsOnly' {
         Mock Invoke-CompareLauncher { Add-TestRun -Target $Target; [int]([IO.File]::ReadAllText((Join-Path $Target 'Launcher\VERSION')).Trim() -eq 'v2') }
         $result = Invoke-TestCompare
         $result.ExitCode | Should -Be 1
-        $result.Lines[-1] | Should -BeLike 'RESULT: FAILED - the as configured dry runs differ in 2 line(s) that no -ExpectChange names; the as configured dry runs ended with different exit codes'
+        $result.Lines[-1] | Should -BeLike 'RESULT: FAILED - the dry runs (as configured) differ in 2 line(s) that no -ExpectChange names; the dry runs (as configured) ended with different exit codes'
         $result.Lines | Should -Contain "  as configured: unexpected change: 'end line (dry run), exit code 0 => STOPPED line'"
     }
 
     It 'fails on an unexpected difference, and passes it once -ExpectChange names it' {
         $script:runEdit = { param($m) $m[4] = 'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0'; $m }
         $result = Invoke-TestCompare
-        $result.Lines[-1] | Should -BeExactly 'RESULT: FAILED - the as configured dry runs differ in 1 line(s) that no -ExpectChange names'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: FAILED - the dry runs (as configured) differ in 1 line(s) that no -ExpectChange names'
 
         $result = Invoke-StickCompare -RepositoryPath $script:clone -Target $script:stick -OutputFolder $script:out -Folder $script:run `
             -ExpectChange 'descriptor already points at the stick => descriptor would be pointed at the stick'
@@ -2097,6 +2098,42 @@ Describe 'Compare-StickDryRun: adapters' {
     }
 }
 
+Describe 'Compare-StickDryRun as a script' -Tag 'WindowsOnly' {
+    BeforeAll {
+        # Run the tool as the owner does, in Windows PowerShell 5.1, with $Arguments, in a process
+        # that reaches the PC: -ListOnly reads the stick folder and this clone's git state only.
+        function Invoke-TestCompareScript {
+            param([string[]]$Arguments)
+            $previous = $env:PVM_TEST
+            $env:PVM_TEST = ''
+            try { $lines = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:repoRoot 'tools\Compare-StickDryRun.ps1') @Arguments 2>&1 | ForEach-Object { "$_" }) }
+            finally { $env:PVM_TEST = $previous }
+            [pscustomobject]@{ Exit = $LASTEXITCODE; Lines = $lines }
+        }
+        $script:listStick = Join-Path $TestDrive 'list stick'
+        Write-TestFile -Path (Join-Path $script:listStick 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        Write-TestFile -Path (Join-Path $script:listStick 'Launcher\Start-PortableVM.ps1') -Text '# script'
+    }
+
+    It 'lists the stick with -ListOnly, saves the listing below -OutputFolder and exits 0' {
+        $out = Join-Path $TestDrive 'list checks'
+        $result = Invoke-TestCompareScript -Arguments @('-Target', $script:listStick, '-ListOnly', '-OutputFolder', $out)
+        $result.Exit | Should -Be 0
+        $result.Lines[-1] | Should -BeExactly 'RESULT: PASSED - listed the stick; nothing was run or changed'
+        $runs = @(Get-ChildItem -LiteralPath $out -Directory)
+        $runs.Count | Should -Be 1
+        @(Get-ChildItem -LiteralPath $runs[0].FullName -Name | Sort-Object) | Should -BeExactly @('listing.txt', 'output.txt')
+    }
+
+    It 'refuses an output folder in the repository before it creates anything' {
+        $out = Join-Path $script:repoRoot ('checks-' + [Guid]::NewGuid().ToString('N'))
+        $result = Invoke-TestCompareScript -Arguments @('-Target', $script:listStick, '-ListOnly', '-OutputFolder', $out)
+        $result.Exit | Should -Be 1
+        $result.Lines[-1] | Should -BeLike 'RESULT: FAILED - the output folder is on the stick or in the repository*'
+        $out | Should -Not -Exist
+    }
+}
+
 Describe 'Compare-StickDryRun: a full run with a stand-in for the PC' -Tag 'WindowsOnly' {
     BeforeAll {
         # Run git with $Arguments in the repository $Path; throw when it fails. A sample repository
@@ -2130,7 +2167,7 @@ Describe 'Compare-StickDryRun: a full run with a stand-in for the PC' -Tag 'Wind
                     '    StickSectors = 4000000', '    VmSectors = 3900000', '    DataPartitionStart = 2500000', "    VirtualBoxVmUuid = '5ca1ab1e-0000-4000-8000-000000000001'",
                     "    VirtualBoxHome = 'VirtualBox'", "    VirtualBoxVbox = 'VirtualBox\Test VM\Test VM.vbox'", "    VirtualBoxDisk = 'VirtualBox\Test VM\stick.vmdk'",
                     "    VMwareVmx = 'VMware\Test VM.vmx'", "    VMwareDisk = 'VMware\stick.vmdk'", '}', '') -join "`r`n"))
-        Write-TestFile -Path (Join-Path $script:fullStick 'VMware\Test VM.vmx') -Text ((@('.encoding = "windows-1252"', 'config.version = "8"', 'displayName = "Test VM"', 'suspend.disabled = "TRUE"', '') -join "`r`n"))
+        Write-TestFile -Path (Join-Path $script:fullStick 'VMware\Test VM.vmx') -Text ((@('.encoding = "windows-1252"', 'config.version = "8"', 'displayName = "Test VM"', 'uuid.action = "keep"', 'suspend.disabled = "TRUE"', '') -join "`r`n"))
         $descriptor = @('# Disk DescriptorFile', 'version=1', 'encoding="windows-1252"', 'CID=fffffffe', 'parentCID=ffffffff', 'createType="fullDevice"', '', '# Extent description',
             'RW 2500000 FLAT "\\.\PhysicalDrive99" 0', 'RW 1400000 ZERO ', '', '# The Disk Data Base', '#DDB', '', 'ddb.adapterType = "ide"', '') -join "`r`n"
         Write-TestFile -Path (Join-Path $script:fullStick 'VMware\stick.vmdk') -Text $descriptor

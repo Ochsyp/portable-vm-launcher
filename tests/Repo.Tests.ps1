@@ -372,10 +372,11 @@ Describe 'Static guards' {
         @($commands | Where-Object { $_.Name -eq 'Write-PvmFile' } | ForEach-Object { $_.Function } | Sort-Object) | Should -BeExactly @('Undo-CompareHypervisor', 'Write-CompareHypervisor')
         @($commands | Where-Object { $_.Operator -eq 'Ampersand' } | ForEach-Object { $_.Function } | Sort-Object -Unique) | Should -BeExactly @('Invoke-CompareDeploy', 'Invoke-CompareGit', 'Invoke-CompareLauncher')
         @($commands | Where-Object { $_.Name -eq 'Start-Process' } | ForEach-Object { $_.Function }) | Should -BeExactly @('Invoke-CompareElevated')
-        $function = { param($Name) $ast.Find({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq $Name }, $true).Extent.Text }
-        & $function 'Invoke-CompareLauncher' | Should -Match ([regex]::Escape("-File `$script -DryRun *>&1"))
-        & $function 'Invoke-CompareDeploy' | Should -Match ([regex]::Escape("'tools\Deploy-PortableVM.ps1'"))
-        & $function 'Invoke-CompareDeploy' | Should -Not -Match 'MigrateSettings'
+        $functions = @{}
+        foreach ($definition in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) { $functions[$definition.Name] = $definition.Extent.Text }
+        $functions['Invoke-CompareLauncher'] | Should -Match ([regex]::Escape("-File `$script -DryRun *>&1"))
+        $functions['Invoke-CompareDeploy'] | Should -Match ([regex]::Escape("'tools\Deploy-PortableVM.ps1'"))
+        $functions['Invoke-CompareDeploy'] | Should -Not -Match 'MigrateSettings'
     }
 
     It 'catch the ways a source could change or write a file past the safe write: <Code>' -ForEach @(
