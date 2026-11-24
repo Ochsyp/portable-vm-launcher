@@ -544,8 +544,9 @@ function Find-CompareStick {
     foreach ($root in @(Get-CompareDriveRoot)) {
         $folders = @($root) + @(Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
         foreach ($folder in $folders) {
-            if ((Test-Path -LiteralPath (Join-Path $folder 'Launcher\Start-PortableVM.ps1') -PathType Leaf) -and
-                (Test-Path -LiteralPath (Join-Path $folder 'LauncherData\settings.psd1') -PathType Leaf)) { $folder }
+            # A folder this account may not read is no stick folder.
+            if ((Test-Path -LiteralPath (Join-Path $folder 'Launcher\Start-PortableVM.ps1') -PathType Leaf -ErrorAction SilentlyContinue) -and
+                (Test-Path -LiteralPath (Join-Path $folder 'LauncherData\settings.psd1') -PathType Leaf -ErrorAction SilentlyContinue)) { $folder }
         }
     }
 }

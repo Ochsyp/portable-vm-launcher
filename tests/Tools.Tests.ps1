@@ -2065,6 +2065,19 @@ Describe 'Compare-StickDryRun: a check on a scratch stick' -Tag 'WindowsOnly' {
         $result.Lines[0] | Should -BeExactly 'Compare-StickDryRun: the stick folder was found by its Launcher and LauncherData folders.'
         $result.ExitCode | Should -Be 0
 
+        # A folder this account may not read is passed over; Test-Path reports an error for it, which
+        # $ErrorActionPreference Stop would make a stop.
+        $denied = Join-Path $TestDrive 'locked\Launcher'
+        $null = New-Item -ItemType File -Path (Join-Path $denied 'Start-PortableVM.ps1') -Force
+        $null = & icacls.exe $denied /deny "$($env:USERNAME):(OI)(CI)(RD,RA,REA)"
+        try {
+            { $null = Test-Path -LiteralPath (Join-Path $denied 'Start-PortableVM.ps1') -ErrorAction Stop } | Should -Throw
+            (Invoke-StickCompare -RepositoryPath $script:clone -OutputFolder $script:out -Folder $script:run -ListOnly).Lines[-1] | Should -BeLike 'RESULT: PASSED*'
+        } finally {
+            $null = & icacls.exe $denied /remove:d "$($env:USERNAME)"
+            $null = & icacls.exe (Join-Path $denied 'Start-PortableVM.ps1') /remove:d "$($env:USERNAME)"
+        }
+
         Copy-Item -LiteralPath $script:stick -Destination (Join-Path $TestDrive 'cstick2') -Recurse
         $result = Invoke-StickCompare -RepositoryPath $script:clone -OutputFolder $script:out -Folder $script:run -ListOnly
         $result.Lines[-1] | Should -BeLike 'RESULT: FAILED - found 2 folders with Launcher and LauncherData*'
