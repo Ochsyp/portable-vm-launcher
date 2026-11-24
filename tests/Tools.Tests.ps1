@@ -514,7 +514,7 @@ Describe 'Deploy-PortableVM keeps one previous launcher' -Tag 'WindowsOnly' {
         & $Damage
         $before = Get-TestTree -Root $script:target
         { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
-            Should -Throw -ExpectedMessage 'Launcher is not a launcher copy that a deploy wrote and nothing changed since (*), so replacing it would cost the copy in Launcher.previous, and nothing was changed. Rename Launcher.previous to keep it, then deploy again.'
+            Should -Throw -ExpectedMessage 'Launcher is not a launcher copy that a deploy wrote and nothing changed since (*), so replacing it would cost the copy in Launcher.previous, and nothing was changed. Rename Launcher.previous to keep it, then deploy again. The changed Launcher then becomes Launcher.previous, which the next deploy refuses until it is moved away.'
         Get-TestTree -Root $script:target | Should -BeExactly $before
     }
 
@@ -786,6 +786,25 @@ Describe 'Deploy-PortableVM keeps one previous launcher' -Tag 'WindowsOnly' {
             $before = Get-TestTree -Root $script:target
             { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
                 Should -Throw -ExpectedMessage 'Launcher already holds v2, file for file the commit this deploy would write, so nothing was changed. There is nothing to write again: a Launcher that differs from the clone in any file is replaced as usual.'
+            Get-TestTree -Root $script:target | Should -BeExactly $before
+        }
+
+        It 'names the root .cmd when it is the one file that differs' {
+            $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target
+            [IO.File]::AppendAllText((Join-Path $script:target 'Start VM.cmd'), "rem changed`r`n")
+            $before = Get-TestTree -Root $script:target
+            { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
+                Should -Throw -ExpectedMessage "Launcher already holds v2, file for file the commit this deploy would write, so nothing was changed and Launcher.previous keeps version v1. Only 'Start VM.cmd' at the stick's root differs from the clone's: copy the clone's 'Start VM.cmd' there by hand."
+            Get-TestTree -Root $script:target | Should -BeExactly $before
+        }
+
+        It 'keeps a removal left over while the root .cmd differs from the clone' {
+            $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target
+            Initialize-TestOwnCopy -Path $script:removal -Version 'v0'
+            [IO.File]::AppendAllText((Join-Path $script:target 'Start VM.cmd'), "rem changed`r`n")
+            $before = Get-TestTree -Root $script:target
+            { Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target } |
+                Should -Throw -ExpectedMessage "Launcher already holds v2, but 'Start VM.cmd' at the stick's root differs from the clone's, so Launcher.previous.remove stays and nothing was changed. Copy the clone's 'Start VM.cmd' to the stick's root, then deploy again."
             Get-TestTree -Root $script:target | Should -BeExactly $before
         }
 

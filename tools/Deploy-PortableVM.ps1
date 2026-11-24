@@ -742,8 +742,8 @@ function Move-DeployLegacyData {
 # failure after the first change says what is left to do. Returns Version; Mode, which is Install
 # (no Launcher folder), Update (settings in LauncherData), Migrate (schema 1 settings), Resume (a
 # migration that stopped after it created LauncherData) or Finish (Launcher holds this commit
-# already, and only a removal left by an earlier deploy is done); MovedCmdCount, the old launcher .cmd files
-# moved into Launcher.previous; Plan, a migration's plan (Get-DeployMigrationPlan); Applied, $false
+# already, and only a removal left by an earlier deploy is done); MovedCmdCount, the old launcher
+# .cmd files moved into Launcher.previous; Plan, a migration's plan (Get-DeployMigrationPlan); Applied, $false
 # under -WhatIf; PreviousVersion, what Launcher.previous holds afterwards; Removing and Removed,
 # the versions of the older copies it would delete and did delete; and RemovalProblem, why an older
 # copy stayed after a deploy that otherwise worked.
@@ -856,7 +856,7 @@ function Invoke-PvmDeploy {
                 throw ("Launcher does not match its SHA256SUMS ($($launcherCopy.Problem)), so the older copy in Launcher.previous.remove stays and nothing was changed. " +
                     "To go back, rename Launcher to another name, Launcher.previous to Launcher and Launcher.previous.remove to Launcher.previous, and move '$CmdName' from the new Launcher to the stick's root, over the one there. Then deploy again.")
             }
-            throw "Launcher is not a launcher copy that a deploy wrote and nothing changed since ($($launcherCopy.Problem)), so replacing it would cost the copy in Launcher.previous, and nothing was changed. Rename Launcher.previous to keep it, then deploy again."
+            throw "Launcher is not a launcher copy that a deploy wrote and nothing changed since ($($launcherCopy.Problem)), so replacing it would cost the copy in Launcher.previous, and nothing was changed. Rename Launcher.previous to keep it, then deploy again. The changed Launcher then becomes Launcher.previous, which the next deploy refuses until it is moved away."
         }
         if ($hasRemoval) {
             $finishRemoval = $true
@@ -903,9 +903,18 @@ function Invoke-PvmDeploy {
         try { $same = Test-DeployStagedCode -Folder $launcher -Sources $sources -Sums $sums -Version $version }
         catch { Write-Verbose "Launcher cannot be compared with the clone: $($_.Exception.Message)" }
         if ($same) {
+            # The root .cmd is part of the last check, so it must match before anything is deleted.
+            $cmdSame = $false
+            try { $cmdSame = (Test-Path -LiteralPath $cmdTarget -PathType Leaf) -and (Get-DeployHash -Path $cmdTarget) -eq (Get-DeployHash -Path $cmdSource) }
+            catch { Write-Verbose "The root .cmd cannot be compared with the clone: $($_.Exception.Message)" }
             if (-not $finishRemoval) {
                 $keeps = if ($hasPrevious) { " and Launcher.previous keeps version $($previousCopy.Version)" } else { '' }
-                throw "Launcher already holds $version, file for file the commit this deploy would write, so nothing was changed$keeps. There is nothing to write again: a Launcher that differs from the clone in any file is replaced as usual."
+                $next = if ($cmdSame) { ' There is nothing to write again: a Launcher that differs from the clone in any file is replaced as usual.' }
+                else { " Only '$CmdName' at the stick's root differs from the clone's: copy the clone's '$CmdName' there by hand." }
+                throw "Launcher already holds $version, file for file the commit this deploy would write, so nothing was changed$keeps.$next"
+            }
+            if (-not $cmdSame) {
+                throw "Launcher already holds $version, but '$CmdName' at the stick's root differs from the clone's, so Launcher.previous.remove stays and nothing was changed. Copy the clone's '$CmdName' to the stick's root, then deploy again."
             }
             $mode = 'Finish'
             $removing = @($removalCopy.Version)
@@ -930,7 +939,8 @@ function Invoke-PvmDeploy {
         PreviousVersion = $previousVersion; Removing = $removing; Removed = @(); RemovalProblem = ''
     }
     # The target is not named, since the stick's folder names can be private.
-    if (-not $PSCmdlet.ShouldProcess('the -Target folder', "Deploy the launcher $version")) { return $result }
+    $action = if ($mode -eq 'Finish') { 'Finish the removal of Launcher.previous.remove' } else { "Deploy the launcher $version" }
+    if (-not $PSCmdlet.ShouldProcess('the -Target folder', $action)) { return $result }
     # That was the one question -Confirm asks: the steps below run as one unit, without asking again.
     $ConfirmPreference = 'None'
 
