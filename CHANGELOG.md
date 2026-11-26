@@ -159,6 +159,16 @@ All notable changes to this project are listed here. The format follows
 - Tests of whole VMware starts and dry runs with VMware's blank at the end of the extent line and
   a tab at the end of the `createType` line: the disk file and its copies stay byte for byte as
   they were, so a later start path that compares the file another way fails a test.
+- A guided fix after a cut-off write (request r4). Where a start finds a write that did not
+  finish, it shows the step that sets it right as a question, with No as the default, and says
+  what a Yes puts aside. On Yes it takes exactly that step, checks the file again and goes on with
+  the start; it asks once for each such write. It deletes nothing: a file the step removes is
+  moved to `LauncherData\backups\removed\<date-time>`, under its path below the stick folder, so
+  each Yes can be undone. No, a closed box or a step the launcher cannot take by itself stops the
+  start as before, and so does any step while VMware, VirtualBox or VirtualBox's background
+  service runs, since they may hold or rewrite these files. A dry run asks nothing and changes
+  nothing; it logs that a real start would ask and ends with the step, as a No would. The
+  stick-check tool does not count what the fix put aside as a write that did not finish.
 
 ### Changed
 

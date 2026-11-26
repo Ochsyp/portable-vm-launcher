@@ -207,10 +207,11 @@ Describe 'Launcher sources' {
         $cmd | Should -Match ([regex]::Escape('-File "%~dp0Launcher\Start-PortableVM.ps1"'))
     }
 
-    It 'ask before a resume with No as the default answer' {
+    It 'ask before a resume and before a fix of a cut-off write, with No as the default answer' {
         $text = [IO.File]::ReadAllText($script:launcher)
         $text | Should -Match 'function Show-Question[\s\S]*MessageBoxButtons\]::YesNo[\s\S]*MessageBoxDefaultButton\]::Button2'
-        $text | Should -Match ([regex]::Escape('Invoke-PortableVM -LauncherPath $Here -DryRun:$DryRun -AskResume { param([string]$Question, [string]$Caption) Show-Question -Message $Question -Caption $Caption }'))
+        $text | Should -Match ([regex]::Escape('$ask = { param([string]$Question, [string]$Caption) Show-Question -Message $Question -Caption $Caption }'))
+        $text | Should -Match ([regex]::Escape('Invoke-PortableVM -LauncherPath $Here -DryRun:$DryRun -AskResume $ask -AskFix $ask'))
     }
 
     It 'keep the administrator-rights block of the script exactly as it was before the redesign' {
@@ -431,7 +432,7 @@ Describe 'Static guards' {
             $name = if ($parent) { $parent.Name } else { '' }
             $counts[$name] = 1 + [int]$counts[$name]
         }
-        $expected = @{ 'Invoke-PvmStopUnlessDryRun' = 1; 'Confirm-PvmResume' = 1; 'Invoke-PvmVMware' = 3; 'Invoke-PvmVirtualBox' = 2; 'Invoke-PortableVM' = 4 }
+        $expected = @{ 'Invoke-PvmStopUnlessDryRun' = 1; 'Confirm-PvmResume' = 1; 'Confirm-PvmLeftoverFix' = 1; 'Invoke-PvmVMware' = 3; 'Invoke-PvmVirtualBox' = 2; 'Invoke-PortableVM' = 4 }
         @($counts.Keys | Sort-Object | ForEach-Object { "$_=$($counts[$_])" }) | Should -BeExactly @($expected.Keys | Sort-Object | ForEach-Object { "$_=$($expected[$_])" })
     }
 
@@ -455,12 +456,16 @@ Describe 'Static guards' {
         }
     }
 
-    It 'let the module delete only the copies of its safe writes, and move or swap a file only to put the log aside and in the safe write' {
+    It 'let the module delete only the copies of its safe writes, and move or swap a file only to put the log aside, in the safe write and in the guided fix' {
         $ast = Get-SourceAst -Path $script:module
         Get-SourceCommand -Ast $ast | Where-Object { $_.Name -in 'Remove-Item', 'Move-Item', 'Rename-Item', 'Clear-Content', 'Clear-Item' } |
             ForEach-Object { "$($_.Name) at line $($_.Line)" } | Should -BeNullOrEmpty
         # A new place that deletes, moves, copies or swaps a file needs a change of this map on purpose.
-        @(Get-SourceFileChange -Ast $ast | Sort-Object) | Should -BeExactly @('Delete in Remove-PvmWriteCopy', 'Move in Move-PvmOldLog', 'Move in Write-PvmFile', 'Replace in Switch-PvmFile')
+        @(Get-SourceFileChange -Ast $ast | Sort-Object) | Should -BeExactly @('Delete in Remove-PvmWriteCopy', 'Move in Move-PvmLeftoverFile', 'Move in Move-PvmOldLog', 'Move in Write-PvmFile', 'Replace in Switch-PvmFile')
+        # The guided fix moves files only through Repair-PvmLeftover, which checks each move
+        # against the file whose write was cut off and its two copies, and runs only after a Yes.
+        @(Get-SourceCommand -Ast $ast | Where-Object { $_.Name -eq 'Move-PvmLeftoverFile' } | ForEach-Object { $_.Function } | Sort-Object -Unique) | Should -BeExactly @('Repair-PvmLeftover')
+        @(Get-SourceCommand -Ast $ast | Where-Object { $_.Name -eq 'Repair-PvmLeftover' } | ForEach-Object { $_.Function }) | Should -BeExactly @('Assert-PvmNoWrittenLeftover')
     }
 
     It 'let the module write files only through Write-PvmFile, the log aside' {
@@ -489,10 +494,12 @@ Describe 'Static guards' {
     It 'word every log cause after "because" in the module through Format-PvmBecause' {
         # A new sentence with a cause after "because" needs a change of these counts on purpose.
         # Get-PvmWriteCause words a cause of Windows through Format-PvmBecause too. The reason for a
-        # descriptor rewrite is no error, and Format-PvmDescriptorReason words it.
+        # descriptor rewrite is no error, and Format-PvmDescriptorReason words it. The guided fix
+        # holds its cause, worded by Format-PvmBecause, in $cause.
         $text = [IO.File]::ReadAllText($script:module)
-        [regex]::Matches($text, 'because \$').Count | Should -Be 5
+        [regex]::Matches($text, 'because \$').Count | Should -Be 6
         [regex]::Matches($text, 'because \$\((Format-PvmBecause -Cause|Get-PvmWriteCause -ErrorRecord|Format-PvmDescriptorReason -Kinds) ').Count | Should -Be 5
+        [regex]::Matches($text, '\$cause = Format-PvmBecause -Cause \(Get-PvmPathCause -Path \$step\.Path -ErrorRecord \$_\)').Count | Should -Be 1
     }
 
     It 'check the lock in the script before its administrator-rights block, and end the script there when another run holds it' {

@@ -1222,7 +1222,7 @@ function Get-PvmWriteCopyPath {
 # a copy below the backups, is that copy as it would be made of its file now: an old version that
 # holds exactly that is from a copy put back after a failed rewrite, so the copy put back stays,
 # also when its swap stopped between the two renames. An old version that cannot be read then
-# gets a step that does not guess.
+# gets a step that does not guess. Get-PvmLeftoverStep returns the same step as data.
 function Get-PvmLeftoverProblem {
     [CmdletBinding()]
     [OutputType([string])]
@@ -1230,31 +1230,89 @@ function Get-PvmLeftoverProblem {
         [Parameter(Mandatory)][string]$Path,
         [AllowNull()][AllowEmptyCollection()][byte[]]$Current
     )
+    $step = Get-PvmLeftoverStep -Path $Path -Current $Current
+    if ($step) { $step.Problem } else { '' }
+}
+
+# Return the step of Get-PvmLeftoverProblem for the file $Path as data, or $null when there is
+# none: its Path; the Problem, the sentence that names the step; PutAside, which says what a Yes
+# to it moves aside and what it keeps; and its Actions in the order that a fix takes them, each a
+# Remove of one Path or a Rename of one Path To another. A fix cut off between two actions leaves
+# a step of another kind, whose own actions finish it. A step without actions is one the launcher
+# does not take by itself.
+function Get-PvmLeftoverStep {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [AllowNull()][AllowEmptyCollection()][byte[]]$Current
+    )
     $copies = Get-PvmWriteCopyPath -Path $Path
     $temp = [IO.File]::Exists($copies.Temp)
     $old = [IO.File]::Exists($copies.Old)
-    if (-not $temp -and -not $old) { return '' }
+    if (-not $temp -and -not $old) { return $null }
     $name = [IO.Path]::GetFileName($Path)
     $repeats = $false
     if ($null -ne $Current -and $old) {
         try { $repeats = Test-PvmSameContent -Left ([IO.File]::ReadAllBytes($copies.Old)) -Right $Current }
-        catch { return "A write of $Path did not finish, and $name.pvm-old beside it cannot be read. Close the program that holds it, then start again." }
+        catch {
+            return (New-PvmLeftoverStep -Path $Path -Problem "A write of $Path did not finish, and $name.pvm-old beside it cannot be read. Close the program that holds it, then start again.")
+        }
     }
-    $step = if ([IO.File]::Exists($Path)) {
-        if ($temp -and $old) { "remove $name.pvm-tmp and $name.pvm-old; $name itself is whole" }
-        elseif ($temp) { "remove $name.pvm-tmp; $name itself is whole" }
-        elseif ($repeats) { "remove $name.pvm-old, which holds a copy of the file as it is now; $name itself is whole" }
-        else { "remove $name, then rename $name.pvm-old back to $name, which holds the version before the write" }
+    $removeTemp = @{ Do = 'Remove'; Path = $copies.Temp }
+    $removeOld = @{ Do = 'Remove'; Path = $copies.Old }
+    $whole = "$name stays as it is."
+    $kind = if ([IO.File]::Exists($Path)) {
+        # The old version goes first, so that a fix cut off after it leaves the new one alone.
+        if ($temp -and $old) { @{ Step = "remove $name.pvm-tmp and $name.pvm-old; $name itself is whole"; PutAside = $whole; Actions = @($removeOld, $removeTemp) } }
+        elseif ($temp) { @{ Step = "remove $name.pvm-tmp; $name itself is whole"; PutAside = $whole; Actions = @($removeTemp) } }
+        elseif ($repeats) { @{ Step = "remove $name.pvm-old, which holds a copy of the file as it is now; $name itself is whole"; PutAside = $whole; Actions = @($removeOld) } }
+        else {
+            @{ Step = "remove $name, then rename $name.pvm-old back to $name, which holds the version before the write"
+                PutAside = "A Yes puts aside $name as it is now, with all that was written to it since that write."
+                Actions = @(@{ Do = 'Remove'; Path = $Path }, @{ Do = 'Rename'; Path = $copies.Old; To = $Path })
+            }
+        }
     } elseif ($old -and $temp) {
         # The new copy was read back before the swap began, so it is whole.
-        if ($repeats) { "rename $name.pvm-tmp to $name and remove $name.pvm-old, which holds a copy of the file as it is now" }
-        else { "rename $name.pvm-old back to $name and remove $name.pvm-tmp" }
+        if ($repeats) {
+            $of = [IO.Path]::GetFileName($Path) -replace '\.(previous\.)?(orig|launcher-backup)\z', ''
+            @{ Step = "rename $name.pvm-tmp to $name and remove $name.pvm-old, which holds a copy of the file as it is now"
+                PutAside = "A Yes puts aside $name.pvm-old, which holds the same as a copy of $of made now."
+                Actions = @(@{ Do = 'Rename'; Path = $copies.Temp; To = $Path }, $removeOld)
+            }
+        } else {
+            @{ Step = "rename $name.pvm-old back to $name and remove $name.pvm-tmp"
+                PutAside = "A Yes puts aside $name.pvm-tmp, the new version that was not in place yet."
+                Actions = @(@{ Do = 'Rename'; Path = $copies.Old; To = $Path }, $removeTemp)
+            }
+        }
     } elseif ($old) {
-        "rename $name.pvm-old back to $name"
+        @{ Step = "rename $name.pvm-old back to $name"; PutAside = 'Nothing is put aside.'; Actions = @(@{ Do = 'Rename'; Path = $copies.Old; To = $Path }) }
     } else {
-        "remove $name.pvm-tmp, which may be incomplete"
+        @{ Step = "remove $name.pvm-tmp, which may be incomplete"; PutAside = "A Yes puts aside $name.pvm-tmp, which may be incomplete; $name stays missing."; Actions = @($removeTemp) }
     }
-    "A write of $Path did not finish. To set it right, $step."
+    New-PvmLeftoverStep -Path $Path -Problem "A write of $Path did not finish. To set it right, $($kind.Step)." -PutAside $kind.PutAside -Actions $kind.Actions
+}
+
+# Return a step of Get-PvmLeftoverStep: the file $Path, the sentence $Problem, what a Yes puts
+# aside ($PutAside) and the $Actions, hashtables with Do, Path and, for a Rename, To.
+function New-PvmLeftoverStep {
+    [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Builds an object; changes nothing.')]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Problem,
+        [string]$PutAside = '',
+        [hashtable[]]$Actions = @()
+    )
+    [pscustomobject]@{
+        Path     = $Path
+        Problem  = $Problem
+        PutAside = $PutAside
+        Actions  = @($Actions | ForEach-Object { [pscustomobject]@{ Do = $_.Do; Path = $_.Path; To = "$($_['To'])" } })
+    }
 }
 
 # Return the exception for a refusal of Write-PvmFile: $Message names no path, so that the deploy
@@ -1810,24 +1868,39 @@ function Get-PvmCopyLeftoverProblem {
         [Parameter(Mandatory)][string]$Of,
         [switch]$Disarm
     )
+    $step = Get-PvmCopyLeftoverStep -Path $Path -Of $Of -Disarm:$Disarm
+    if ($step) { $step.Problem } else { '' }
+}
+
+# Return the step of Get-PvmCopyLeftoverProblem as data, as Get-PvmLeftoverStep does, or $null.
+# Where the launcher cannot tell which version of the copy to keep, the step has no actions.
+function Get-PvmCopyLeftoverStep {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Of,
+        [switch]$Disarm
+    )
     $copies = Get-PvmWriteCopyPath -Path $Path
-    if (-not [IO.File]::Exists($copies.Old) -or [IO.File]::Exists($Path) -eq [IO.File]::Exists($copies.Temp)) { return (Get-PvmLeftoverProblem -Path $Path) }
+    if (-not [IO.File]::Exists($copies.Old) -or [IO.File]::Exists($Path) -eq [IO.File]::Exists($copies.Temp)) { return (Get-PvmLeftoverStep -Path $Path) }
     $now = Get-PvmCopyNow -Path $Of -Disarm:$Disarm
-    switch ($now.Reason) {
+    $problem = switch ($now.Reason) {
         'Missing' {
-            return ("A write of $Path did not finish, and $Of, which it is a copy of, is missing, so the launcher cannot tell which version of the copy to keep. " +
-                "Put $Of back, for example from its copies below LauncherData\backups, then start again.")
+            "A write of $Path did not finish, and $Of, which it is a copy of, is missing, so the launcher cannot tell which version of the copy to keep. " +
+            "Put $Of back, for example from its copies below LauncherData\backups, then start again."
         }
         'Folder' {
-            return ("A write of $Path did not finish, and a folder has the name of $Of, which it is a copy of, so the launcher cannot tell which version of the copy " +
-                "to keep. Move that folder away and put $Of back, then start again.")
+            "A write of $Path did not finish, and a folder has the name of $Of, which it is a copy of, so the launcher cannot tell which version of the copy " +
+            "to keep. Move that folder away and put $Of back, then start again."
         }
         'Unreadable' {
-            return ("A write of $Path did not finish, and the launcher cannot read $Of to tell which version of the copy to keep. " +
-                "Make $Of readable again, for example by closing the program that holds it, then start again.")
+            "A write of $Path did not finish, and the launcher cannot read $Of to tell which version of the copy to keep. " +
+            "Make $Of readable again, for example by closing the program that holds it, then start again."
         }
     }
-    Get-PvmLeftoverProblem -Path $Path -Current $now.Bytes
+    if ($problem) { return (New-PvmLeftoverStep -Path $Path -Problem $problem) }
+    Get-PvmLeftoverStep -Path $Path -Current $now.Bytes
 }
 
 # Throw a stop when the file $Path is read-only or a link, which the launcher does not rewrite.
@@ -2388,21 +2461,154 @@ function Get-PvmWrittenPath {
     }
 }
 
-# Stop a start, a dry run as it stops (Invoke-PvmStopUnlessDryRun), at a write that did not finish
-# of a file the start may write or of a copy of one (Get-PvmWrittenPath), with the step that sets
-# it right. A file's own step comes before its copies', which are checked against the file as it
-# is then.
+# At a write that did not finish of a file the start may write or of a copy of one
+# (Get-PvmWrittenPath), ask whether to take the step that sets it right (Confirm-PvmLeftoverFix),
+# and take it on Yes (Repair-PvmLeftover); else stop the start with that step, as for a step the
+# launcher does not take by itself, which a dry run logs as a stop. While VMware, VirtualBox or
+# its background service runs (Test-PvmHypervisorOpen), which may hold or rewrite these files, it
+# offers no fix and stops with the step. A dry run goes on with the files as they are, so its
+# later lines are those of a start that was not set right. A file's own step comes before its
+# copies', which are checked against the file as it is then: after its fix, or, while it is not
+# fixed, not at all.
 function Assert-PvmNoWrittenLeftover {
     [CmdletBinding()]
     param([Parameter(Mandatory)][pscustomobject]$Context)
     $broken = @{}
+    $open = $null
     foreach ($entry in @(Get-PvmWrittenPath -Context $Context)) {
         if ($entry.Of -and $broken.ContainsKey($entry.Of)) { continue }
-        $problem = if ($entry.Previous) { Get-PvmCopyLeftoverProblem -Path $entry.Path -Of $entry.Of -Disarm:$entry.Disarm } else { Get-PvmLeftoverProblem -Path $entry.Path }
-        if (-not $problem) { continue }
-        if (-not $entry.Of) { $broken[$entry.Path] = $true }
-        Invoke-PvmStopUnlessDryRun -Context $Context -Message "$problem Nothing was started."
+        $step = Get-PvmWrittenLeftoverStep -Entry $entry
+        if (-not $step) { continue }
+        if ($step.Actions.Count -and $null -eq $open) { $open = Test-PvmHypervisorOpen }
+        if (-not $step.Actions.Count -or $open) {
+            if (-not $entry.Of) { $broken[$entry.Path] = $true }
+            $why = if ($step.Actions.Count) { ' The launcher offers to do this only while VMware and VirtualBox are closed.' } else { '' }
+            Invoke-PvmStopUnlessDryRun -Context $Context -Message "$($step.Problem)$why Nothing was started."
+            continue
+        }
+        if (-not (Confirm-PvmLeftoverFix -Context $Context -Step $step)) {
+            if (-not $entry.Of) { $broken[$entry.Path] = $true }
+            continue
+        }
+        try { Repair-PvmLeftover -Context $Context -Step $step }
+        catch {
+            if (-not (Test-PvmWriteError -ErrorRecord $_)) { throw }
+            $cause = Format-PvmBecause -Cause (Get-PvmPathCause -Path $step.Path -ErrorRecord $_)
+            $left = Get-PvmWrittenLeftoverStep -Entry $entry
+            $rest = if ($left) { " $($left.Problem)" } else { '' }
+            throw (Get-PvmStopException -Message "The launcher could not finish setting right the write of $($step.Path), because $cause.$rest Nothing was started.")
+        }
+        $left = Get-PvmWrittenLeftoverStep -Entry $entry
+        if ($left) { throw (Get-PvmStopException -Message "$($left.Problem) Nothing was started.") }
     }
+}
+
+# Return whether VMware Workstation, VirtualBox, a VM of either, or VirtualBox's background
+# service in this Windows session runs, any of which may hold or rewrite the files a fix changes.
+function Test-PvmHypervisorOpen {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+    if (@(Invoke-PvmGetProcess -Name 'vmware', 'vmware-vmx', 'VirtualBox', 'VirtualBoxVM', 'VBoxHeadless').Count) { return $true }
+    [bool](Invoke-PvmTestProcess -Name 'VBoxSVC')
+}
+
+# Return the step for a write that did not finish of the file or copy $Entry of Get-PvmWrittenPath,
+# or $null.
+function Get-PvmWrittenLeftoverStep {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param([Parameter(Mandatory)][pscustomobject]$Entry)
+    if ($Entry.Previous) { Get-PvmCopyLeftoverStep -Path $Entry.Path -Of $Entry.Of -Disarm:$Entry.Disarm }
+    else { Get-PvmLeftoverStep -Path $Entry.Path }
+}
+
+# Ask, through the script block $Context.AskFix, whether to take the step $Step of
+# Get-PvmLeftoverStep, with the dialog's title $Context.Caption, and log a Yes. The question says
+# what a Yes puts aside, and where. Returns $true on Yes. Throws the stop with the step when the
+# answer is No, when there is no way to ask, or when the script block returns anything but a single
+# $true. A dry run asks nothing: it logs that a real start would ask, takes the step as its result
+# when it has none yet, as a real start answered No would end, and returns $false.
+function Confirm-PvmLeftoverFix {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][pscustomobject]$Step
+    )
+    if ($Context.DryRun) {
+        Write-PvmLog -Path $Context.LogPath -Message "DRY RUN - a real start would ask whether to set it right: $($Step.Problem)"
+        if (-not $Context.WouldStop) { $Context.WouldStop = "$($Step.Problem) Nothing was started." }
+        return $false
+    }
+    $aside = if (@($Step.Actions | Where-Object { $_.Do -eq 'Remove' }).Count) { " A Yes moves each file it removes to $(Get-PvmRemovedFolder -Context $Context) rather than delete it." } else { '' }
+    $question = "$($Step.Problem)`n`n$($Step.PutAside)$aside`n`nDo it now?"
+    $before = $Context.Step
+    Enter-PvmStep -Context $Context -Name 'question'
+    $answer = if ($null -ne $Context.AskFix) { $Context.AskFix.InvokeReturnAsIs($question, $Context.Caption) } else { $null }
+    Enter-PvmStep -Context $Context -Name $before
+    if (-not ($answer -is [bool] -and $answer)) { throw (Get-PvmStopException -Message "$($Step.Problem) Nothing was started.") }
+    Write-PvmLog -Path $Context.LogPath -Message "Fix confirmed: $($Step.Problem)"
+    $true
+}
+
+# Return the folder, below LauncherData\backups\removed and named for the time of the run's first
+# fix to the millisecond, into which the guided fix moves what it removes; the same for every fix of the run.
+function Get-PvmRemovedFolder {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][pscustomobject]$Context)
+    if (-not $Context.RemovedFolder) {
+        $Context.RemovedFolder = Join-Path (Join-Path $Context.Backups 'removed') (Get-PvmNow).ToString('yyyyMMdd-HHmmss-fff', [Globalization.CultureInfo]::InvariantCulture)
+    }
+    $Context.RemovedFolder
+}
+
+# Take the step $Step of Get-PvmLeftoverStep, one action at a time: a Remove moves the file into
+# the run's folder below LauncherData\backups\removed (Get-PvmRemovedFolder), under its path below
+# the stick folder, and a Rename gives a copy the file's name; neither replaces a file. Each action
+# may touch only the file $Step.Path and its two copies, .pvm-tmp and .pvm-old, and a Rename only
+# gives a copy the file's name; else it throws before it moves anything. Each move is logged.
+function Repair-PvmLeftover {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][pscustomobject]$Step
+    )
+    $copies = Get-PvmWriteCopyPath -Path $Step.Path
+    $own = @($Step.Path, $copies.Temp, $copies.Old)
+    foreach ($action in $Step.Actions) {
+        $fits = if ($action.Do -eq 'Remove') { $own -ccontains $action.Path }
+        elseif ($action.Do -eq 'Rename') { ($action.Path -ceq $copies.Temp -or $action.Path -ceq $copies.Old) -and $action.To -ceq $Step.Path }
+        else { $false }
+        if (-not $fits) {
+            $name = [IO.Path]::GetFileName($Step.Path)
+            throw "A fix of the write of $($Step.Path) touches only $name, $name.pvm-tmp and $name.pvm-old, and renames a copy only to $name."
+        }
+    }
+    $root = $Context.Root.TrimEnd('\', '/')
+    foreach ($action in $Step.Actions) {
+        if ($action.Do -eq 'Rename') {
+            Move-PvmLeftoverFile -Path $action.Path -Destination $action.To
+            Write-PvmLog -Path $Context.LogPath -Message "Renamed: $($action.Path) -> $($action.To)"
+            continue
+        }
+        $below = if ($action.Path.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { $action.Path.Substring($root.Length + 1) } else { [IO.Path]::GetFileName($action.Path) }
+        $target = Join-Path (Get-PvmRemovedFolder -Context $Context) $below
+        $null = [IO.Directory]::CreateDirectory((Split-Path $target))
+        Move-PvmLeftoverFile -Path $action.Path -Destination $target
+        Write-PvmLog -Path $Context.LogPath -Message "Moved aside: $($action.Path) -> $target"
+    }
+}
+
+# Move the file $Path to $Destination, which must not exist, for the guided fix. Tests mock this.
+function Move-PvmLeftoverFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    [IO.File]::Move($Path, $Destination)
 }
 
 # Stop the launcher when $State, from Get-PvmVMwareState or Get-PvmVirtualBoxState, is Unknown:
@@ -3018,6 +3224,7 @@ function Invoke-PvmLaunch {
 # no VM file and starts nothing; where a real start would stop it logs so and carries on, and its
 # result is the first such stop. Before a saved state is resumed, the script block $AskResume gets
 # the question and the dialog's title and must return $true for Yes; without it the answer is No.
+# $AskFix does the same before the launcher sets right a write that did not finish.
 # Returns ExitCode, 0 or 1, the Message to show with its Icon, both empty when there is nothing to
 # show, and the Caption for the dialog. Stops and unexpected errors, which name the step they
 # happened in, are logged to LauncherData\logs\launcher.log as "STOPPED: ..." and returned; every
@@ -3032,7 +3239,8 @@ function Invoke-PortableVM {
     param(
         [Parameter(Mandatory)][string]$LauncherPath,
         [switch]$DryRun,
-        [scriptblock]$AskResume
+        [scriptblock]$AskResume,
+        [scriptblock]$AskFix
     )
     $paths = Get-PvmDataPath -LauncherPath $LauncherPath
     if (-not (Test-Path -LiteralPath $paths.Data -PathType Container)) {
@@ -3061,6 +3269,8 @@ function Invoke-PortableVM {
         Location        = $null
         DryRun          = [bool]$DryRun
         AskResume       = $AskResume
+        AskFix          = $AskFix
+        RemovedFolder   = ''
         Names           = @{ VM = 'the VM'; Guest = 'the guest' }
         Caption         = 'Portable VM'
         VMwareState     = $null

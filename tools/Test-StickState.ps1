@@ -93,6 +93,19 @@ function Get-StateCopyDisarmed {
     if ($armed.Count) { 'no' } else { 'yes' }
 }
 
+# Return whether the file $Path lies below LauncherData\backups\removed of the stick folder
+# $Target, where the launcher's guided fix puts aside what it removes.
+function Test-StatePutAside {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Target
+    )
+    $removed = (Join-Path $Target 'LauncherData\backups\removed').TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    $Path.StartsWith($removed, [StringComparison]::OrdinalIgnoreCase)
+}
+
 # Check the stick folder $Target ('' to find it) with the launcher's module from the clone
 # $RepositoryPath, as the header of this file describes, at the time $Now. Returns ExitCode (0 when
 # nothing needs attention, 1 when something does, 2 when the check cannot run) and Lines, what it
@@ -155,7 +168,7 @@ function Invoke-StickState {
         $unread = @()
         $pending = @(Get-ChildItem -LiteralPath $Target -Force -ErrorAction SilentlyContinue -ErrorVariable +unread | Where-Object { $CompareSkippedNames -notcontains $_.Name } | ForEach-Object {
                 if ($_.PSIsContainer) { Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue -ErrorVariable +unread } else { $_ }
-            } | Where-Object { $_.Name -like '*.pvm-tmp' -or $_.Name -like '*.pvm-old' })
+            } | Where-Object { ($_.Name -like '*.pvm-tmp' -or $_.Name -like '*.pvm-old') -and -not (Test-StatePutAside -Path $_.FullName -Target $Target) })
         Add-StateLine "  writes that did not finish (.pvm-tmp or .pvm-old files): $($pending.Count)$(if ($unread.Count) { ', but some folders could not be read' })"
         $stops = $false
         if ($settings) {
@@ -170,7 +183,7 @@ function Invoke-StickState {
             } catch {
                 $answer = 'unknown, since a file cannot be read now'
             }
-            Add-StateLine "  the next start would stop at a write that did not finish: $answer"
+            Add-StateLine "  the next start would ask about or stop at a write that did not finish: $answer"
         }
         if ($pending.Count -or $stops) { $attention.Add('writes that did not finish') }
         $deployLeft = @($CompareLeftoverNames | Where-Object { Test-Path -LiteralPath (Join-Path $Target $_) })

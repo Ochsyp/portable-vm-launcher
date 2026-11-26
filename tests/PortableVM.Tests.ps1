@@ -218,6 +218,8 @@ BeforeAll {
             elseif ($line.StartsWith('DRY RUN - a real start would stop here: ')) { 'STOPPED: ' + $line.Substring(40); $cut = $true }
             elseif ($line.StartsWith('STOPPED: ')) { $line; $cut = $true }
             elseif ($line -match '\ADRY RUN - a real start would ask whether to resume the saved state in (\w+)\.\z') { "Resume of the saved state in $($Matches[1]) confirmed." }
+            # A dry run ends at a fix it would ask about as a real start answered No.
+            elseif ($line.StartsWith('DRY RUN - a real start would ask whether to set it right: ')) { 'STOPPED: ' + $line.Substring(58) + ' Nothing was started.'; $cut = $true }
             elseif ($line.StartsWith('DRY RUN - would start ') -or $line.StartsWith('Started with ')) { 'START' }
             elseif ($line.StartsWith('VirtualBox VM state: ')) { continue }
             else { $line }
@@ -1994,7 +1996,7 @@ Describe 'A start' {
                 $result.ExitCode | Should -Be 1
                 $result.Message | Should -BeExactly $expected
             }
-            Get-TestLog -Path $script:stick.Log | Should -Contain "DRY RUN - a real start would stop here: $expected"
+            Get-TestLog -Path $script:stick.Log | Should -Contain "DRY RUN - a real start would ask whether to set it right: $stop"
             Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
         }
 
@@ -3428,6 +3430,279 @@ Describe 'Timings' {
     }
 }
 
+Describe 'A guided fix after a cut-off write' {
+    BeforeEach {
+        $script:stick = Initialize-TestStick -Name 'fix-stick'
+        Set-TestPc -Stick $script:stick -Installed 'VMware'
+        Mock -ModuleName PortableVM Get-PvmNow { [DateTimeOffset]::new(2026, 11, 12, 10, 15, 30, 123, [TimeSpan]::FromHours(1)) }
+        $script:xml = $script:stick.VirtualBoxXml
+        $script:copy = Join-Path $script:stick.Backups 'VirtualBox\VirtualBox.xml.previous.launcher-backup'
+        $script:removed = Join-Path $script:stick.Backups 'removed\20261112-101530-123'
+        $script:now = [IO.File]::ReadAllText($script:xml)
+        $script:before = $script:now.Replace('version="1.12-windows"', 'version="1.12-windows" before="1"')
+        $script:new = $script:now.Replace('version="1.12-windows"', 'version="1.12-windows" new="1"')
+        $script:questions = [Collections.Generic.List[string]]::new()
+    }
+    AfterEach { Remove-Item -LiteralPath $script:stick.Root -Recurse -Force }
+
+    BeforeAll {
+        # Return the text of each file in $Paths, '-' for one that is missing.
+        function Get-TestFileText {
+            param([string[]]$Paths)
+            foreach ($path in $Paths) { if ([IO.File]::Exists($path)) { [IO.File]::ReadAllText($path) } else { '-' } }
+        }
+    }
+
+    It 'asks about <Case> with what a Yes puts aside, does exactly the step on Yes, keeps what it removes and starts the VM' -ForEach @(
+        @{ Case = 'a new version beside a whole file'; File = 'xml'; Setup = @{ Tmp = 'new' }
+            Step = 'remove VirtualBox.xml.pvm-tmp; VirtualBox.xml itself is whole'
+            PutAside = 'VirtualBox.xml stays as it is.'
+            After = @{ File = 'now'; Tmp = '-'; Old = '-' }; Removed = @{ Tmp = 'new' }
+        }
+        @{ Case = 'both copies beside a whole file'; File = 'xml'; Setup = @{ Tmp = 'new'; Old = 'before' }
+            Step = 'remove VirtualBox.xml.pvm-tmp and VirtualBox.xml.pvm-old; VirtualBox.xml itself is whole'
+            PutAside = 'VirtualBox.xml stays as it is.'
+            After = @{ File = 'now'; Tmp = '-'; Old = '-' }; Removed = @{ Tmp = 'new'; Old = 'before' }
+        }
+        @{ Case = 'the version before beside the file'; File = 'xml'; Setup = @{ Old = 'before' }
+            Step = 'remove VirtualBox.xml, then rename VirtualBox.xml.pvm-old back to VirtualBox.xml, which holds the version before the write'
+            PutAside = 'A Yes puts aside VirtualBox.xml as it is now, with all that was written to it since that write.'
+            After = @{ File = 'before'; Tmp = '-'; Old = '-' }; Removed = @{ File = 'now' }
+        }
+        @{ Case = 'the version before and a new version without the file'; File = 'xml'; Setup = @{ File = $null; Tmp = 'new'; Old = 'before' }
+            Step = 'rename VirtualBox.xml.pvm-old back to VirtualBox.xml and remove VirtualBox.xml.pvm-tmp'
+            PutAside = 'A Yes puts aside VirtualBox.xml.pvm-tmp, the new version that was not in place yet.'
+            After = @{ File = 'before'; Tmp = '-'; Old = '-' }; Removed = @{ Tmp = 'new' }
+        }
+        @{ Case = 'the version before alone'; File = 'xml'; Setup = @{ File = $null; Old = 'before' }
+            Step = 'rename VirtualBox.xml.pvm-old back to VirtualBox.xml'
+            PutAside = 'Nothing is put aside.'
+            After = @{ File = 'before'; Tmp = '-'; Old = '-' }; Removed = @{}
+        }
+        @{ Case = 'a new version alone'; File = 'xml'; Setup = @{ File = $null; Tmp = 'new' }
+            Step = 'remove VirtualBox.xml.pvm-tmp, which may be incomplete'
+            PutAside = 'A Yes puts aside VirtualBox.xml.pvm-tmp, which may be incomplete; VirtualBox.xml stays missing.'
+            After = @{ File = '-'; Tmp = '-'; Old = '-' }; Removed = @{ Tmp = 'new' }
+        }
+        @{ Case = 'a version before beside a copy that equals a copy made now'; File = 'copy'; Setup = @{ File = 'before'; Old = 'now' }
+            Step = 'remove VirtualBox.xml.previous.launcher-backup.pvm-old, which holds a copy of the file as it is now; VirtualBox.xml.previous.launcher-backup itself is whole'
+            PutAside = 'VirtualBox.xml.previous.launcher-backup stays as it is.'
+            After = @{ File = 'before'; Tmp = '-'; Old = '-' }; Removed = @{ Old = 'now' }
+        }
+        @{ Case = 'a copy put back whose swap stopped between the two renames'; File = 'copy'; Setup = @{ File = $null; Tmp = 'before'; Old = 'now' }
+            Step = 'rename VirtualBox.xml.previous.launcher-backup.pvm-tmp to VirtualBox.xml.previous.launcher-backup and remove VirtualBox.xml.previous.launcher-backup.pvm-old, which holds a copy of the file as it is now'
+            PutAside = 'A Yes puts aside VirtualBox.xml.previous.launcher-backup.pvm-old, which holds the same as a copy of VirtualBox.xml made now.'
+            After = @{ File = 'before'; Tmp = '-'; Old = '-' }; Removed = @{ Old = 'now' }
+        }
+    ) {
+        $path = if ($File -eq 'xml') { $script:xml } else { $script:copy }
+        $paths = @{ File = $path; Tmp = "$path.pvm-tmp"; Old = "$path.pvm-old" }
+        $texts = @{ now = $script:now; before = $script:before; new = $script:new }
+        if ($File -eq 'copy' -and -not $Setup.ContainsKey('File')) { throw 'A copy case names its file.' }
+        foreach ($key in 'File', 'Tmp', 'Old') {
+            if (-not $Setup.ContainsKey($key)) { continue }
+            if ($null -eq $Setup[$key]) { Remove-Item -LiteralPath $paths[$key] -ErrorAction SilentlyContinue }
+            else { Write-TestFile -Path $paths[$key] -Text $texts[$Setup[$key]] }
+        }
+        $problem = "A write of $path did not finish. To set it right, $Step."
+        $relative = $path.Substring($script:stick.Root.Length + 1)
+        $aside = if ($Removed.Count) { " A Yes moves each file it removes to $script:removed rather than delete it." } else { '' }
+
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskFix { param($Question, $Caption) $script:questions.Add("$Caption|$Question"); $true }
+
+        $result.ExitCode | Should -Be 0 -Because $result.Message
+        @($script:questions) | Should -BeExactly @("Portable VM|$problem`n`n$PutAside$aside`n`nDo it now?")
+        foreach ($key in 'File', 'Tmp', 'Old') {
+            $expected = if ($After[$key] -eq '-') { '-' } else { $texts[$After[$key]] }
+            Get-TestFileText -Paths $paths[$key] | Should -BeExactly $expected -Because "$key after the fix"
+        }
+        $kept = @(if (Test-Path -LiteralPath $script:removed) { Get-ChildItem -LiteralPath $script:removed -Recurse -File | ForEach-Object { $_.FullName.Substring($script:removed.Length + 1) } })
+        $names = @{ File = $relative; Tmp = "$relative.pvm-tmp"; Old = "$relative.pvm-old" }
+        @($kept | Sort-Object) | Should -BeExactly @($Removed.Keys | ForEach-Object { $names[$_] } | Sort-Object)
+        foreach ($key in $Removed.Keys) { Get-TestFileText -Paths (Join-Path $script:removed $names[$key]) | Should -BeExactly $texts[$Removed[$key]] }
+        $log = Get-TestLog -Path $script:stick.Log
+        $log | Should -Contain "Fix confirmed: $problem"
+        foreach ($key in $Removed.Keys) { $log | Should -Contain "Moved aside: $($paths[$key]) -> $(Join-Path $script:removed $names[$key])" }
+        Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
+    }
+
+    It 'stops as before and changes nothing when the answer is <Case>' -ForEach @(
+        @{ Case = 'No'; Ask = { $false } }
+        @{ Case = 'a closed box'; Ask = { $null } }
+        @{ Case = 'a stray text'; Ask = { 'yes' } }
+        @{ Case = 'two Yes'; Ask = { $true; $true } }
+        @{ Case = 'missing, as there is no way to ask'; Ask = $null }
+    ) {
+        Write-TestFile -Path "$script:xml.pvm-old" -Text $script:before
+        $tree = Get-TestTreeHash -Root $script:stick.Root
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskFix $Ask
+        $result.ExitCode | Should -Be 1
+        $result.Message | Should -BeExactly ("A write of $script:xml did not finish. To set it right, remove VirtualBox.xml, then rename VirtualBox.xml.pvm-old back to VirtualBox.xml, " +
+            'which holds the version before the write. Nothing was started.')
+        $after = Get-TestTreeHash -Root $script:stick.Root
+        @($after.Keys | Sort-Object) | Should -BeExactly @($tree.Keys | Sort-Object)
+        foreach ($key in $tree.Keys) { $after[$key] | Should -BeExactly $tree[$key] }
+        Get-TestLog -Path $script:stick.Log | Where-Object { $_ -like 'Fix confirmed*' -or $_ -like 'Moved aside*' -or $_ -like 'Renamed*' } | Should -BeNullOrEmpty
+        Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+    }
+
+    It 'asks nothing and changes nothing, a dry run too, while <Case> runs' -ForEach @(
+        @{ Case = 'a VM in VMware'; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'vmware-vmx.exe'; CommandLine = $null }) } }
+        @{ Case = 'VMware Workstation'; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'vmware.exe'; CommandLine = $null }) } }
+        @{ Case = 'VirtualBox'; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'VirtualBox.exe'; CommandLine = $null }) } }
+        @{ Case = 'a VM in VirtualBox'; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'VBoxHeadless.exe'; CommandLine = $null }) } }
+        @{ Case = 'VirtualBox''s background service'; Setup = { Mock -ModuleName PortableVM Invoke-PvmTestProcess { $true } -ParameterFilter { $Name -eq 'VBoxSVC' } } }
+    ) {
+        & $Setup
+        Write-TestFile -Path "$script:xml.pvm-old" -Text $script:before
+        $tree = Get-TestTreeHash -Root $script:stick.Root
+        $expected = ("A write of $script:xml did not finish. To set it right, remove VirtualBox.xml, then rename VirtualBox.xml.pvm-old back to VirtualBox.xml, " +
+            'which holds the version before the write. The launcher offers to do this only while VMware and VirtualBox are closed. Nothing was started.')
+        foreach ($dryRun in $false, $true) {
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun -AskFix { throw 'Nothing must be asked.' }
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly $expected
+        }
+        $after = Get-TestTreeHash -Root $script:stick.Root
+        @($after.Keys | Sort-Object) | Should -BeExactly @($tree.Keys | Sort-Object)
+        foreach ($key in $tree.Keys) { $after[$key] | Should -BeExactly $tree[$key] }
+        Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+    }
+
+    It 'puts back the version before of the VMware descriptor on Yes, then points it at the stick and keeps its copies in the same start' {
+        $disarmed = (Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', '\\.\PortableVM-disarmed')
+        Rename-Item -LiteralPath $script:stick.VMwareDisk -NewName 'stick.vmdk.pvm-old'
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskFix { $true }
+        $result.ExitCode | Should -Be 0 -Because $result.Message
+        "$($script:stick.VMwareDisk).pvm-old" | Should -Not -Exist
+        [IO.File]::ReadAllText($script:stick.VMwareDisk) | Should -BeLike '*RW 2500000 FLAT "\\.\PhysicalDrive3" 0*'
+        [IO.File]::ReadAllText((Join-Path $script:stick.Backups 'VMware\stick.vmdk.orig')) | Should -BeExactly $disarmed
+        [IO.File]::ReadAllText((Join-Path $script:stick.Backups 'VMware\stick.vmdk.previous.orig')) | Should -BeExactly $disarmed
+        $log = Get-TestLog -Path $script:stick.Log
+        $log | Should -Contain "Renamed: $($script:stick.VMwareDisk).pvm-old -> $($script:stick.VMwareDisk)"
+        $log | Should -Contain 'stick.vmdk: rewritten because the disk device, a size and the number of extents differ'
+        Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
+    }
+
+    It 'asks once for each leftover, in order, and stops at the first No with that one''s step' {
+        Write-TestFile -Path "$($script:stick.VMwareDisk).pvm-tmp" -Text 'x'
+        Write-TestFile -Path "$script:xml.pvm-tmp" -Text $script:new
+        $script:answers = [Collections.Generic.Queue[bool]]::new([bool[]]@($true, $false))
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskFix { param($Question) $script:questions.Add($Question); $script:answers.Dequeue() }
+        $result.ExitCode | Should -Be 1
+        $result.Message | Should -BeExactly "A write of $script:xml did not finish. To set it right, remove VirtualBox.xml.pvm-tmp; VirtualBox.xml itself is whole. Nothing was started."
+        $script:questions.Count | Should -Be 2
+        $script:questions[0] | Should -BeLike "A write of $($script:stick.VMwareDisk) did not finish.*"
+        $script:questions[1] | Should -BeLike "A write of $script:xml did not finish.*"
+        "$($script:stick.VMwareDisk).pvm-tmp" | Should -Not -Exist
+        Join-Path $script:removed 'VMware\stick.vmdk.pvm-tmp' | Should -Exist
+        "$script:xml.pvm-tmp" | Should -Exist
+        Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskFix { $true }
+        $result.ExitCode | Should -Be 0 -Because $result.Message
+        "$script:xml.pvm-tmp" | Should -Not -Exist
+        Join-Path $script:removed 'VirtualBox\VirtualBox.xml.pvm-tmp' | Should -Exist
+        Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
+    }
+
+    It 'checks the copies of a file against the file as the fix left it' {
+        # The version before goes back in place of VirtualBox.xml; its copy below the backups
+        # holds that version, so the copy's step is to remove the old version beside it.
+        Write-TestFile -Path "$script:xml.pvm-old" -Text $script:before
+        Write-TestFile -Path $script:copy -Text $script:new
+        Write-TestFile -Path "$script:copy.pvm-old" -Text $script:before
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskFix { param($Question) $script:questions.Add($Question); $true }
+        $result.ExitCode | Should -Be 0 -Because $result.Message
+        $script:questions.Count | Should -Be 2
+        $script:questions[1] | Should -BeLike "A write of $script:copy did not finish. To set it right, remove VirtualBox.xml.previous.launcher-backup.pvm-old, which holds a copy of the file as it is now;*"
+        [IO.File]::ReadAllText($script:xml) | Should -BeExactly $script:before
+        [IO.File]::ReadAllText($script:copy) | Should -BeExactly $script:new
+        "$script:copy.pvm-old" | Should -Not -Exist
+    }
+
+    It 'asks nothing in a dry run, changes nothing, logs that a real start would ask and ends with the step as a No would' {
+        Write-TestFile -Path "$script:xml.pvm-old" -Text $script:before
+        $tree = Get-TestTreeHash -Root $script:stick.Root
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun -AskFix { throw 'A dry run must not ask.' }
+        $result.ExitCode | Should -Be 1
+        $result.Message | Should -BeExactly ("A write of $script:xml did not finish. To set it right, remove VirtualBox.xml, then rename VirtualBox.xml.pvm-old back to VirtualBox.xml, " +
+            'which holds the version before the write. Nothing was started.')
+        $after = Get-TestTreeHash -Root $script:stick.Root
+        @($after.Keys | Sort-Object) | Should -BeExactly @($tree.Keys | Sort-Object)
+        foreach ($key in $tree.Keys) { $after[$key] | Should -BeExactly $tree[$key] }
+        Get-TestLog -Path $script:stick.Log | Should -Contain ("DRY RUN - a real start would ask whether to set it right: A write of $script:xml did not finish. To set it right, " +
+            'remove VirtualBox.xml, then rename VirtualBox.xml.pvm-old back to VirtualBox.xml, which holds the version before the write.')
+        Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+    }
+
+    It 'stops with the step that is left when the fix fails halfway, and the next start offers that step' {
+        Write-TestFile -Path "$script:xml.pvm-old" -Text $script:before
+        $script:failRename = $true
+        Mock -ModuleName PortableVM Move-PvmLeftoverFile {
+            if ($script:failRename -and $Destination -eq $script:xml) { throw [IO.IOException]::new('The process cannot access the file.', [int]0x80070020) }
+            [IO.File]::Move($Path, $Destination)
+        }
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskFix { $true }
+        $result.ExitCode | Should -Be 1
+        $result.Message | Should -BeExactly ("The launcher could not finish setting right the write of $script:xml, because it is open in another program. " +
+            "A write of $script:xml did not finish. To set it right, rename VirtualBox.xml.pvm-old back to VirtualBox.xml. Nothing was started.")
+        $script:xml | Should -Not -Exist
+        Join-Path $script:removed 'VirtualBox\VirtualBox.xml' | Should -Exist
+        Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+
+        $script:failRename = $false
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskFix { param($Question) $script:questions.Add($Question); $true }
+        $result.ExitCode | Should -Be 0 -Because $result.Message
+        $script:questions[0] | Should -BeExactly "A write of $script:xml did not finish. To set it right, rename VirtualBox.xml.pvm-old back to VirtualBox.xml.`n`nNothing is put aside.`n`nDo it now?"
+        [IO.File]::ReadAllText($script:xml) | Should -BeExactly $script:before
+        Get-TestLog -Path $script:stick.Log | Should -Contain "Renamed: $script:xml.pvm-old -> $script:xml"
+    }
+
+    It 'asks nothing, a dry run too, when it cannot tell which version to keep: <Case>' -ForEach @(
+        @{ Case = 'the file of a copy is missing'; Setup = {
+                Write-TestFile -Path $script:copy -Text $script:new
+                Write-TestFile -Path "$script:copy.pvm-old" -Text $script:before
+                Remove-Item -LiteralPath $script:xml
+            }
+            Message = 'A write of <copy> did not finish, and <xml>, which it is a copy of, is missing, so the launcher cannot tell which version of the copy to keep.*'
+        }
+        @{ Case = 'a folder has the name of the file of a copy'; Setup = {
+                Write-TestFile -Path $script:copy -Text $script:new
+                Write-TestFile -Path "$script:copy.pvm-old" -Text $script:before
+                Remove-Item -LiteralPath $script:xml
+                $null = New-Item -ItemType Directory -Path $script:xml
+            }
+            Message = 'A write of <copy> did not finish, and a folder has the name of <xml>, which it is a copy of,*'
+        }
+    ) {
+        & $Setup
+        $expected = $Message.Replace('<copy>', $script:copy).Replace('<xml>', $script:xml)
+        foreach ($dryRun in $false, $true) {
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun -AskFix { throw 'Nothing must be asked.' }
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeLike $expected
+        }
+        Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+    }
+
+    It 'refuses a step that would touch any file but the one written and its two copies' {
+        Write-TestFile -Path "$script:xml.pvm-tmp" -Text $script:new
+        $other = Join-Path $script:stick.Root 'VMware\Test VM.vmx'
+        $tree = Get-TestTreeHash -Root $script:stick.Root
+        InModuleScope PortableVM -Parameters @{ Stick = $script:stick; Xml = $script:xml; Other = $other } {
+            param($Stick, $Xml, $Other)
+            $context = [pscustomobject]@{ Root = $Stick.Root; Backups = $Stick.Backups; LogPath = $Stick.Log; RemovedFolder = '' }
+            foreach ($action in @([pscustomobject]@{ Do = 'Remove'; Path = $Other; To = '' }, [pscustomobject]@{ Do = 'Rename'; Path = "$Xml.pvm-tmp"; To = $Other })) {
+                $step = [pscustomobject]@{ Path = $Xml; Problem = 'x'; PutAside = 'x'; Actions = @($action) }
+                { Repair-PvmLeftover -Context $context -Step $step } | Should -Throw '*touches only*'
+            }
+        }
+        $after = Get-TestTreeHash -Root $script:stick.Root
+        @($after.Keys | Sort-Object) | Should -BeExactly @($tree.Keys | Sort-Object)
+    }
+}
+
 Describe 'Dry-run parity' {
     It 'takes the decisions of a real start: <Case>' -ForEach @(
         @{ Case = 'VMware, nothing in the way'; Installed = @('VMware'); Change = @{}; Setup = {}; Expect = 'stick.vmdk: rewritten because the disk device, a size and the number of extents differ' }
@@ -3516,6 +3791,33 @@ Describe 'Dry-run parity' {
                 Mock -ModuleName PortableVM Invoke-PvmGetPartition { throw (Get-TestNoPartitionError) } -ParameterFilter { $DriveLetter -ceq $script:stick.Letter }
             }
         }
+        # A cut-off write of each kind, which a real start asks to set right, here answered No.
+        @{ Case = 'a new version beside a whole VirtualBox.xml, answered No'; Installed = @('VMware'); Change = @{}; Setup = { Write-TestFile -Path "$($script:stick.VirtualBoxXml).pvm-tmp" -Text 'x' } }
+        @{ Case = 'both copies beside a whole VirtualBox.xml, answered No'; Installed = @('VMware'); Change = @{}; Setup = {
+                Write-TestFile -Path "$($script:stick.VirtualBoxXml).pvm-tmp" -Text 'x'
+                Write-TestFile -Path "$($script:stick.VirtualBoxXml).pvm-old" -Text 'y'
+            }
+        }
+        @{ Case = 'the version before beside VirtualBox.xml, answered No'; Installed = @('VMware'); Change = @{}; Setup = { Write-TestFile -Path "$($script:stick.VirtualBoxXml).pvm-old" -Text '<VirtualBox/>' } }
+        @{ Case = 'the version before and a new one without VirtualBox.xml, answered No'; Installed = @('VMware'); Change = @{}; Setup = {
+                Rename-Item -LiteralPath $script:stick.VirtualBoxXml -NewName 'VirtualBox.xml.pvm-old'
+                Write-TestFile -Path "$($script:stick.VirtualBoxXml).pvm-tmp" -Text 'x'
+            }
+        }
+        @{ Case = 'the version before of VirtualBox.xml alone, answered No'; Installed = @('VMware'); Change = @{}; Setup = { Rename-Item -LiteralPath $script:stick.VirtualBoxXml -NewName 'VirtualBox.xml.pvm-old' } }
+        @{ Case = 'a new version of VirtualBox.xml alone, answered No'; Installed = @('VMware'); Change = @{}; Setup = { Rename-Item -LiteralPath $script:stick.VirtualBoxXml -NewName 'VirtualBox.xml.pvm-tmp' } }
+        @{ Case = 'a version before that equals a copy made now beside a copy, answered No'; Installed = @('VMware'); Change = @{}; Setup = {
+                $copy = Join-Path $script:stick.Backups 'VirtualBox\VirtualBox.xml.previous.launcher-backup'
+                Write-TestFile -Path $copy -Text '<VirtualBox/>'
+                Copy-Item -LiteralPath $script:stick.VirtualBoxXml -Destination "$copy.pvm-old"
+            }
+        }
+        @{ Case = 'a copy put back whose swap stopped between its two renames, answered No'; Installed = @('VMware'); Change = @{}; Setup = {
+                $copy = Join-Path $script:stick.Backups 'VirtualBox\VirtualBox.xml.previous.launcher-backup'
+                Write-TestFile -Path "$copy.pvm-tmp" -Text '<VirtualBox/>'
+                Copy-Item -LiteralPath $script:stick.VirtualBoxXml -Destination "$copy.pvm-old"
+            }
+        }
     ) {
         $runs = foreach ($dry in $false, $true) {
             # The same path both times, so that messages that name a path agree.
@@ -3529,7 +3831,8 @@ Describe 'Dry-run parity' {
             & $Setup
             $before = Get-TestTreeHash -Root $script:stick.Root
             $ask = if ($dry) { { throw 'A dry run must not ask.' } } else { { $true } }
-            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dry -AskResume $ask
+            $fix = if ($dry) { $ask } else { { $false } }
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dry -AskResume $ask -AskFix $fix
             $after = Get-TestTreeHash -Root $script:stick.Root
             $changed = ((@($after.Keys | Sort-Object) -join '|') -cne (@($before.Keys | Sort-Object) -join '|')) -or
                 (@($before.Keys | Where-Object { $after[$_] -ne $before[$_] }).Count -gt 0)
@@ -3545,6 +3848,7 @@ Describe 'Dry-run parity' {
         }
         $real, $dryRun = $runs
         if ($Expect) { $real.Decisions | Should -Contain $Expect }
+        if ($Case -like '*, answered No') { $real.Result.Message | Should -BeLike 'A write of * did not finish. To set it right, *. Nothing was started.' }
         $dryRun.Result.ExitCode | Should -Be $real.Result.ExitCode
         $dryRun.Result.Message | Should -BeExactly $real.Result.Message
         $dryRun.Result.Icon | Should -BeExactly $real.Result.Icon
