@@ -271,6 +271,10 @@ function Get-CompareKind {
         '^DRY RUN - would start .* with (VMware Workstation|VirtualBox) \(' { return "would start with $($Matches[1])" }
         '^DRY RUN - a real start would ask whether to resume ' { return 'a real start would ask whether to resume' }
         '^DRY RUN - a real start would stop here: ' { return 'a real start would stop here' }
+        '^DRY RUN - a real start would ask whether to set it right: ' { return 'a real start would ask whether to set right a write that did not finish' }
+        '^Fix confirmed: ' { return 'fix of a write that did not finish confirmed' }
+        '^Moved aside: ' { return 'a file the fix moved aside' }
+        '^Renamed: ' { return 'a file the fix renamed' }
         '^Started with (VMware Workstation|VirtualBox)\b' { return "started with $($Matches[1])" }
         '^Creating .+ -> ' { return 'descriptor would be created' }
         '^[^:]+: rewritten because ' { return 'reason for the descriptor rewrite' }
@@ -521,7 +525,8 @@ function Get-CompareListing {
 }
 
 # Return what a write or deploy that did not finish left on the stick folder $Target, whose files
-# $Manifest holds: the leftover names at its top and a count of .pvm-tmp and .pvm-old files.
+# $Manifest holds: the leftover names at its top and a count of .pvm-tmp and .pvm-old files, but
+# not of those that the launcher's guided fix put aside below LauncherData\backups\removed.
 function Get-CompareLeftover {
     [CmdletBinding()]
     [OutputType([string])]
@@ -532,7 +537,7 @@ function Get-CompareLeftover {
     foreach ($name in $CompareLeftoverNames) {
         if (Test-Path -LiteralPath (Join-Path $Target $name)) { $name }
     }
-    $copies = @($Manifest | Where-Object { $_.Path -like '*.pvm-tmp' -or $_.Path -like '*.pvm-old' }).Count
+    $copies = @($Manifest | Where-Object { ($_.Path -like '*.pvm-tmp' -or $_.Path -like '*.pvm-old') -and $_.Path -notmatch '\ALauncherData[\\/]backups[\\/]removed[\\/]' }).Count
     if ($copies) { "$copies .pvm-tmp or .pvm-old file(s)" }
 }
 

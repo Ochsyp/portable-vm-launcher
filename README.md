@@ -78,7 +78,14 @@ such as removing the `.pvm-tmp` or renaming the `.pvm-old` back. The step keeps 
 from before that write; only beside a copy whose `.pvm-old` repeats its file as it is now does
 it keep the copy, and when that file is missing or cannot be read, it asks for the file first
 rather than guess.
-The next start then makes its change again. Bytes the launcher does not mean
+The start shows that step as a question, with No as the default, and says what a Yes puts
+aside, such as the file as it is now when the step puts its version before back. On Yes it takes
+exactly that step, checks the file again and goes on; on No it stops, and you can take the step
+by hand. It deletes nothing: a file the step removes goes to
+`LauncherData\backups\removed\<date-time>`, under its path below the stick folder, from where you
+can move it back. Delete that folder when you no longer need it. A dry run asks nothing; it logs
+that a real start would ask.
+The start then makes its change again. Bytes the launcher does not mean
 to change stay as they were, a byte order mark too.
 
 `-DryRun` takes the decisions of a real start and logs what would change, without changing a VM
@@ -273,7 +280,9 @@ What a stick, a script or a user may rely on between versions:
 - `Launcher` holds code only, which each deploy replaces; `LauncherData` holds what the launcher
   keeps between runs, which a deploy leaves alone.
 - `<file>.pvm-tmp` and `<file>.pvm-old` beside a file are the copies of a write that did not
-  finish; the launcher and the deploy tool stop at them and name the step to take.
+  finish; the launcher asks whether to take the step that sets it right, and the deploy tool
+  stops at them and names the step.
+- `LauncherData\backups\removed\<date-time>` holds what the launcher's guided fix moved aside.
 
 ## Known limits
 

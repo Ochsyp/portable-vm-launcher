@@ -291,11 +291,13 @@ function Get-UnexpectedResult([string]$Step, [System.Management.Automation.Error
 }
 
 # Load PortableVM.psm1 from this folder and run the launcher (Invoke-PortableVM), which asks a
-# resume question with Show-Question. Returns the run's result, or that of the error that ended it.
+# resume question, and whether to set right a write that did not finish, with Show-Question.
+# Returns the run's result, or that of the error that ended it.
 function Invoke-Launcher {
     try { Import-Module -Name (Join-Path $Here 'PortableVM.psm1') -Force -ErrorAction Stop }
     catch { return (Get-UnexpectedResult -Step 'loading PortableVM.psm1' -ErrorRecord $_) }
-    try { Invoke-PortableVM -LauncherPath $Here -DryRun:$DryRun -AskResume { param([string]$Question, [string]$Caption) Show-Question -Message $Question -Caption $Caption } }
+    $ask = { param([string]$Question, [string]$Caption) Show-Question -Message $Question -Caption $Caption }
+    try { Invoke-PortableVM -LauncherPath $Here -DryRun:$DryRun -AskResume $ask -AskFix $ask }
     catch { Get-UnexpectedResult -Step 'running the launcher' -ErrorRecord $_ }
 }
 

@@ -278,7 +278,8 @@ kind, a yes or no, or a count:
 
 - whether the settings pass the launcher's checks, and whether the stick is the configured one
   (unknown when Windows does not say which disk it is);
-- writes that did not finish, whether the next start would stop at one, and what a deploy left;
+- writes that did not finish (not counting what a guided fix put aside), whether the next start
+  would ask about or stop at one, and what a deploy left;
 - for the VMware and VirtualBox disk files, the `.vbox` file and `VirtualBox.xml`: whether each
   is there, its first copy and the copy of the version before its latest rewrite, and whether a
   disk file's copies name no raw disk;
@@ -308,6 +309,18 @@ nothing is in the way, no decision changes, and a program signed by its maker lo
 No VM start is needed. The cases that do change (saved states in both programs, a program not
 signed by its maker, a VM VirtualBox is busy with) are covered by the tests on a synthetic stick,
 never made on the real one.
+
+## Checks for the guided fix (request r4)
+
+The guided fix only acts where a write was cut off, and the stick has no such write. So, as for
+phase 6:
+
+1. Run the dry-run check with `-AlsoVirtualBox`, deploying the branch. Both pairs of dry runs
+   must show no difference.
+2. Run the read-only check; it must end with `RESULT: OK`.
+
+No VM start is needed, and no cut-off write is ever made on the stick. Each kind of step, its
+question, its Yes and its No are covered by the tests on a synthetic stick.
 
 ## Rules for the real stick
 
