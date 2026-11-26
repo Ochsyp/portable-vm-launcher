@@ -2645,10 +2645,15 @@ function Get-PvmNewerSave {
     $vbox = Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxVbox']
     $names = @("$($Context.VMwareState.Values['checkpoint.vmstate'])", "$($Context.VirtualBoxState.StateFile)")
     if (-not $names[0] -or -not $names[1]) { return '' }
-    # A relative name lies beside its .vmx or .vbox; Combine keeps a name with a root as it is.
-    $files = @([IO.Path]::Combine((Split-Path $vmx), $names[0]), [IO.Path]::Combine((Split-Path $vbox), $names[1]))
-    if (-not ([IO.File]::Exists($files[0]) -and [IO.File]::Exists($files[1]))) { return '' }
-    $times = @($files | ForEach-Object { [IO.File]::GetLastWriteTimeUtc($_) })
+    # A relative name lies beside its .vmx or .vbox; Combine keeps a name with a root as it is. A
+    # name that is no path only means the launcher cannot tell.
+    try {
+        $files = @([IO.Path]::Combine((Split-Path $vmx), $names[0]), [IO.Path]::Combine((Split-Path $vbox), $names[1]))
+        if (-not ([IO.File]::Exists($files[0]) -and [IO.File]::Exists($files[1]))) { return '' }
+        $times = @($files | ForEach-Object { [IO.File]::GetLastWriteTimeUtc($_) })
+    } catch {
+        return ''
+    }
     if ($times[0] -gt $times[1]) { return 'VMware' }
     if ($times[1] -gt $times[0]) { return 'VirtualBox' }
     ''
@@ -2676,7 +2681,12 @@ function Get-PvmDecisionMessage {
             return Format-PvmMessage -Names $names -Template "{VM} has a saved state in VMware and one in VirtualBox, and only one of them can match {guest}'s disk; resuming the other can corrupt it. {Newer} Discard the saved state you do not want in the program that holds it (in VirtualBox: Discard Saved State), then start {vm} again. The launcher discards neither. Nothing was started." -Values @{ Newer = $newer }
         }
         'VMwareNotInstalled' { return 'VMware Workstation is not installed on this PC.' }
-        'VirtualBoxNotInstalled' { return "VirtualBox is not installed on this PC, and Hypervisor in settings.psd1 is 'VirtualBox'. Install VirtualBox, or set Hypervisor to 'Auto' to use VMware Workstation." }
+        'VirtualBoxNotInstalled' {
+            if ($Context.Settings['Hypervisor'] -eq 'VirtualBox') { return "VirtualBox is not installed on this PC, and Hypervisor in settings.psd1 is 'VirtualBox'. Install VirtualBox, or set Hypervisor to 'Auto' to use VMware Workstation." }
+            # Otherwise VMware was passed over because its .vmx is missing.
+            $vmx = Join-PvmStickPath -Root $Context.Root -Path $Context.Settings['VMwareVmx']
+            return Format-PvmMessage -Names $names -Template 'VirtualBox is not installed on this PC, and VMware Workstation cannot start {vm}, since its .vmx is missing: VMwareVmx in settings.psd1 names {Path}.' -Values @{ Path = $vmx }
+        }
         'NoneInstalled' { return 'Neither VMware Workstation nor VirtualBox is installed on this PC.' }
         'Unsigned' {
             $program = if ($Use -eq 'VMware') { @{ Program = 'VMware Workstation'; File = 'vmware.exe'; Why = $Snapshot.VMwareWhy } } else { @{ Program = 'VirtualBox'; File = 'VBoxManage.exe'; Why = $Snapshot.VirtualBoxWhy } }

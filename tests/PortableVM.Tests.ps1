@@ -1682,6 +1682,25 @@ Describe 'Start decision' {
         $result.Why | Should -BeExactly $Why
     }
 
+    It 'names VirtualBox as missing by what the setting says: <Setting>' -ForEach @(
+        @{ Setting = 'VirtualBox'; Message = "VirtualBox is not installed on this PC, and Hypervisor in settings.psd1 is 'VirtualBox'. Install VirtualBox, or set Hypervisor to 'Auto' to use VMware Workstation." }
+        @{ Setting = 'Auto'; Message = "VirtualBox is not installed on this PC, and VMware Workstation cannot start the VM, since its .vmx is missing: VMwareVmx in settings.psd1 names {Vmx}." }
+    ) {
+        $context = [pscustomobject]@{ Names = @{ VM = 'the VM'; Guest = 'the guest' }; Root = $TestDrive; Settings = @{ Hypervisor = $Setting; VMwareVmx = 'VMware\Test VM.vmx' } }
+        $expected = $Message.Replace('{Vmx}', (Join-PvmStickPath -Root $TestDrive -Path 'VMware\Test VM.vmx'))
+        Get-PvmDecisionMessage -Kind 'VirtualBoxNotInstalled' -Context $context -Snapshot (Get-TestSnapshot) -Use 'VirtualBox' | Should -BeExactly $expected
+    }
+
+    It 'cannot tell which saved state is newer when a state file''s name is no path' {
+        $vmx = Join-Path $TestDrive 'newer\Test VM.vmx'
+        Write-TestFile -Path $vmx -Text ''
+        $context = [pscustomobject]@{
+            Root = $TestDrive; Settings = @{ VMwareVmx = 'newer\Test VM.vmx'; VirtualBoxVbox = 'newer\Test VM.vbox' }
+            VMwareState = [pscustomobject]@{ Values = @{ 'checkpoint.vmState' = 'Test VM.vmss' } }; VirtualBoxState = [pscustomobject]@{ StateFile = "x`0|.sav" }
+        }
+        Get-PvmNewerSave -Context $context | Should -BeExactly ''
+    }
+
     It 'trusts no program whose signature cannot be read' {
         Mock -ModuleName PortableVM Invoke-PvmGetSignature { throw 'The file cannot be read.' }
         $result = Test-PvmSignedProgram -Program 'VMware' -Path 'V:\x.exe'
