@@ -212,8 +212,9 @@ function Invoke-StickState {
             $words = @{
                 Setting = 'the settings name another file'; None = 'no raw-disk file is attached'; Several = 'more than one raw-disk file is attached'
                 Outside = 'it is not below the stick folder'; Uuid = 'the settings name another UUID'; Unlisted = 'it attaches a disk that its media registry does not list'
+                NoMachine = 'it has no Machine element'
             }
-            $vmware = if (-not $files.VMwareRead) { 'unknown, since the .vmx cannot be read' } elseif ($files.VMwareKind) { "no, $($words[$files.VMwareKind])" } else { 'yes' }
+            $vmware = if (-not $files.VMwareRead) { 'unknown, since the .vmx cannot be read or is not complete' } elseif ($files.VMwareKind) { "no, $($words[$files.VMwareKind])" } else { 'yes' }
             Add-StateLine "  VMware disk file as the .vmx attaches it: $vmware"
             $virtualBox = if (-not $files.VirtualBoxRead) { 'unknown, since the .vbox cannot be read' } elseif ($files.VirtualBoxKind) { "no, $($words[$files.VirtualBoxKind])" } else { 'yes' }
             Add-StateLine "  VirtualBox disk file and UUID as the .vbox has them: $virtualBox"

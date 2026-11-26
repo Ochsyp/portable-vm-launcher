@@ -2560,7 +2560,7 @@ function Select-PvmVmDisk {
         [Parameter(Mandatory)][string]$File
     )
     $values = @{ Program = $Program; File = $File; Setting = $SettingName; Root = $Context.Root }
-    $attached = if ($Disks.Count) { (@($Disks | ForEach-Object { $_.Path }) -join ', ') } else { 'no disk file' }
+    $attached = if ($Disks.Count) { (@($Disks | ForEach-Object { if ($_.Path) { $_.Path } else { $_.File } }) -join ', ') } else { 'no disk file' }
     $chosen = $null
     if ($Setting) {
         $comparison = if (Test-PvmWindowsHost) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
@@ -2600,7 +2600,7 @@ function Select-PvmVmDisk {
 # them from the VM's files: VMwareDisk, VMwareAdapter, VMwareProblem, VirtualBoxDisk,
 # VirtualBoxVmUuid, VirtualBoxProblem, and the stick disk's Controller, HostIOCache and
 # BandwidthGroup in VirtualBox. VMwareKind and VirtualBoxKind name each problem's kind
-# (Select-PvmVmDisk's, or Unreadable, Uuid or Unlisted); VMwareRead and VirtualBoxRead say whether
+# (Select-PvmVmDisk's, or Uuid, NoMachine or Unlisted); VMwareRead and VirtualBoxRead say whether
 # the file was read. A path that is not set is ''.
 function New-PvmVmFileRecord {
     [CmdletBinding()]
@@ -2678,7 +2678,10 @@ function Read-PvmXmlFile {
 # Uuid without braces, and Disks, each hard disk that a storage controller attaches outside the
 # snapshots, with its Path (a location relative to the .vbox folder, or with a drive letter, read
 # as on the stick when it names a path below the stick's folder as $Location spells it), the
-# Controller's name, its useHostIOCache and the device's bandwidthGroup as written; or a Reason.
+# Controller's name, its useHostIOCache and the device's bandwidthGroup as written; or a Reason
+# and its Kind, NoMachine or Unlisted. When the stick folder is a drive root, every lettered path
+# is below it, so such a path counts as on the stick only with the stick's letter now, or when its
+# file is there, as the old letter of another PC leaves it; a path on another drive stays as it is.
 function Get-PvmVboxDisk {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -2689,7 +2692,7 @@ function Get-PvmVboxDisk {
         [AllowNull()]$Location
     )
     $machine = $Document.SelectSingleNode("/*[local-name()='VirtualBox']/*[local-name()='Machine']")
-    if ($null -eq $machine) { return [pscustomobject]@{ Uuid = ''; Disks = @(); Reason = 'it has no Machine element' } }
+    if ($null -eq $machine) { return [pscustomobject]@{ Uuid = ''; Disks = @(); Reason = 'it has no Machine element'; Kind = 'NoMachine' } }
     $uuid = $machine.GetAttribute('uuid').Trim('{', '}')
     $media = @{}
     foreach ($disk in @($machine.SelectNodes(".//*[local-name()='MediaRegistry']//*[local-name()='HardDisk']"))) {
@@ -2706,24 +2709,26 @@ function Get-PvmVboxDisk {
                 $unlisted = $true
                 continue
             }
-            $location = $media[$key]
-            $path = if ($null -ne $below -and $location -match '\A[A-Za-z]:[\\/]') {
-                $rest = $location.Substring(2).Replace('/', '\')
-                if ($rest.StartsWith($below + '\', [StringComparison]::OrdinalIgnoreCase)) { Join-PvmStickPath -Root $Root -Path $rest.Substring($below.Length + 1) }
-                else { Resolve-PvmVmFilePath -Folder (Split-Path $Vbox) -File $location }
+            $named = $media[$key]
+            $path = if ($null -ne $below -and $named -match '\A[A-Za-z]:[\\/]') {
+                $rest = $named.Substring(2).Replace('/', '\')
+                $onStick = if ($rest.StartsWith($below + '\', [StringComparison]::OrdinalIgnoreCase)) { Join-PvmStickPath -Root $Root -Path $rest.Substring($below.Length + 1) } else { '' }
+                if ($onStick -and ($below -or [string]::Equals($named.Substring(0, 1), "$($Location.Letter)", [StringComparison]::OrdinalIgnoreCase) -or [IO.File]::Exists($onStick))) { $onStick }
+                else { Resolve-PvmVmFilePath -Folder (Split-Path $Vbox) -File $named }
             } else {
-                Resolve-PvmVmFilePath -Folder (Split-Path $Vbox) -File $location
+                Resolve-PvmVmFilePath -Folder (Split-Path $Vbox) -File $named
             }
             [pscustomobject]@{
                 Path           = $path
+                File           = $named
                 Controller     = $controller.GetAttribute('name')
                 HostIOCache    = $controller.GetAttribute('useHostIOCache')
                 BandwidthGroup = $device.GetAttribute('bandwidthGroup')
             }
         }
     }
-    if ($unlisted) { return [pscustomobject]@{ Uuid = $uuid; Disks = @(); Reason = 'it attaches a hard disk that its media registry does not list' } }
-    [pscustomobject]@{ Uuid = $uuid; Disks = @($disks); Reason = '' }
+    if ($unlisted) { return [pscustomobject]@{ Uuid = $uuid; Disks = @(); Reason = 'it attaches a hard disk that its media registry does not list'; Kind = 'Unlisted' } }
+    [pscustomobject]@{ Uuid = $uuid; Disks = @($disks); Reason = ''; Kind = '' }
 }
 
 # Read the VM's UUID and which disk file the .vbox that the settings in $Context name attaches
@@ -2742,7 +2747,7 @@ function Resolve-PvmVirtualBoxFile {
     $values = @{ Vbox = $vbox; Reason = $read.Reason; Setting = $files.VirtualBoxVmUuid; Uuid = $read.Uuid }
     $files.VirtualBoxRead = $true
     if ($read.Reason) {
-        $files.VirtualBoxKind = 'Unlisted'
+        $files.VirtualBoxKind = $read.Kind
         $files.VirtualBoxProblem = Format-PvmMessage -Names $Context.Names -Values $values -Template 'The launcher cannot tell which disk file {vm}''s .vbox file {Vbox} uses, because {Reason}. Nothing was started.'
         return
     }

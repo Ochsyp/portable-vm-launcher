@@ -3732,6 +3732,31 @@ Describe 'The VM''s own files' {
         }
     }
 
+    Context 'in the .vbox' {
+        # A stick folder at a drive root: E: now, and the .vbox may still name the letter of
+        # another PC. A path counts as on the stick when it has the stick's letter now, or when
+        # its file is there; any other path on another drive stays where it is.
+        It 'reads a location with a drive letter, the stick folder being a drive root: <Case>' -ForEach @(
+            @{ Case = 'the old letter of a file on the stick'; Location = 'Q:\VirtualBox\Test VM\stick.vmdk'; OnStick = $true }
+            @{ Case = 'the stick''s letter now, file missing'; Location = 'E:\VirtualBox\Test VM\new.vmdk'; OnStick = $true }
+            @{ Case = 'another drive, no such file on the stick'; Location = 'C:\VMs\stick.vmdk'; OnStick = $false }
+        ) {
+            $root = Join-Path $TestDrive 'root-stick'
+            $vbox = Join-Path $root 'VirtualBox\Test VM\Test VM.vbox'
+            Write-TestFile -Path (Join-Path $root 'VirtualBox\Test VM\stick.vmdk') -Text (Get-TestDescriptorText)
+            $document = New-Object System.Xml.XmlDocument
+            $document.LoadXml((@('<VirtualBox xmlns="http://www.virtualbox.org/"><Machine uuid="{5ca1ab1e-0000-4000-8000-000000000001}">',
+                        "<MediaRegistry><HardDisks><HardDisk uuid=`"{5ca1ab1e-0000-4000-8000-000000000002}`" location=`"$Location`"/></HardDisks></MediaRegistry>",
+                        '<StorageControllers><StorageController name="SATA" useHostIOCache="true"><AttachedDevice type="HardDisk"><Image uuid="{5ca1ab1e-0000-4000-8000-000000000002}"/></AttachedDevice>',
+                        '</StorageController></StorageControllers></Machine></VirtualBox>') -join ''))
+            $read = Get-PvmVboxDisk -Document $document -Vbox $vbox -Root $root -Location ([pscustomobject]@{ Kind = 'DriveLetter'; Letter = 'E'; Path = 'E:\' })
+            $read.Reason | Should -BeNullOrEmpty
+            @($read.Disks).Count | Should -Be 1
+            Test-PvmBelowStick -Root $root -Path $read.Disks[0].Path | Should -Be $OnStick
+            if ($OnStick) { $read.Disks[0].Path | Should -BeExactly (Join-PvmStickPath -Root $root -Path $Location.Substring(3)) }
+        }
+    }
+
     Context 'in a disk file' {
         It 'takes <Target> for a raw disk: <Raw>' -ForEach @(
             @{ Target = '\\.\PhysicalDrive2'; Raw = $true }
