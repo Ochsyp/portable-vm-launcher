@@ -257,6 +257,8 @@ What a stick, a script or a user may rely on between versions:
   `tools\Deploy-PortableVM.ps1` returns 0 when done, 1 when it refused or failed;
   `tools\Get-StickInventory.ps1` 0 after its report, 2 when it cannot run;
   `tools\Compare-StickDryRun.ps1` 0 when the check passed, 1 when it refused or failed;
+  `tools\Test-StickState.ps1` 0 when nothing needs attention, 1 when something does, 2 when it
+  cannot run;
   `tools\Find-PrivateData.ps1` 0 when clean, 1 on a finding, 2 when it cannot run.
 - The settings are `LauncherData\settings.psd1` in schema 2; `examples\settings.example.psd1`
   lists every key with its default.
@@ -328,6 +330,18 @@ powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Compare-StickD
 It asks for administrator rights, deploys the clone between two dry runs and compares them. It
 ends with `RESULT: PASSED` or `RESULT: FAILED - <reason>`;
 [docs/stick-tests.md](docs/stick-tests.md) says how to read it.
+
+To see how the stick stands at any time, without changing anything and without administrator
+rights, run the read-only check:
+
+```text
+powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Test-StickState.ps1 -Target X:\
+```
+
+It reports whether the settings pass, whether the stick is the configured one, writes that did
+not finish, the VM files and their copies, whether each disk file points at the stick, saved
+states and the last run in the log, by kinds and counts only. It ends with `RESULT: OK`,
+`RESULT: ATTENTION - <what>` or `RESULT: FAILED - <reason>`.
 
 [CONTRIBUTING.md](CONTRIBUTING.md) describes the workflow and the git hooks,
 [SECURITY.md](SECURITY.md) the trust model, and [docs/stick-tests.md](docs/stick-tests.md) how

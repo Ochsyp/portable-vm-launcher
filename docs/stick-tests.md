@@ -263,6 +263,35 @@ settings back.
 
 The check after a VM start is not part of the tool; a pull request that needs one asks for it.
 
+## The read-only check
+
+`tools\Test-StickState.ps1` reads the stick with the launcher's own module and changes nothing:
+it writes no file, on the stick or on the PC, and needs no administrator rights. Use it after a
+VM start, before a deploy, or whenever something looks wrong:
+
+```text
+powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Test-StickState.ps1 -Target X:\
+```
+
+Without `-Target` it finds the stick folder as the dry-run check does. Each line is a check and a
+kind, a yes or no, or a count:
+
+- whether the settings pass the launcher's checks, and whether the stick is the configured one
+  (unknown when Windows does not say which disk it is);
+- writes that did not finish, whether the next start would stop at one, and what a deploy left;
+- for the VMware and VirtualBox disk files, the `.vbox` file and `VirtualBox.xml`: whether each
+  is there, its first copy and the copy of the version before its latest rewrite, and whether a
+  disk file's copies name no raw disk;
+- whether each disk file points at the stick, and if not, why the next start rewrites it, in the
+  same words as the log;
+- saved states in VMware and VirtualBox;
+- the last run in the log: a start or a dry run, how many days ago, the program it used, its end,
+  whether it stopped, and the kinds of its lines.
+
+It ends with `RESULT: OK - nothing needs attention`, `RESULT: ATTENTION - <what needs it>` (exit
+code 1) or `RESULT: FAILED - <reason>` (exit code 2). A disk file that does not point at the stick
+needs no attention, since the next start points it there.
+
 ## Rules for the real stick
 
 - Never switch VirtualBox's host I/O cache off for the stick's controller.

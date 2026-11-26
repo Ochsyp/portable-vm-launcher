@@ -2318,7 +2318,9 @@ exit $result.ExitCode
 
 Describe 'Test-StickState' -Tag 'WindowsOnly' {
     BeforeAll {
-        # The launcher's module, whose adapters the stand-in PC below replaces.
+        # The launcher's module, whose adapters the stand-in PC below replaces; the deploy tests load
+        # copies of it from their fake clones, and mocks need exactly one.
+        Get-Module -Name PortableVM | Remove-Module -Force
         Import-Module -Name (Join-Path $script:repoRoot 'src\PortableVM.psm1') -Force -Global -DisableNameChecking
 
         # Write the scratch stick $Root as the real one is shaped, every file as a start leaves it:
@@ -2489,14 +2491,14 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
 
     It 'sums up the last run in the log by kinds, its program, its end and its age' {
         $log = @(
-            (Get-StateLogLine '----- Start VM -----' '2026-11-18T09:00:00.000+01:00' 10)
-            (Get-StateLogLine '----- End: exit code 0 -----' '2026-11-18T09:00:05.000+01:00' 10)
-            (Get-StateLogLine 'Asking for administrator rights' '2026-11-20T10:00:00.000+01:00' 11)
-            (Get-StateLogLine '----- Start VM (dry run) -----' '2026-11-20T10:00:01.000+01:00' 12)
-            (Get-StateLogLine 'Stick found: disk 99 (\\.\PhysicalDrive99), drive Q:, ID 5CA1AB1E' '2026-11-20T10:00:02.000+01:00' 12)
-            (Get-StateLogLine 'Using VirtualBox' '2026-11-20T10:00:02.100+01:00' 12)
-            (Get-StateLogLine 'DRY RUN - a real start would stop here: Kelda Box is gone' '2026-11-20T10:00:02.200+01:00' 12)
-            (Get-StateLogLine '----- End (dry run): exit code 1 -----' '2026-11-20T10:00:03.000+01:00' 12)
+            (Get-StateLogLine -Message '----- Start VM -----' -Time '2026-11-18T09:00:00.000+01:00' -ProcessId 10)
+            (Get-StateLogLine -Message '----- End: exit code 0 -----' -Time '2026-11-18T09:00:05.000+01:00' -ProcessId 10)
+            (Get-StateLogLine -Message 'Asking for administrator rights' -Time '2026-11-20T10:00:00.000+01:00' -ProcessId 11)
+            (Get-StateLogLine -Message '----- Start VM (dry run) -----' -Time '2026-11-20T10:00:01.000+01:00' -ProcessId 12)
+            (Get-StateLogLine -Message 'Stick found: disk 99 (\\.\PhysicalDrive99), drive Q:, ID 5CA1AB1E' -Time '2026-11-20T10:00:02.000+01:00' -ProcessId 12)
+            (Get-StateLogLine -Message 'Using VirtualBox' -Time '2026-11-20T10:00:02.100+01:00' -ProcessId 12)
+            (Get-StateLogLine -Message 'DRY RUN - a real start would stop here: Kelda Box is gone' -Time '2026-11-20T10:00:02.200+01:00' -ProcessId 12)
+            (Get-StateLogLine -Message '----- End (dry run): exit code 1 -----' -Time '2026-11-20T10:00:03.000+01:00' -ProcessId 12)
         )
         Write-TestFile -Path (Join-Path $script:stateStick 'LauncherData\logs\launcher.log') -Text (($log -join "`r`n") + "`r`n")
         $result = Invoke-StateCheck
