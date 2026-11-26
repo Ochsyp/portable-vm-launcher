@@ -129,7 +129,7 @@ BeforeAll {
     function Get-TestVmxText {
         param([string[]]$Without = @(), [string[]]$Add = @())
         $lines = @('.encoding = "windows-1252"', 'config.version = "8"', 'displayName = "Test VM"', 'scsi0:0.fileName = "stick.vmdk"',
-            'uuid.action = "keep"', 'suspend.disabled = "TRUE"') | Where-Object { $Without -notcontains ($_ -split ' = ')[0] }
+            'scsi0:0.present = "TRUE"', 'uuid.action = "keep"', 'suspend.disabled = "TRUE"') | Where-Object { $Without -notcontains ($_ -split ' = ')[0] }
         (@($lines) + $Add + '') -join "`r`n"
     }
 
@@ -179,7 +179,10 @@ BeforeAll {
                 "  <Machine uuid=`"{$script:uuid}`" name=`"Test VM`" OSType=`"Debian_64`">",
                 '    <MediaRegistry><HardDisks>',
                 "      <HardDisk uuid=`"{5ca1ab1e-0000-4000-8000-000000000002}`" location=`"$($stick.OldLetter):$below\VirtualBox\Test VM\stick.vmdk`" format=`"VMDK`"/>",
-                '    </HardDisks></MediaRegistry>', '  </Machine>', '</VirtualBox>', '') -join "`n")
+                '    </HardDisks></MediaRegistry>', '    <Hardware><StorageControllers>',
+                '      <StorageController name="SATA" type="AHCI" PortCount="1" useHostIOCache="true" Bootable="true">',
+                '        <AttachedDevice type="HardDisk" hotpluggable="false" port="0" device="0"><Image uuid="{5ca1ab1e-0000-4000-8000-000000000002}"/></AttachedDevice>',
+                '      </StorageController>', '    </StorageControllers></Hardware>', '  </Machine>', '</VirtualBox>', '') -join "`n")
         Write-TestFile -Path $stick.VirtualBoxXml -Text (@(
                 '<?xml version="1.0"?>', '<VirtualBox xmlns="http://www.virtualbox.org/" version="1.12-windows">',
                 '  <Global><MachineRegistry>',
@@ -261,6 +264,8 @@ BeforeAll {
         Mock -ModuleName PortableVM Invoke-PvmExitLock {}
         Mock -ModuleName PortableVM Invoke-PvmGetPartition { throw "No partition has the drive letter $DriveLetter." }
         Mock -ModuleName PortableVM Invoke-PvmGetPartition { Get-TestPartition } -ParameterFilter { $DriveLetter -ceq $script:testStick.Letter }
+        Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { throw "No disk has the number $Number." }
+        Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { Get-TestPartition -Change @{ DriveLetter = [char]$script:testStick.Letter; AccessPaths = @("$($script:testStick.Letter):\") } } -ParameterFilter { $Number -eq 3 }
         Mock -ModuleName PortableVM Invoke-PvmGetDisk { throw "No disk has the number $Number." }
         Mock -ModuleName PortableVM Invoke-PvmGetDisk { Get-TestDisk } -ParameterFilter { $Number -eq 3 }
         Mock -ModuleName PortableVM Invoke-PvmGetDeviceGuard { $null }
@@ -1864,7 +1869,7 @@ Describe 'A start' {
         It 'creates a missing descriptor' {
             Remove-Item -LiteralPath $script:stick.VMwareDisk
             $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher
-            [IO.File]::ReadAllText($script:stick.VMwareDisk) | Should -BeLike '*ddb.adapterType = "ide"*'
+            [IO.File]::ReadAllText($script:stick.VMwareDisk) | Should -BeLike '*ddb.adapterType = "lsilogic"*'
             Get-TestLog -Path $script:stick.Log | Should -Contain 'Creating stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'
         }
 
@@ -3703,6 +3708,173 @@ Describe 'A guided fix after a cut-off write' {
     }
 }
 
+Describe 'The VM''s own files' {
+    Context 'in the .vmx' {
+        It 'reads the attached disk files: <Case>' -ForEach @(
+            @{ Case = 'a present SCSI disk'; Lines = @('scsi0.virtualDev = "lsisas1068"', 'scsi0:0.fileName = "stick.vmdk"', 'scsi0:0.present = "TRUE"'); Expect = @('scsi0:0|scsi|lsisas1068|<folder>stick.vmdk') }
+            @{ Case = 'a disk that is not present'; Lines = @('sata0:0.fileName = "stick.vmdk"', 'sata0:0.present = "FALSE"'); Expect = @() }
+            @{ Case = 'a disk without a present line'; Lines = @('sata0:0.fileName = "stick.vmdk"'); Expect = @() }
+            @{ Case = 'a CD drive'; Lines = @('ide1:0.fileName = "disc.vmdk"', 'ide1:0.present = "TRUE"', 'ide1:0.deviceType = "cdrom-image"'); Expect = @() }
+            @{ Case = 'an image that is no .vmdk'; Lines = @('sata0:1.fileName = "disc.iso"', 'sata0:1.present = "TRUE"'); Expect = @() }
+            @{ Case = 'disks on SATA, NVMe and IDE, in any case'; Lines = @('SATA0:0.fileName = "a.vmdk"', 'sata0:0.present = "true"', 'nvme0:0.fileName = "b.VMDK"', 'nvme0:0.present = "TRUE"',
+                    'ide0:1.fileName = "c.vmdk"', 'ide0:1.present = "TRUE"')
+                Expect = @('ide0:1|ide||<folder>c.vmdk', 'nvme0:0|nvme||<folder>b.VMDK', 'sata0:0|sata||<folder>a.vmdk')
+            }
+            @{ Case = 'a path in a folder below'; Lines = @('scsi0:0.fileName = "disks\stick.vmdk"', 'scsi0:0.present = "TRUE"'); Expect = @('scsi0:0|scsi||<folder>disks<sep>stick.vmdk') }
+        ) {
+            $vmx = Join-Path $TestDrive 'vmx\Test VM.vmx'
+            $values = ConvertFrom-PvmVmxText -Text ((@($Lines) + '') -join "`r`n")
+            $separator = [string][IO.Path]::DirectorySeparatorChar
+            $folder = (Split-Path $vmx) + $separator
+            @(Get-PvmVmxDisk -Values $values -Vmx $vmx | ForEach-Object { "$($_.Key)|$($_.Bus)|$($_.VirtualDev)|$($_.Path)" }) |
+                Should -BeExactly @($Expect | ForEach-Object { $_.Replace('<folder>', $folder).Replace('<sep>', $separator) })
+        }
+    }
+
+    Context 'in a disk file' {
+        It 'takes <Target> for a raw disk: <Raw>' -ForEach @(
+            @{ Target = '\\.\PhysicalDrive2'; Raw = $true }
+            @{ Target = '\\?\PhysicalDrive2'; Raw = $true }
+            @{ Target = '\\.\PortableVM-disarmed'; Raw = $true }
+            @{ Target = '\\?\Volume{5ca1ab1e-0000-4000-8000-000000000003}'; Raw = $true }
+            @{ Target = '\\?\C:\disks\stick.img'; Raw = $false }
+            @{ Target = '\\.\c:\disks\stick.img'; Raw = $false }
+            @{ Target = '\\?\UNC\server\share\stick.img'; Raw = $false }
+        ) {
+            Test-PvmRawDeviceTarget -Target $Target | Should -Be $Raw
+        }
+    }
+
+    Context 'in a start' {
+        AfterEach { Remove-Item -LiteralPath $script:stick.Root -Recurse -Force }
+
+        It 'takes the disk file from the <Program> file when the settings leave it out, and points it at the stick' -ForEach @(
+            @{ Program = 'VMware'; Change = @{ VMwareDisk = $null } }
+            @{ Program = 'VirtualBox'; Change = @{ VirtualBoxDisk = $null; VirtualBoxVmUuid = $null } }
+        ) {
+            $script:stick = Initialize-TestStick -Name 'own-files' -Change $Change
+            Set-TestPc -Stick $script:stick -Installed $Program
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 0 -Because $result.Message
+            $disk = if ($Program -eq 'VMware') { $script:stick.VMwareDisk } else { $script:stick.VirtualBoxDisk }
+            [IO.File]::ReadAllText($disk) | Should -BeLike '*FLAT "\\.\PhysicalDrive3" 0*'
+            if ($Program -eq 'VirtualBox') {
+                Should -Invoke -CommandName Invoke-PvmNative -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'startvm' -and $ArgumentList[1] -eq $script:uuid }
+            } else {
+                Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
+            }
+        }
+
+        It 'stops, a dry run too, and writes nothing, when <Case>' -ForEach @(
+            @{ Case = 'VMwareDisk names a file that the .vmx does not attach'; Installed = 'VMware'; Change = @{ VMwareDisk = 'VMware\other.vmdk' }; Setup = {}
+                Message = 'VMwareDisk in settings.psd1 names <root>\VMware\other.vmdk, but the VM''s VMware file <vmx> does not attach it; it attaches <vmwaredisk>. Correct VMwareDisk, or remove it so that the launcher takes the disk file from <vmx>. Nothing was started.'
+            }
+            @{ Case = 'the .vmx attaches two raw disks and VMwareDisk is not set'; Installed = 'VMware'; Change = @{ VMwareDisk = $null }; Setup = {
+                    Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'scsi0:1.fileName = "second.vmdk"', 'scsi0:1.present = "TRUE"')
+                    Write-TestFile -Path (Join-Path (Split-Path $script:stick.VMwareDisk) 'second.vmdk') -Text (Get-TestDescriptorText)
+                }
+                Message = 'The VM''s VMware file <vmx> attaches more than one raw-disk file (<vmwaredisk>, <root>\VMware\second.vmdk). Set VMwareDisk in settings.psd1 to the one the launcher should point at the stick. Nothing was started.'
+            }
+            @{ Case = 'the .vmx attaches no raw disk and VMwareDisk is not set'; Installed = 'VMware'; Change = @{ VMwareDisk = $null }; Setup = {
+                    Write-TestFile -Path $script:stick.VMwareDisk -Text (Get-TestDescriptorText).Replace('"\\.\PhysicalDrive1"', '"stick-flat.vmdk"')
+                }
+                Message = 'The VM''s VMware file <vmx> attaches no raw-disk file, so the launcher cannot tell which file to point at the stick; it attaches <vmwaredisk>. Attach the stick''s disk file in VMware, then start the VM again. Nothing was started.'
+            }
+            @{ Case = 'the .vmx attaches a disk file outside the stick folder'; Installed = 'VMware'; Change = @{ VMwareDisk = $null }; Setup = {
+                    Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without 'scsi0:0.fileName' -Add "scsi0:0.fileName = `"$(Join-Path $TestDrive 'elsewhere\stick.vmdk')`"")
+                }
+                Message = 'The VM''s VMware file <vmx> attaches the disk file <testdrive>\elsewhere\stick.vmdk, which is not below the stick folder <root>, so the launcher does not point it at the stick. Attach the stick''s disk file from below the stick folder in VMware, then start the VM again. Nothing was started.'
+            }
+            @{ Case = 'VirtualBoxVmUuid differs from the .vbox''s UUID'; Installed = 'VirtualBox'; Change = @{ VirtualBoxVmUuid = '5ca1ab1e-0000-4000-8000-0000000000ff' }; Setup = {}
+                Message = 'VirtualBoxVmUuid in settings.psd1 is 5ca1ab1e-0000-4000-8000-0000000000ff, but the VM''s .vbox file <vbox> has the UUID 5ca1ab1e-0000-4000-8000-000000000001. Correct VirtualBoxVmUuid, or remove it so that the launcher takes the UUID from the .vbox file. Nothing was started.'
+            }
+            @{ Case = 'VirtualBoxDisk names a file that the .vbox does not attach'; Installed = 'VirtualBox'; Change = @{ VirtualBoxDisk = 'VirtualBox\Test VM\other.vmdk' }; Setup = {}
+                Message = 'VirtualBoxDisk in settings.psd1 names <root>\VirtualBox\Test VM\other.vmdk, but the VM''s VirtualBox file <vbox> does not attach it; it attaches <vboxdisk>. Correct VirtualBoxDisk, or remove it so that the launcher takes the disk file from <vbox>. Nothing was started.'
+            }
+            @{ Case = 'the .vbox attaches a disk that its media registry does not list'; Installed = 'VirtualBox'; Change = @{}; Setup = {
+                    [IO.File]::WriteAllText($script:stick.Vbox, [IO.File]::ReadAllText($script:stick.Vbox).Replace('<Image uuid="{5ca1ab1e-0000-4000-8000-000000000002}"/>', '<Image uuid="{5ca1ab1e-0000-4000-8000-000000000009}"/>'))
+                }
+                Message = 'The launcher cannot tell which disk file the VM''s .vbox file <vbox> uses, because it attaches a hard disk that its media registry does not list. Nothing was started.'
+            }
+            @{ Case = 'host I/O cache is off'; Installed = 'VirtualBox'; Change = @{}; Setup = {
+                    [IO.File]::WriteAllText($script:stick.Vbox, [IO.File]::ReadAllText($script:stick.Vbox).Replace('useHostIOCache="true"', 'useHostIOCache="false"'))
+                }
+                Message = 'Host I/O cache is off for the storage controller SATA in VirtualBox, which holds the VM''s stick disk. Then VirtualBox takes the stick''s volumes away from Windows, the launcher''s own folder too. Turn on "Use Host I/O Cache" for that controller in the VM''s storage settings in VirtualBox, then start the VM again. Nothing was started.'
+            }
+            @{ Case = 'the .vbox does not say whether host I/O cache is on'; Installed = 'VirtualBox'; Change = @{}; Setup = {
+                    [IO.File]::WriteAllText($script:stick.Vbox, [IO.File]::ReadAllText($script:stick.Vbox).Replace(' useHostIOCache="true"', ''))
+                }
+                Message = 'Host I/O cache is off for the storage controller SATA in VirtualBox, which holds the VM''s stick disk. Then VirtualBox takes the stick''s volumes away from Windows, the launcher''s own folder too. Turn on "Use Host I/O Cache" for that controller in the VM''s storage settings in VirtualBox, then start the VM again. Nothing was started.'
+            }
+            @{ Case = 'the stick disk has a bandwidth group'; Installed = 'VirtualBox'; Change = @{}; Setup = {
+                    [IO.File]::WriteAllText($script:stick.Vbox, [IO.File]::ReadAllText($script:stick.Vbox).Replace('<AttachedDevice type="HardDisk"', '<AttachedDevice type="HardDisk" bandwidthGroup="slow"'))
+                }
+                Message = 'The VM''s stick disk in VirtualBox has the bandwidth group slow, with which VirtualBox takes the stick''s volumes away from Windows. Set its bandwidth group to none in VirtualBox, then start the VM again. Nothing was started.'
+            }
+            @{ Case = 'Windows has mounted a partition in the VM''s part of the stick'; Installed = 'VirtualBox'; Change = @{}; Setup = {
+                    Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition {
+                        Get-TestPartition -Change @{ Offset = [uint64]2048 * 512; Size = [uint64]100000 * 512; DriveLetter = [char]'K'; AccessPaths = @('K:\', '\\?\Volume{5ca1ab1e-0000-4000-8000-000000000008}\') }
+                        Get-TestPartition -Change @{ Offset = [uint64]102048 * 512; Size = [uint64]100000 * 512; DriveLetter = [char]0; AccessPaths = @('\\?\Volume{5ca1ab1e-0000-4000-8000-000000000007}\') }
+                        Get-TestPartition -Change @{ DriveLetter = [char]$script:testStick.Letter; AccessPaths = @("$($script:testStick.Letter):\") }
+                    } -ParameterFilter { $Number -eq 3 }
+                }
+                Message = 'Windows has mounted a partition in the part of the stick that the VM uses (K:\). VirtualBox would take it away from Windows, or the guest would write into it while Windows uses it. Remove its drive letter or folder path in Disk Management, then start the VM again. Nothing was started.'
+            }
+            @{ Case = 'the stick''s partitions cannot be read'; Installed = 'VirtualBox'; Change = @{}; Setup = {
+                    Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { throw [UnauthorizedAccessException]::new('Access denied.') } -ParameterFilter { $Number -eq 3 }
+                }
+                Message = 'The launcher cannot tell which partitions of the stick Windows has mounted, because access is denied. Nothing was started.'
+            }
+        ) {
+            $script:stick = Initialize-TestStick -Name 'own-files' -Change $Change
+            Set-TestPc -Stick $script:stick -Installed $Installed
+            & $Setup
+            $expected = $Message.Replace('<root>', $script:stick.Root).Replace('<vmx>', $script:stick.Vmx).Replace('<vbox>', $script:stick.Vbox).Replace('<vmwaredisk>', $script:stick.VMwareDisk).
+            Replace('<vboxdisk>', $script:stick.VirtualBoxDisk).Replace('<testdrive>', "$TestDrive").Replace('\', [string][IO.Path]::DirectorySeparatorChar)
+            if ($Case -like '*partition*') { $expected = $Message }
+            $tree = Get-TestTreeHash -Root $script:stick.Root
+            foreach ($dryRun in $false, $true) {
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun -AskResume { $true }
+                $result.ExitCode | Should -Be 1
+                $result.Message | Should -BeExactly $expected
+            }
+            $after = Get-TestTreeHash -Root $script:stick.Root
+            @($after.Keys | Sort-Object) | Should -BeExactly @($tree.Keys | Sort-Object)
+            foreach ($key in $tree.Keys) { $after[$key] | Should -BeExactly $tree[$key] }
+            Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+            Should -Invoke -CommandName Invoke-PvmNative -ModuleName PortableVM -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'startvm' }
+        }
+
+        It 'creates a missing VMware disk file where the .vmx names it, with the adapter type of its <Case>' -ForEach @(
+            @{ Case = 'SCSI controller'; Lines = @('scsi0:0.fileName = "stick.vmdk"', 'scsi0:0.present = "TRUE"'); Adapter = 'lsilogic' }
+            @{ Case = 'BusLogic controller'; Lines = @('scsi0.virtualDev = "buslogic"', 'scsi0:0.fileName = "stick.vmdk"', 'scsi0:0.present = "TRUE"'); Adapter = 'buslogic' }
+            @{ Case = 'SATA controller'; Lines = @('sata0:0.fileName = "stick.vmdk"', 'sata0:0.present = "TRUE"'); Adapter = 'ide' }
+        ) {
+            $script:stick = Initialize-TestStick -Name 'own-files' -Change @{ VMwareDisk = $null }
+            Set-TestPc -Stick $script:stick -Installed 'VMware'
+            Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without 'scsi0:0.fileName', 'scsi0:0.present' -Add $Lines)
+            Remove-Item -LiteralPath $script:stick.VMwareDisk
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 0 -Because $result.Message
+            [IO.File]::ReadAllText($script:stick.VMwareDisk) | Should -BeLike "*ddb.adapterType = `"$Adapter`"*"
+            Get-TestLog -Path $script:stick.Log | Should -Contain 'Creating stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'
+        }
+
+        It 'stops, a dry run too, at a disk file whose extent names a file through a drive letter' {
+            $script:stick = Initialize-TestStick -Name 'own-files'
+            Set-TestPc -Stick $script:stick -Installed 'VMware'
+            Write-TestFile -Path $script:stick.VMwareDisk -Text (Get-TestDescriptorText).Replace('"\\.\PhysicalDrive1"', '"\\?\C:\disks\stick.img"')
+            $before = [IO.File]::ReadAllText($script:stick.VMwareDisk)
+            foreach ($dryRun in $false, $true) {
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun
+                $result.ExitCode | Should -Be 1
+                $result.Message | Should -BeLike '*names a file, not a raw disk*'
+            }
+            [IO.File]::ReadAllText($script:stick.VMwareDisk) | Should -BeExactly $before
+        }
+    }
+}
+
 Describe 'Dry-run parity' {
     It 'takes the decisions of a real start: <Case>' -ForEach @(
         @{ Case = 'VMware, nothing in the way'; Installed = @('VMware'); Change = @{}; Setup = {}; Expect = 'stick.vmdk: rewritten because the disk device, a size and the number of extents differ' }
@@ -3789,6 +3961,18 @@ Describe 'Dry-run parity' {
         @{ Case = 'a .vbox that is no XML'; Installed = @('VMware', 'VirtualBox'); Change = @{}; Setup = { Write-TestFile -Path $script:stick.Vbox -Text 'no XML' } }
         @{ Case = 'no partition with the drive letter'; Installed = @('VMware'); Change = @{}; Setup = {
                 Mock -ModuleName PortableVM Invoke-PvmGetPartition { throw (Get-TestNoPartitionError) } -ParameterFilter { $DriveLetter -ceq $script:stick.Letter }
+            }
+        }
+        @{ Case = 'VMwareDisk naming a file that the .vmx does not attach'; Installed = @('VMware'); Change = @{ VMwareDisk = 'VMware\other.vmdk' }; Setup = {} }
+        @{ Case = 'VMware disk file taken from the .vmx'; Installed = @('VMware'); Change = @{ VMwareDisk = $null }; Setup = {} }
+        @{ Case = 'VirtualBox disk file and UUID taken from the .vbox'; Installed = @('VirtualBox'); Change = @{ VirtualBoxDisk = $null; VirtualBoxVmUuid = $null }; Setup = {} }
+        @{ Case = 'VirtualBoxVmUuid other than the .vbox''s'; Installed = @('VirtualBox'); Change = @{ VirtualBoxVmUuid = '5ca1ab1e-0000-4000-8000-0000000000ff' }; Setup = {} }
+        @{ Case = 'VirtualBox host I/O cache off'; Installed = @('VirtualBox'); Change = @{}; Setup = {
+                [IO.File]::WriteAllText($script:stick.Vbox, [IO.File]::ReadAllText($script:stick.Vbox).Replace('useHostIOCache="true"', 'useHostIOCache="false"'))
+            }
+        }
+        @{ Case = 'a stick partition mounted in the VM''s part'; Installed = @('VirtualBox'); Change = @{}; Setup = {
+                Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { Get-TestPartition -Change @{ Offset = [uint64]2048 * 512; DriveLetter = [char]'K'; AccessPaths = @('K:\') } } -ParameterFilter { $Number -eq 3 }
             }
         }
         # A cut-off write of each kind, which a real start asks to set right, here answered No.
