@@ -2643,7 +2643,10 @@ function Get-PvmNewerSave {
     $settings = $Context.Settings
     $vmx = Join-PvmStickPath -Root $Context.Root -Path $settings['VMwareVmx']
     $vbox = Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxVbox']
-    $names = @("$($Context.VMwareState.Values['checkpoint.vmstate'])", "$($Context.VirtualBoxState.StateFile)")
+    # VirtualBox on Windows writes the name with backslashes, which .NET elsewhere reads as part of
+    # a file name, so either slash counts as this system's separator.
+    $separator = [string][IO.Path]::DirectorySeparatorChar
+    $names = @("$($Context.VMwareState.Values['checkpoint.vmstate'])", "$($Context.VirtualBoxState.StateFile)" | ForEach-Object { $_.Replace('\', $separator).Replace('/', $separator) })
     if (-not $names[0] -or -not $names[1]) { return '' }
     # A relative name lies beside its .vmx or .vbox; Combine keeps a name with a root as it is. A
     # name that is no path only means the launcher cannot tell.
