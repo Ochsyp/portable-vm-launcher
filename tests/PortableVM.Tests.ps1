@@ -267,6 +267,7 @@ BeforeAll {
             Mock -ModuleName PortableVM Get-PvmStickLocation { [pscustomobject]@{ Kind = 'DriveLetter'; Letter = $script:testStick.Letter; Path = $script:testStick.WindowsPath } }
         }
         Mock -ModuleName PortableVM Invoke-PvmTestProcess { $false }
+        Mock -ModuleName PortableVM Invoke-PvmGetSignature { [pscustomobject]@{ Status = 'Valid'; Signer = $(if ($Path -like '*vmware.exe') { 'Broadcom Inc' } else { 'Oracle America, Inc.' }) } }
         Mock -ModuleName PortableVM Invoke-PvmStartProcess {}
         Mock -ModuleName PortableVM Invoke-PvmSetEnvironment {}
         Mock -ModuleName PortableVM Invoke-PvmSleep {}
@@ -307,6 +308,7 @@ Describe 'Adapters' {
         @{ Name = 'Invoke-PvmTestAdministrator'; Call = { Invoke-PvmTestAdministrator } }
         @{ Name = 'Invoke-PvmEnterLock'; Call = { Invoke-PvmEnterLock -Name 'Local\x' } }
         @{ Name = 'Invoke-PvmExitLock'; Call = { Invoke-PvmExitLock -Lock ([pscustomobject]@{ State = 'Acquired'; Mutex = $null }) } }
+        @{ Name = 'Invoke-PvmGetSignature'; Call = { Invoke-PvmGetSignature -Path 'none.exe' } }
     ) {
         $Call | Should -Throw -ExpectedMessage "$Name reached this PC during a test; mock it."
     }
@@ -1594,13 +1596,18 @@ Describe 'Hypervisor choice' {
         Select-PvmHypervisor @choice | Should -BeExactly $Expected
     }
 
-    It 'finds VMware Workstation in the 32-bit key first, then the native one, and only with vmware.exe' {
-        $folder = Join-Path $TestDrive 'programs\vmware'
-        Write-TestFile -Path (Join-Path $folder 'vmware.exe') -Text ''
-        Mock -ModuleName PortableVM Invoke-PvmGetRegistryValue { Join-Path $TestDrive 'programs\none' } -ParameterFilter { $Path -like '*WOW6432Node*' }
+    It 'finds VMware Workstation in the native key first, then the 32-bit one, and only with vmware.exe' {
+        $native = Join-Path $TestDrive 'programs\vmware'
+        $wow = Join-Path $TestDrive 'programs\vmware32'
+        Write-TestFile -Path (Join-Path $native 'vmware.exe') -Text ''
+        Write-TestFile -Path (Join-Path $wow 'vmware.exe') -Text ''
+        Mock -ModuleName PortableVM Invoke-PvmGetRegistryValue { Join-Path $TestDrive 'programs\vmware32' } -ParameterFilter { $Path -like '*WOW6432Node*' }
         Mock -ModuleName PortableVM Invoke-PvmGetRegistryValue { Join-Path $TestDrive 'programs\vmware' } -ParameterFilter { $Path -notlike '*WOW6432Node*' }
-        Get-PvmVMwareDir | Should -BeExactly $folder
-        Should -Invoke -CommandName Invoke-PvmGetRegistryValue -ModuleName PortableVM -Times 2 -Exactly
+        Get-PvmVMwareDir | Should -BeExactly $native
+        Should -Invoke -CommandName Invoke-PvmGetRegistryValue -ModuleName PortableVM -Times 1 -Exactly
+
+        Mock -ModuleName PortableVM Invoke-PvmGetRegistryValue { Join-Path $TestDrive 'programs\none' } -ParameterFilter { $Path -notlike '*WOW6432Node*' }
+        Get-PvmVMwareDir | Should -BeExactly $wow
     }
 
     It 'finds no VirtualBox without VBoxManage.exe in its folder' {
@@ -1620,6 +1627,104 @@ Describe 'Hypervisor choice' {
         Mock -ModuleName PortableVM Invoke-PvmSleep {}
         Wait-PvmProcessExit -Name 'VBoxSVC' -TimeoutSeconds 30
         Should -Invoke -CommandName Invoke-PvmSleep -ModuleName PortableVM -Times 2 -Exactly -ParameterFilter { $Seconds -eq 1 }
+    }
+}
+
+Describe 'Start decision' {
+    BeforeAll {
+        # Return a snapshot (Get-PvmStartSnapshot) with both programs installed and signed by their
+        # makers, the .vmx there, no saved state and nothing running, changed by $Change.
+        function Get-TestSnapshot {
+            param([hashtable]$Change = @{})
+            $snapshot = [ordered]@{
+                VMwareDir = 'V:\VMware'; VirtualBoxDir = 'V:\VirtualBox'; VMwareSigned = $true; VirtualBoxSigned = $true
+                VMwareSaved = $false; VirtualBoxSaved = $false; VmxExists = $true; RunningInVMware = $false; RunningInVirtualBox = $false
+            }
+            foreach ($key in $Change.Keys) { $snapshot[$key] = $Change[$key] }
+            [pscustomobject]$snapshot
+        }
+    }
+
+    It 'decides <Case>' -ForEach @(
+        @{ Case = 'VMware when nothing is in the way'; Setting = 'Auto'; Change = @{}; Use = 'VMware'; Stop = ''; Running = $false; Stops = @() }
+        @{ Case = 'nothing when both programs hold a saved state'; Setting = 'Auto'; Change = @{ VMwareSaved = $true; VirtualBoxSaved = $true }; Use = ''; Stop = 'BothSaved'; Running = $false; Stops = @() }
+        @{ Case = 'nothing when both hold a saved state, also with a fixed program'; Setting = 'VirtualBox'; Change = @{ VMwareSaved = $true; VirtualBoxSaved = $true }; Use = ''; Stop = 'BothSaved'; Running = $false; Stops = @() }
+        @{ Case = 'that the VM runs in VMware already'; Setting = 'Auto'; Change = @{ RunningInVMware = $true; VMwareSigned = $false }; Use = 'VMware'; Stop = ''; Running = $true; Stops = @() }
+        @{ Case = 'a stop for a vmware.exe not signed by its maker'; Setting = 'Auto'; Change = @{ VMwareSigned = $false }; Use = 'VMware'; Stop = ''; Running = $false; Stops = @('Unsigned') }
+        @{ Case = 'the VMware stops in order'; Setting = 'VMware'; Change = @{ VMwareSigned = $false; RunningInVirtualBox = $true; VirtualBoxSaved = $true }; Use = 'VMware'; Stop = ''; Running = $false; Stops = @('Unsigned', 'VirtualBoxVmRunning', 'VirtualBoxSaved') }
+        @{ Case = 'VirtualBox for its saved state'; Setting = 'Auto'; Change = @{ VirtualBoxSaved = $true }; Use = 'VirtualBox'; Stop = ''; Running = $false; Stops = @() }
+        @{ Case = 'the VirtualBox stops in order'; Setting = 'VirtualBox'; Change = @{ VirtualBoxSigned = $false; RunningInVMware = $true; VMwareSaved = $true }; Use = 'VirtualBox'; Stop = ''; Running = $false; Stops = @('Unsigned', 'VMwareRunning', 'VMwareSaved') }
+        @{ Case = 'no VirtualBox stop for a VirtualBox VM process, which VirtualBox itself is asked about'; Setting = 'VirtualBox'; Change = @{ RunningInVirtualBox = $true }; Use = 'VirtualBox'; Stop = ''; Running = $false; Stops = @() }
+        @{ Case = 'that VirtualBox is missing when the setting names it'; Setting = 'VirtualBox'; Change = @{ VirtualBoxDir = $null; VirtualBoxSigned = $false }; Use = 'VirtualBox'; Stop = 'VirtualBoxNotInstalled'; Running = $false; Stops = @() }
+        @{ Case = 'that VMware is missing when the setting names it'; Setting = 'VMware'; Change = @{ VMwareDir = $null; VMwareSigned = $false }; Use = 'VMware'; Stop = 'VMwareNotInstalled'; Running = $false; Stops = @() }
+        @{ Case = 'that neither program is installed'; Setting = 'Auto'; Change = @{ VMwareDir = $null; VirtualBoxDir = $null; VMwareSigned = $false; VirtualBoxSigned = $false }; Use = 'VirtualBox'; Stop = 'NoneInstalled'; Running = $false; Stops = @() }
+        @{ Case = 'VirtualBox when VMware is not installed'; Setting = 'Auto'; Change = @{ VMwareDir = $null; VMwareSigned = $false }; Use = 'VirtualBox'; Stop = ''; Running = $false; Stops = @() }
+    ) {
+        $decision = Get-PvmStartDecision -Setting $Setting -Snapshot (Get-TestSnapshot -Change $Change)
+        $decision.Use | Should -BeExactly $Use
+        $decision.Stop | Should -BeExactly $Stop
+        $decision.AlreadyRunning | Should -Be $Running
+        @($decision.Stops) | Should -BeExactly $Stops
+    }
+
+    It 'trusts a program signed by its maker only: <Case>' -ForEach @(
+        @{ Case = 'VMware by Broadcom'; Program = 'VMware'; Signature = @{ Status = 'Valid'; Signer = 'Broadcom Inc' }; Signed = $true; Why = '' }
+        @{ Case = 'VMware by VMware'; Program = 'VMware'; Signature = @{ Status = 'Valid'; Signer = 'VMware, Inc.' }; Signed = $true; Why = '' }
+        @{ Case = 'VirtualBox by Oracle'; Program = 'VirtualBox'; Signature = @{ Status = 'Valid'; Signer = 'Oracle America, Inc.' }; Signed = $true; Why = '' }
+        @{ Case = 'VMware by another publisher'; Program = 'VMware'; Signature = @{ Status = 'Valid'; Signer = 'Oracle America, Inc.' }; Signed = $false; Why = 'it is signed by Oracle America, Inc.' }
+        @{ Case = 'no signature'; Program = 'VirtualBox'; Signature = @{ Status = 'NotSigned'; Signer = '' }; Signed = $false; Why = 'Windows reports its signature as NotSigned' }
+        @{ Case = 'a changed file'; Program = 'VMware'; Signature = @{ Status = 'HashMismatch'; Signer = 'Broadcom Inc' }; Signed = $false; Why = 'Windows reports its signature as HashMismatch' }
+    ) {
+        $script:testSignature = [pscustomobject]$Signature
+        Mock -ModuleName PortableVM Invoke-PvmGetSignature { $script:testSignature }
+        $result = Test-PvmSignedProgram -Program $Program -Path 'V:\x.exe'
+        $result.Signed | Should -Be $Signed
+        $result.Why | Should -BeExactly $Why
+    }
+
+    It 'trusts no program whose signature cannot be read' {
+        Mock -ModuleName PortableVM Invoke-PvmGetSignature { throw 'The file cannot be read.' }
+        $result = Test-PvmSignedProgram -Program 'VMware' -Path 'V:\x.exe'
+        $result.Signed | Should -BeFalse
+        $result.Why | Should -BeExactly 'Windows could not read its signature'
+    }
+
+    It 'reads what VirtualBox says the VM does: <State> is <Activity>' -ForEach @(
+        @{ State = '"running"'; Activity = 'Running' }
+        @{ State = '"paused"'; Activity = 'Running' }
+        @{ State = '"starting"'; Activity = 'Running' }
+        @{ State = '"restoring"'; Activity = 'Running' }
+        @{ State = '"saving"'; Activity = 'Busy' }
+        @{ State = '"stopping"'; Activity = 'Busy' }
+        @{ State = '"snapshotting"'; Activity = 'Busy' }
+        @{ State = '"livesnapshotting"'; Activity = 'Busy' }
+        @{ State = '"onlinesnapshotting"'; Activity = 'Busy' }
+        @{ State = '"teleporting"'; Activity = 'Busy' }
+        @{ State = '"teleportingpausedvm"'; Activity = 'Busy' }
+        @{ State = '"teleportingin"'; Activity = 'Busy' }
+        @{ State = '"deletingsnapshot"'; Activity = 'Busy' }
+        @{ State = '"deletingsnapshotlive"'; Activity = 'Busy' }
+        @{ State = '"deletingsnapshotlivepaused"'; Activity = 'Busy' }
+        @{ State = '"restoringsnapshot"'; Activity = 'Busy' }
+        @{ State = '"settingup"'; Activity = 'Busy' }
+        @{ State = '"stuck"'; Activity = 'Stuck' }
+        @{ State = '"gurumeditation"'; Activity = 'Stuck' }
+        @{ State = '"poweroff"'; Activity = 'Off' }
+        @{ State = '"saved"'; Activity = 'Off' }
+        @{ State = '"aborted"'; Activity = 'Off' }
+        @{ State = '"aborted-saved"'; Activity = 'Off' }
+        @{ State = ''; Activity = 'Unknown' }
+        @{ State = '"weird"'; Activity = 'Unknown' }
+    ) {
+        Get-PvmVirtualBoxActivity -State $State | Should -BeExactly $Activity
+    }
+
+    It 'tells a listed VM from an inaccessible and a missing one: <Case>' -ForEach @(
+        @{ Case = 'listed'; Output = "`"Test VM`" {5ca1ab1e-0000-4000-8000-000000000001}"; Expected = 'Listed' }
+        @{ Case = 'inaccessible'; Output = "`"<inaccessible>`" {5ca1ab1e-0000-4000-8000-000000000001}"; Expected = 'Inaccessible' }
+        @{ Case = 'missing'; Output = "`"Other`" {5ca1ab1e-0000-4000-8000-000000000009}"; Expected = 'Missing' }
+    ) {
+        Get-PvmVirtualBoxListing -Output $Output -VmUuid '5ca1ab1e-0000-4000-8000-000000000001' | Should -BeExactly $Expected
     }
 }
 
@@ -2056,7 +2161,7 @@ Describe 'A start' {
             Mock -ModuleName PortableVM Wait-PvmProcessExit {}
             Mock -ModuleName PortableVM Invoke-PvmTestProcess { $true } -ParameterFilter { $Name -eq 'VBoxSVC' }
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
-            $result.Message | Should -BeExactly 'VirtualBox is still running in the background. Wait half a minute, then start the VM again.'
+            $result.Message | Should -BeExactly "VirtualBox's background service (VBoxSVC) is still running in this Windows session. Close every VirtualBox window, wait until it has ended, which can take a few minutes, then start the VM again."
             Should -Invoke -CommandName Wait-PvmProcessExit -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $Name -eq 'VBoxSVC' -and $TimeoutSeconds -eq 30 }
         }
 
@@ -2067,7 +2172,7 @@ Describe 'A start' {
                 $script:waits = 0
                 $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dry
                 $result.ExitCode | Should -Be 1
-                $result.Message | Should -BeExactly 'VirtualBox is still running in the background. Wait half a minute, then start the VM again.'
+                $result.Message | Should -BeExactly "VirtualBox's background service (VBoxSVC) is still running in this Windows session. Close every VirtualBox window, wait until it has ended, which can take a few minutes, then start the VM again."
                 $script:waits | Should -Be 1
             }
             @(Get-TestLog -Path $script:stick.Log | Where-Object { $_ -ceq "Waiting up to 30 s for VirtualBox's background service (VBoxSVC) to end" }).Count | Should -Be 2
@@ -2082,6 +2187,51 @@ Describe 'A start' {
             $result.ExitCode | Should -Be 1
             $result.Message | Should -BeExactly 'VirtualBox is already open on this PC. Close all VirtualBox windows, then start the VM again.'
             $script:waits | Should -Be 0
+        }
+
+        It 'stops when <Case>' -ForEach @(
+            @{ Case = 'VirtualBox lists the VM as inaccessible'; Native = @{ list = @{ ExitCode = 0; Output = '"<inaccessible>" {5ca1ab1e-0000-4000-8000-000000000001}' } }
+                Message = "VirtualBox lists the VM as inaccessible, so it cannot read the VM's .vbox file. Open VirtualBox to see why, then start the VM again."
+            }
+            @{ Case = 'VirtualBox cannot list its VMs'; Native = @{ list = @{ ExitCode = 1; Output = 'VBoxManage: error: x' } }
+                Message = "VirtualBox could not list its VMs:`n`nVBoxManage: error: x"
+            }
+            @{ Case = 'VirtualBox cannot tell the VM''s state'; Native = @{ showvminfo = @{ ExitCode = 1; Output = 'VBoxManage: error: y' } }
+                Message = "VirtualBox could not tell the VM's state:`n`nVBoxManage: error: y"
+            }
+            @{ Case = 'VirtualBox is still busy with the VM'; Native = @{ showvminfo = @{ ExitCode = 0; Output = 'VMState="saving"' } }
+                Message = 'VirtualBox is still busy with the VM (saving). Wait until it is done, then start the VM again.'
+            }
+            @{ Case = 'VirtualBox reports the VM as stuck'; Native = @{ showvminfo = @{ ExitCode = 0; Output = 'VMState="stuck"' } }
+                Message = 'VirtualBox reports the VM as stuck (stuck). Power it off in VirtualBox, then start the VM again.'
+            }
+            @{ Case = 'VirtualBox reports a state the launcher does not know'; Native = @{ showvminfo = @{ ExitCode = 0; Output = 'VMState="weird"' } }
+                Message = 'VirtualBox reports a state of the VM that the launcher does not know (weird). Close VirtualBox, then start the VM again.'
+            }
+        ) {
+            foreach ($command in $Native.Keys) {
+                $script:testNative = [pscustomobject]$Native[$command]
+                Mock -ModuleName PortableVM Invoke-PvmNative { $script:testNative } -ParameterFilter ([scriptblock]::Create("`$ArgumentList[0] -eq '$command'"))
+            }
+            (Invoke-PortableVM -LauncherPath $script:stick.Launcher).Message | Should -BeExactly $Message
+            Should -Invoke -CommandName Invoke-PvmNative -ModuleName PortableVM -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'startvm' }
+        }
+
+        It 'says VirtualBox is busy, not open, when VirtualBox is open and busy with the VM' {
+            $script:testProcesses = @([pscustomobject]@{ Name = 'VirtualBox.exe'; CommandLine = $null })
+            Mock -ModuleName PortableVM Invoke-PvmNative { [pscustomobject]@{ ExitCode = 0; Output = 'VMState="stopping"' } } -ParameterFilter { $ArgumentList[0] -eq 'showvminfo' }
+            (Invoke-PortableVM -LauncherPath $script:stick.Launcher).Message | Should -BeExactly 'VirtualBox is still busy with the VM (stopping). Wait until it is done, then start the VM again.'
+        }
+
+        It 'runs no VBoxManage that is not signed by its maker, also in a dry run' {
+            $script:testProcesses = @([pscustomobject]@{ Name = 'VirtualBox.exe'; CommandLine = $null })
+            Mock -ModuleName PortableVM Invoke-PvmGetSignature { [pscustomobject]@{ Status = 'Valid'; Signer = 'Someone Else' } } -ParameterFilter { $Path -like '*VBoxManage.exe' }
+            $message = "VirtualBox's VBoxManage.exe is not signed by its maker: it is signed by Someone Else. The launcher would run it with administrator rights, so it starts nothing. Reinstall VirtualBox from its maker, then start the VM again."
+            foreach ($dry in $false, $true) {
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dry
+                $result.Message | Should -BeExactly $message
+            }
+            Should -Invoke -CommandName Invoke-PvmNative -ModuleName PortableVM -Times 0 -Exactly
         }
 
         It 'stops when the VM list lacks the VM' {
@@ -2130,6 +2280,48 @@ Describe 'A start' {
             Set-TestPc -Stick $script:stick -Installed 'VMware', 'VirtualBox'
         }
         AfterEach { Remove-Item -LiteralPath $script:stick.Root -Recurse -Force }
+
+        It 'stops at saved states in both programs, says which one is newer and discards neither: <Case>' -ForEach @(
+            @{ Case = 'the VMware one is newer'; VMwareDay = 20; VirtualBoxDay = 10; Newer = 'The one in VMware is newer.' }
+            @{ Case = 'the VirtualBox one is newer'; VMwareDay = 10; VirtualBoxDay = 20; Newer = 'The one in VirtualBox is newer.' }
+            @{ Case = 'neither file is there'; VMwareDay = 0; VirtualBoxDay = 0; Newer = 'The launcher cannot tell which one is newer.' }
+        ) {
+            Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"')
+            [IO.File]::WriteAllText($script:stick.Vbox, [IO.File]::ReadAllText($script:stick.Vbox).Replace('OSType="Debian_64"', 'OSType="Debian_64" stateFile="Snapshots\x.sav"'))
+            $vmss = Join-Path (Split-Path $script:stick.Vmx) 'Test VM.vmss'
+            $sav = Join-Path (Split-Path $script:stick.Vbox) 'Snapshots\x.sav'
+            if ($VMwareDay) {
+                Write-TestFile -Path $vmss -Text 'state'
+                [IO.File]::SetLastWriteTimeUtc($vmss, [datetime]::new(2026, 11, $VMwareDay, 0, 0, 0, 'Utc'))
+                Write-TestFile -Path $sav -Text 'state'
+                [IO.File]::SetLastWriteTimeUtc($sav, [datetime]::new(2026, 11, $VirtualBoxDay, 0, 0, 0, 'Utc'))
+            }
+            $before = Get-TestTreeHash -Root $script:stick.Root
+            $message = "The VM has a saved state in VMware and one in VirtualBox, and only one of them can match the guest's disk; resuming the other can corrupt it. $Newer Discard the saved state you do not want in the program that holds it (in VirtualBox: Discard Saved State), then start the VM again. The launcher discards neither. Nothing was started."
+            foreach ($dry in $false, $true) {
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dry -AskResume { throw 'Nothing must be asked.' }
+                $result.ExitCode | Should -Be 1
+                $result.Message | Should -BeExactly $message
+            }
+            $after = Get-TestTreeHash -Root $script:stick.Root
+            @($before.Keys | Where-Object { $after[$_] -ne $before[$_] }) | Should -BeNullOrEmpty
+            Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+            Get-TestLog -Path $script:stick.Log | Should -Not -Contain 'Using VMware'
+        }
+
+        It 'starts no vmware.exe that is not signed by its maker' {
+            Mock -ModuleName PortableVM Invoke-PvmGetSignature { [pscustomobject]@{ Status = 'NotSigned'; Signer = '' } } -ParameterFilter { $Path -like '*vmware.exe' }
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.Message | Should -BeExactly "VMware Workstation's vmware.exe is not signed by its maker: Windows reports its signature as NotSigned. The launcher would run it with administrator rights, so it starts nothing. Reinstall VMware Workstation from its maker, then start the VM again."
+            Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+        }
+
+        It 'names VirtualBox as missing when the setting names it and only VMware is installed' {
+            $script:stick = Initialize-TestStick -Name 'both-stick' -Change @{ Hypervisor = 'VirtualBox' }
+            $script:testInstalled = @('VMware')
+            (Invoke-PortableVM -LauncherPath $script:stick.Launcher).Message |
+                Should -BeExactly "VirtualBox is not installed on this PC, and Hypervisor in settings.psd1 is 'VirtualBox'. Install VirtualBox, or set Hypervisor to 'Auto' to use VMware Workstation."
+        }
 
         It 'resumes a VMware suspend in VMware, after a Yes' {
             Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"')
@@ -3203,6 +3395,20 @@ Describe 'Dry-run parity' {
             }
         }
         @{ Case = 'VirtualBox, nothing in the way'; Installed = @('VirtualBox'); Change = @{}; Setup = {} }
+        @{ Case = 'saved states in both programs'; Installed = @('VMware', 'VirtualBox'); Change = @{}; Setup = {
+                Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"')
+                [IO.File]::WriteAllText($script:stick.Vbox, [IO.File]::ReadAllText($script:stick.Vbox).Replace('OSType="Debian_64"', 'OSType="Debian_64" stateFile="Snapshots\x.sav"'))
+            }
+        }
+        @{ Case = 'a vmware.exe not signed by its maker'; Installed = @('VMware'); Change = @{}; Setup = {
+                Mock -ModuleName PortableVM Invoke-PvmGetSignature { [pscustomobject]@{ Status = 'NotSigned'; Signer = '' } }
+            }
+        }
+        @{ Case = 'VirtualBox open and busy with the VM'; Installed = @('VirtualBox'); Change = @{}; Setup = {
+                $script:testProcesses = @([pscustomobject]@{ Name = 'VirtualBox.exe'; CommandLine = $null })
+                Mock -ModuleName PortableVM Invoke-PvmNative { [pscustomobject]@{ ExitCode = 0; Output = 'VMState="saving"' } } -ParameterFilter { $ArgumentList[0] -eq 'showvminfo' }
+            }
+        }
         @{ Case = 'VirtualBox with HideDataPartition'; Installed = @('VirtualBox'); Change = @{ HideDataPartition = $true }; Setup = {} }
         @{ Case = 'VMware without its descriptor'; Installed = @('VMware'); Change = @{}; Setup = { Remove-Item -LiteralPath $script:stick.VMwareDisk } }
         @{ Case = 'VMware with the VM running in VMware'; Installed = @('VMware'); Change = @{}; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'vmware-vmx.exe'; CommandLine = "vmware-vmx.exe `"$($script:stick.Vmx)`"" }) } }
