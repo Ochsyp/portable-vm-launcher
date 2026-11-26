@@ -1816,7 +1816,7 @@ Describe 'A start' {
 
         It 'starts nothing when the old version of a rewritten file cannot be removed, and names the step that puts it back' {
             Mock -ModuleName PortableVM Remove-PvmWriteCopy { [IO.File]::Delete($Path) }
-            Mock -ModuleName PortableVM Remove-PvmWriteCopy { throw [IO.IOException]::new('The process cannot access the file.', [int]0x80070020) } -ParameterFilter { $Path -like '*\Test VM.vbox.pvm-old' }
+            Mock -ModuleName PortableVM Remove-PvmWriteCopy { throw [IO.IOException]::new('The process cannot access the file.', [int]0x80070020) } -ParameterFilter { (Split-Path $Path -Leaf) -eq 'Test VM.vbox.pvm-old' }
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
             $result.ExitCode | Should -Be 1
             $result.Message | Should -BeExactly ("A write of $($script:stick.Vbox) did not finish. To set it right, remove Test VM.vbox, then rename Test VM.vbox.pvm-old back to Test VM.vbox, " +
@@ -1857,7 +1857,8 @@ Describe 'A start' {
         It 'fixes the drive letter, points the descriptor at the stick, starts the VM and logs each step' {
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
             $result.ExitCode | Should -Be 0
-            $below = $script:stick.Root.Substring(2)
+            # The .vbox names the stick by its Windows path, which off Windows is made up.
+            $below = $script:stick.WindowsPath.Substring(2)
             [IO.File]::ReadAllText($script:stick.Vbox) | Should -BeLike "*location=`"$($script:stick.Letter):$below\VirtualBox\Test VM\stick.vmdk`"*"
             [IO.File]::ReadAllText($script:stick.VirtualBoxXml) | Should -BeLike "*src=`"$($script:stick.Letter):$($below.Replace('\', '/'))/VirtualBox/Test VM/Test VM.vbox`"*"
             Join-Path $script:stick.Backups 'VirtualBox\Test VM\Test VM.vbox.launcher-backup' | Should -Exist
@@ -2458,29 +2459,34 @@ Describe 'Log rotation' {
         [IO.File]::ReadAllText($script:moved) | Should -BeExactly "2026-11-12 10:15:30  old line`r`n"
     }
 
-    It 'replaces no file and gives the cause when <Case>' -ForEach @(
-        @{ Case = 'a log of the new name exists already'; Cause = 'an item of that name exists already' }
-        @{ Case = 'a program holds the log'; Cause = 'it is open in another program' }
-    ) {
+    It 'replaces no file and gives the cause when a log of the new name exists already' {
+        # The cause comes from the system's own error, so the module must know which system it is on.
+        Mock -ModuleName PortableVM Test-PvmWindowsHost { $script:onWindows }
         [IO.File]::WriteAllText($script:log, "2026-11-12 10:15:30  old line`r`n")
-        $holder = $null
-        if ($Case -like 'a log*') { [IO.File]::WriteAllText($script:moved, 'earlier') }
-        else { $holder = [IO.File]::Open($script:log, 'Open', 'Read', 'ReadWrite') }
+        [IO.File]::WriteAllText($script:moved, 'earlier')
+        $result = Move-PvmOldLog -Path $script:log -Time $script:time
+        $result.Name | Should -BeExactly ''
+        $result.Problem | Should -BeExactly 'an item of that name exists already'
+        [IO.File]::ReadAllLines($script:log)[0] | Should -BeExactly '2026-11-12 10:15:30  old line'
+        [IO.File]::ReadAllText($script:moved) | Should -BeExactly 'earlier'
+    }
+
+    # Only Windows keeps an open file from being moved; elsewhere the move goes through.
+    It 'replaces no file and gives the cause when a program holds the log' -Tag 'WindowsOnly' {
+        [IO.File]::WriteAllText($script:log, "2026-11-12 10:15:30  old line`r`n")
+        $holder = [IO.File]::Open($script:log, 'Open', 'Read', 'ReadWrite')
         try {
             $result = Move-PvmOldLog -Path $script:log -Time $script:time
             # A program that shares writing holds back the move, not the log's next line.
-            if ($holder) { Write-PvmLog -Path $script:log -Message 'still written' }
+            Write-PvmLog -Path $script:log -Message 'still written'
         } finally {
-            if ($holder) { $holder.Dispose() }
+            $holder.Dispose()
         }
         $result.Name | Should -BeExactly ''
-        $result.Problem | Should -BeExactly $Cause
+        $result.Problem | Should -BeExactly 'it is open in another program'
         [IO.File]::ReadAllLines($script:log)[0] | Should -BeExactly '2026-11-12 10:15:30  old line'
-        if ($Case -like 'a log*') { [IO.File]::ReadAllText($script:moved) | Should -BeExactly 'earlier' }
-        else {
-            Get-PvmLogProblem | Should -BeExactly ''
-            [IO.File]::ReadAllLines($script:log)[-1] | Should -BeLike '*  still written'
-        }
+        Get-PvmLogProblem | Should -BeExactly ''
+        [IO.File]::ReadAllLines($script:log)[-1] | Should -BeLike '*  still written'
     }
 
     Context 'in a run' -Tag 'WindowsOnly' {

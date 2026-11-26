@@ -226,4 +226,12 @@ Compared with the launcher on a stick before the redesign:
   next one finishes the removal or names the renames to do. A deploy of the commit that
   `Launcher` already holds stops before any change, so the earlier version stays.
 
+### Fixed
+
+- Four tests that failed in CI's first Linux run, with no change to the launcher: one filtered a
+  path by its Windows separator, one built the expected `.vbox` path from the test folder instead
+  of the stick's made-up Windows path, one read an error's cause while the test file told the
+  launcher it ran on Windows, and one expected an open log to block its move, which only Windows
+  does; that test now runs on Windows only.
+
 [Unreleased]: https://github.com/Ochsyp/portable-vm-launcher/commits/main
