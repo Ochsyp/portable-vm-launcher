@@ -1691,6 +1691,24 @@ Describe 'Start decision' {
         Get-PvmDecisionMessage -Kind 'VirtualBoxNotInstalled' -Context $context -Snapshot (Get-TestSnapshot) -Use 'VirtualBox' | Should -BeExactly $expected
     }
 
+    # VirtualBox on Windows writes the .vbox's stateFile with backslashes, and the same stick is read on Linux.
+    It 'finds a state file named with <Case>, on any system' -ForEach @(
+        @{ Case = 'backslashes'; Name = 'Snapshots\x.sav' }
+        @{ Case = 'slashes'; Name = 'Snapshots/x.sav' }
+    ) {
+        $folder = Join-Path $TestDrive 'separators'
+        $vmss = [IO.Path]::Combine($folder, 'Test VM.vmss')
+        $sav = [IO.Path]::Combine($folder, 'Snapshots', 'x.sav')
+        foreach ($file in $vmss, $sav) { Write-TestFile -Path $file -Text 'state' }
+        [IO.File]::SetLastWriteTimeUtc($vmss, [datetime]::new(2026, 11, 10, 0, 0, 0, [DateTimeKind]::Utc))
+        [IO.File]::SetLastWriteTimeUtc($sav, [datetime]::new(2026, 11, 20, 0, 0, 0, [DateTimeKind]::Utc))
+        $context = [pscustomobject]@{
+            Root = $TestDrive; Settings = @{ VMwareVmx = 'separators\Test VM.vmx'; VirtualBoxVbox = 'separators\Test VM.vbox' }
+            VMwareState = [pscustomobject]@{ Values = @{ 'checkpoint.vmState' = 'Test VM.vmss' } }; VirtualBoxState = [pscustomobject]@{ StateFile = $Name }
+        }
+        Get-PvmNewerSave -Context $context | Should -BeExactly 'VirtualBox'
+    }
+
     It 'cannot tell which saved state is newer when a state file''s name is no path' {
         $vmx = Join-Path $TestDrive 'newer\Test VM.vmx'
         Write-TestFile -Path $vmx -Text ''
@@ -2320,7 +2338,8 @@ Describe 'A start' {
             foreach ($dry in $false, $true) {
                 $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dry -AskResume { throw 'Nothing must be asked.' }
                 $result.ExitCode | Should -Be 1
-                $result.Message | Should -BeExactly $message
+                # The whole message, since the comparison shows only a few characters around the first difference.
+                $result.Message | Should -BeExactly $message -Because "the message was: $($result.Message)"
             }
             $after = Get-TestTreeHash -Root $script:stick.Root
             @($before.Keys | Where-Object { $after[$_] -ne $before[$_] }) | Should -BeNullOrEmpty
