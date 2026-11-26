@@ -37,6 +37,9 @@ or commits: they identify one stick and the PCs it was used on.
   so nothing in it runs. Whoever can write to the stick still decides what runs, as the trust
   model says.
 - The VM folders hold UUIDs, MAC addresses and host details, and stay on the stick.
+- The stick-check tool prints and saves kinds of log lines, counts and the deploy's own lines,
+  never a raw log line. A run with `-AlsoVirtualBox` keeps a copy of the settings in its run
+  folder below `%LOCALAPPDATA%\PortableVM\stick-checks`, on the PC and outside the repository.
 
 ## Automated checks
 
@@ -58,5 +61,8 @@ or commits: they identify one stick and the PCs it was used on.
   write, the log aside, and deletes only the copies that write makes, and that the deploy tool
   writes files only through that safe write. The deploy tool deletes one thing: the earlier
   launcher copy that the new `Launcher.previous` replaces, and only when every file in it is what
-  a deploy wrote. It never touches `LauncherData`, the VM files or any other folder.
+  a deploy wrote. It never touches `LauncherData`, the VM files or any other folder. The
+  stick-check tool, `tools\Compare-StickDryRun.ps1`, changes the stick only through the deploy
+  tool and, with `-AlsoVirtualBox`, the safe write of the settings, and writes its own files only
+  below its output folder on the PC.
 - Dependabot keeps the pinned GitHub Actions up to date.

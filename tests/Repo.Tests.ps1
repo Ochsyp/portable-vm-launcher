@@ -162,7 +162,7 @@ BeforeAll {
 Describe 'Tracked files' {
     It 'include the launcher and its tools, so the other checks have something to check' {
         foreach ($path in 'src/Start-PortableVM.ps1', 'src/PortableVM.psm1', 'tools/Deploy-PortableVM.ps1',
-            'tools/Get-StickInventory.ps1', 'examples/settings.example.psd1', 'tests/Settings.Tests.ps1') {
+            'tools/Get-StickInventory.ps1', 'tools/Compare-StickDryRun.ps1', 'examples/settings.example.psd1', 'tests/Settings.Tests.ps1') {
             $script:tracked | Should -Contain $path
         }
     }
@@ -254,14 +254,21 @@ Describe 'Static guards' {
         $other | ForEach-Object { $_.Extent.Text } | Should -BeNullOrEmpty
     }
 
-    It 'leave exits, dialogs and prompts in src, and the administrator prompt anywhere, to Start-PortableVM.ps1' {
+    It 'leave exits, dialogs and prompts in src to Start-PortableVM.ps1, and the administrator prompt to it and one function of the stick-check tool' {
         $others = @($script:sources | Where-Object { $_ -like (Join-Path $script:repoRoot 'src\*') -and $_ -ne $script:launcher })
         $others | Should -Contain $script:module
         foreach ($path in $others) {
             (Get-SourceAst -Path $path).FindAll({ $args[0] -is [System.Management.Automation.Language.ExitStatementAst] }, $true) | Should -BeNullOrEmpty
         }
         $dialogs = 'System\.Windows\.Forms|System\.Windows\.MessageBox|PresentationFramework|Microsoft\.VisualBasic|WScript\.Shell|Read-Host|\.UI\.Prompt|Out-GridView|RunAs'
-        $script:sources | Where-Object { $_ -ne $script:launcher -and [IO.File]::ReadAllText($_) -match $dialogs } | Should -BeNullOrEmpty
+        $compare = Join-Path $script:repoRoot 'tools\Compare-StickDryRun.ps1'
+        $script:sources | Should -Contain $compare
+        $script:sources | Where-Object { $_ -ne $script:launcher -and $_ -ne $compare -and [IO.File]::ReadAllText($_) -match $dialogs } | Should -BeNullOrEmpty
+        # The stick-check tool runs itself again with administrator rights, once, and shows nothing else.
+        $elevate = (Get-SourceAst -Path $compare).Find({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $args[0].Name -eq 'Invoke-CompareElevated' }, $true)
+        [IO.File]::ReadAllText($compare).Replace($elevate.Extent.Text, '') | Should -Not -Match $dialogs
+        ($elevate.Extent.Text -replace 'RunAs', '') | Should -Not -Match $dialogs
+        ([regex]::Matches($elevate.Extent.Text, 'RunAs')).Count | Should -Be 1
     }
 
     It 'let only the adapters in the module read the PC or run programs' {
@@ -344,6 +351,32 @@ Describe 'Static guards' {
         @(Get-SourceFileWrite -Ast $ast | Sort-Object -Unique) |
             Should -BeExactly @('FileStream in Assert-DeployWriteAccess', 'FileSystemAclExtensions in Assert-DeployWriteAccess', 'Open in Assert-DeployWriteAccess')
         @(Get-SourceCommand -Ast $ast | Where-Object { $_.Name -eq 'Write-PvmFile' }).Count | Should -BeGreaterThan 0
+    }
+
+    It 'let the stick-check tool change the stick only through the deploy tool and the safe write of the settings' {
+        $ast = Get-SourceAst -Path (Join-Path $script:repoRoot 'tools\Compare-StickDryRun.ps1')
+        # It deletes, copies and renames nothing by itself, and writes files in one function, below its output folder.
+        Get-SourceFileChange -Ast $ast | Should -BeNullOrEmpty
+        @(Get-SourceFileWrite -Ast $ast | Sort-Object -Unique) | Should -BeExactly @('WriteAllBytes in Save-CompareFile', 'WriteAllLines in Save-CompareFile')
+        $commands = @(Get-SourceCommand -Ast $ast)
+        $writers = 'Remove-Item', 'Rename-Item', 'Copy-Item', 'Clear-Content', 'Clear-Item', 'Set-Content', 'Add-Content', 'Out-File', 'Set-Item', 'Set-ItemProperty',
+        'New-ItemProperty', 'Remove-ItemProperty', 'Tee-Object', 'Export-Csv', 'Export-Clixml', 'Start-Transcript', 'Set-Acl', 'Invoke-Expression'
+        $commands | Where-Object { $writers -contains $_.Name } | ForEach-Object { $_.Name } | Should -BeNullOrEmpty
+        @($commands | Where-Object { $_.Name -eq 'Save-CompareFile' } | ForEach-Object { $_.Function } | Sort-Object -Unique) | Should -BeExactly @('', 'Invoke-StickCompare', 'Write-CompareHypervisor')
+        @($commands | Where-Object { $_.Name -eq 'New-Item' } | ForEach-Object { $_.Function }) | Should -BeExactly @('Get-CompareRunFolder')
+        # Move-Item moves only the saved bytes of the settings, on the PC, into the run folder.
+        $moves = @($ast.FindAll({ $args[0] -is [System.Management.Automation.Language.CommandAst] -and $args[0].GetCommandName() -eq 'Move-Item' }, $true))
+        @($moves | ForEach-Object { Get-SourceFunctionName -Ast $_ } | Sort-Object) | Should -BeExactly @('Invoke-CompareCheck', 'Undo-CompareHypervisor')
+        @($moves | ForEach-Object { $_.Extent.Text -replace ' -Destination .*', '' } | Sort-Object) | Should -BeExactly @('Move-Item -LiteralPath $pending', 'Move-Item -LiteralPath $PendingPath')
+        # The stick changes only through the safe write of the settings and the deploy tool.
+        @($commands | Where-Object { $_.Name -eq 'Write-PvmFile' } | ForEach-Object { $_.Function } | Sort-Object) | Should -BeExactly @('Undo-CompareHypervisor', 'Write-CompareHypervisor')
+        @($commands | Where-Object { $_.Operator -eq 'Ampersand' } | ForEach-Object { $_.Function } | Sort-Object -Unique) | Should -BeExactly @('Invoke-CompareDeploy', 'Invoke-CompareGit', 'Invoke-CompareLauncher')
+        @($commands | Where-Object { $_.Name -eq 'Start-Process' } | ForEach-Object { $_.Function }) | Should -BeExactly @('Invoke-CompareElevated')
+        $functions = @{}
+        foreach ($definition in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) { $functions[$definition.Name] = $definition.Extent.Text }
+        $functions['Invoke-CompareLauncher'] | Should -Match ([regex]::Escape("-File `$script -DryRun *>&1"))
+        $functions['Invoke-CompareDeploy'] | Should -Match ([regex]::Escape("'tools\Deploy-PortableVM.ps1'"))
+        $functions['Invoke-CompareDeploy'] | Should -Not -Match 'MigrateSettings'
     }
 
     It 'catch the ways a source could change or write a file past the safe write: <Code>' -ForEach @(

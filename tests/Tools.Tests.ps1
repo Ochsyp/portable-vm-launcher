@@ -1,5 +1,5 @@
-# Tests of tools\Deploy-PortableVM.ps1 and tools\Get-StickInventory.ps1 on a synthetic clone and
-# stick in TestDrive. Each tool is dot-sourced for its functions, which skips its main block, and
+# Tests of tools\Deploy-PortableVM.ps1, tools\Get-StickInventory.ps1 and
+# tools\Compare-StickDryRun.ps1 on a synthetic clone and stick in TestDrive. Each tool is dot-sourced for its functions, which skips its main block, and
 # the functions that read the PC (processes, git, disks, registry) are mocked. The deploy tool
 # imports the clone's src\PortableVM.psm1, so the fake clone holds a copy of the real module.
 
@@ -10,6 +10,7 @@ BeforeAll {
     $script:sampleName = 'K' + [char]0x00E9 + 'l' + [char]0x00F8 + 'n' + [char]0x00EF
     . (Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1')
     . (Join-Path $script:repoRoot 'tools\Get-StickInventory.ps1')
+    . (Join-Path $script:repoRoot 'tools\Compare-StickDryRun.ps1')
 
     # Return the system's ANSI code page, read from the registry: the encoding of old settings
     # files, which Windows PowerShell 5.1 calls Default.
@@ -1594,5 +1595,719 @@ Describe 'Get-StickInventory' -Tag 'WindowsOnly' {
 
         Mock Get-InventoryPartition { throw 'The storage service is not available.' }
         (Get-TestAnswer -Root $script:clean)['stick disk found from the drive letter'] | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Compare-StickDryRun: kinds of log lines' {
+    It 'calls <Message> "<Kind>"' -ForEach @(
+        @{ Message = '----- Start VM (dry run) -----'; Kind = 'start line (dry run)' }
+        @{ Message = '----- Start VM -----'; Kind = 'start line' }
+        @{ Message = '----- End (dry run): exit code 0 -----'; Kind = 'end line (dry run), exit code 0' }
+        @{ Message = '----- End: exit code 1 -----'; Kind = 'end line, exit code 1' }
+        @{ Message = 'Launcher version v2'; Kind = 'version line: this clone' }
+        @{ Message = 'Launcher version v1'; Kind = 'version line: another version' }
+        @{ Message = 'Timings: setup 4 ms, total 9 ms'; Kind = 'timings line' }
+        @{ Message = 'Note: the earlier lines of the log are in launcher-20260102-030405.log.'; Kind = 'note: the earlier lines were moved aside' }
+        @{ Message = 'Note: the log could not be moved aside, because access is denied; this run adds to it.'; Kind = 'note: the log could not be moved aside' }
+        @{ Message = 'Note: an earlier run of the launcher ended without releasing its lock; this run took the lock over.'; Kind = 'note: lock taken over' }
+        @{ Message = 'Note: Memory Integrity is on, so the VM runs on top of Hyper-V (slower than native).'; Kind = 'note: Memory Integrity' }
+        @{ Message = 'Waiting up to 30 s for VirtualBox''s background service (VBoxSVC) to end'; Kind = 'waiting for VBoxSVC' }
+        @{ Message = 'Stick found: disk 3 (\\.\PhysicalDrive3), drive Q:, ID 5CA1AB1E'; Kind = 'stick found' }
+        @{ Message = 'Saved state found: suspended in VMware'; Kind = 'saved state found: suspended in VMware' }
+        @{ Message = 'Using VirtualBox'; Kind = 'using VirtualBox' }
+        @{ Message = 'Already running in VMware.'; Kind = 'already running in VMware' }
+        @{ Message = 'VirtualBox VM state: poweroff'; Kind = 'VirtualBox VM state: poweroff' }
+        @{ Message = 'stick.vmdk already points at the stick'; Kind = 'descriptor already points at the stick' }
+        @{ Message = 'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'; Kind = 'descriptor would be pointed at the stick' }
+        @{ Message = 'Creating stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0'; Kind = 'descriptor would be created' }
+        @{ Message = 'Test VM.vbox: drive letter OK'; Kind = 'the .vbox file: drive letter OK' }
+        @{ Message = 'VirtualBox.xml: paths moved to drive Q:'; Kind = 'VirtualBox.xml: paths would move to the drive letter' }
+        @{ Message = 'DRY RUN - would start Q:\VMware\Test VM.vmx with VMware Workstation (Q:\Programs\VMware)'; Kind = 'would start with VMware Workstation' }
+        @{ Message = 'DRY RUN - a real start would ask whether to resume the saved state in VMware.'; Kind = 'a real start would ask whether to resume' }
+        @{ Message = 'Started with VirtualBox 7.1.4r165100'; Kind = 'started with VirtualBox' }
+    ) {
+        Get-CompareKind -Message $Message -Version 'v2' | Should -BeExactly $Kind
+    }
+
+    It 'shows no text of an unknown line, a stop, an error line or a would-stop' {
+        foreach ($message in @('Hello Kelda from the guest', 'STOPPED: the disk Kelda-7 is not the stick', 'Error detail: System.IO.IOException: Kelda',
+                'DRY RUN - a real start would stop here: Kelda is gone', 'VirtualBox VM state: "Kelda is running"', 'Launcher version Kelda')) {
+            Get-CompareKind -Message $message | Should -Not -Match 'Kelda'
+        }
+        Get-CompareKind -Message 'Hello Kelda' | Should -BeExactly 'other line'
+        Get-CompareKind -Message 'STOPPED: Kelda' | Should -BeExactly 'STOPPED line'
+    }
+
+    It 'reads the message after the first two spaces, and keeps only the lines two launchers must log alike' {
+        Get-CompareLogMessage -Line '2026-01-02T03:04:05.678+01:00 [42]  Using VMware' | Should -BeExactly 'Using VMware'
+        $lines = @('Launcher version v1', 'Using VMware', 'Waiting up to 30 s for VBoxSVC', 'Timings: total 3 ms', 'Note: the earlier lines of the log are in launcher-20260102-030405.log.', 'Stick found: x') |
+            ForEach-Object { "2026-01-02T03:04:05.678+01:00 [42]  $_" }
+        Get-CompareDecision -Lines $lines | Should -BeExactly @('Using VMware', 'Stick found: x')
+    }
+}
+
+Describe 'Compare-StickDryRun: the comparison of two dry runs' {
+    BeforeAll {
+        # Return the messages $Messages as log lines.
+        function ConvertTo-TestLogLine {
+            param([string[]]$Messages)
+            @($Messages | ForEach-Object { "2026-01-02T03:04:05.678+01:00 [42]  $_" })
+        }
+
+        # Return one pair named $Name with the messages $Before and $After and the exit codes.
+        function Get-TestPair {
+            param([string[]]$Before, [string[]]$After, [int]$BeforeExit = 0, [int]$AfterExit = 0, [string]$Name = 'as configured')
+            [pscustomobject]@{ Name = $Name; Before = ConvertTo-TestLogLine $Before; After = ConvertTo-TestLogLine $After; BeforeExit = $BeforeExit; AfterExit = $AfterExit }
+        }
+
+        # Return the expectations $Text as the tool reads them.
+        function Get-TestExpected {
+            param([string[]]$Text)
+            @($Text | ForEach-Object { ConvertFrom-CompareExpectation -Text $_ })
+        }
+
+        $script:run = @('----- Start VM (dry run) -----', 'Launcher version v1', 'Stick found: disk 3, ID 5CA1AB1E', 'Using VMware', 'stick.vmdk already points at the stick',
+            'DRY RUN - would start x.vmx with VMware Workstation (y)', 'Timings: total 3 ms', '----- End (dry run): exit code 0 -----')
+    }
+
+    It 'passes runs that differ only in the version, Timings and a wait line' {
+        $after = @($script:run[0], 'Launcher version v2') + $script:run[2..5] + @('Waiting up to 30 s for x', 'Timings: total 9 ms', $script:run[7])
+        $result = Test-CompareChange -Pairs @(Get-TestPair -Before $script:run -After $after) -Version 'v2'
+        $result.Problems | Should -BeNullOrEmpty
+        $result.Lines | Should -Contain '  as configured: lines that differ, apart from the version, Timings and a wait line: 0 of 6/6; exit codes 0 and 0'
+    }
+
+    It 'fails on a changed, a missing and an extra line, and names only their kinds' -ForEach @(
+        @{ Case = 'changed'; Edit = { param($r) $r[2] = 'Stick found: disk 4, ID 5CA1AB1E'; $r }; Kinds = 'stick found => stick found' }
+        @{ Case = 'missing'; Edit = { param($r) @($r | Where-Object { $_ -ne 'Using VMware' }) }; Kinds = 'using VMware =>' }
+        @{ Case = 'extra'; Edit = { param($r) @($r[0..3]) + @('Note: Memory Integrity is on.') + @($r[4..7]) }; Kinds = '=> note: Memory Integrity' }
+    ) {
+        $after = & $Edit @($script:run)
+        $result = Test-CompareChange -Pairs @(Get-TestPair -Before $script:run -After $after)
+        $result.Problems | Should -BeExactly @('the dry runs (as configured) differ in 1 line(s) that no -ExpectChange names')
+        $result.Lines | Should -Contain "  as configured: unexpected change: '$Kinds'"
+        ($result.Lines -join "`n") | Should -Not -Match '5CA1AB1E|disk 4'
+    }
+
+    It 'aligns the lines around an added one, so the lines after it do not count as changed' {
+        $after = @($script:run[0..2]) + @('Note: Memory Integrity is on.') + @($script:run[3..7])
+        @(Get-CompareDifference -Before (Get-CompareDecision -Lines (ConvertTo-TestLogLine $script:run)) -After (Get-CompareDecision -Lines (ConvertTo-TestLogLine $after))).Count | Should -Be 1
+    }
+
+    It 'passes an expected change on that one line, and fails it when it happens twice in one pair' {
+        $after = @($script:run)
+        $after[4] = 'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0'
+        $expected = Get-TestExpected 'descriptor already points at the stick => descriptor would be pointed at the stick'
+        $result = Test-CompareChange -Pairs @(Get-TestPair -Before $script:run -After $after) -Expected $expected
+        $result.Problems | Should -BeNullOrEmpty
+        $result.Lines | Should -Contain "  as configured: expected change: 'descriptor already points at the stick => descriptor would be pointed at the stick'"
+
+        $twice = @($script:run[0..4]) + @('other.vmdk already points at the stick') + @($script:run[5..7])
+        $twiceAfter = @($after[0..4]) + @('other.vmdk -> RW 1 FLAT "x" 0') + @($after[5..7])
+        (Test-CompareChange -Pairs @(Get-TestPair -Before $twice -After $twiceAfter) -Expected $expected).Problems |
+            Should -BeExactly @('the dry runs (as configured) differ in 1 line(s) that no -ExpectChange names')
+    }
+
+    It 'lets an expectation match once in each pair, and fails one that did not happen' {
+        $after = @($script:run)
+        $after[4] = 'stick.vmdk -> RW 1 FLAT "x" 0'
+        $expected = Get-TestExpected 'descriptor already points at the stick => descriptor would be pointed at the stick', '=> note: Memory Integrity'
+        $pairs = @((Get-TestPair -Before $script:run -After $after), (Get-TestPair -Before $script:run -After $after -Name 'VirtualBox'))
+        (Test-CompareChange -Pairs $pairs -Expected $expected).Problems | Should -BeExactly @("the expected change '=> note: Memory Integrity' did not happen")
+    }
+
+    It 'fails runs whose exit codes differ' {
+        (Test-CompareChange -Pairs @(Get-TestPair -Before $script:run -After $script:run -AfterExit 1)).Problems | Should -BeExactly @('the dry runs (as configured) ended with different exit codes')
+    }
+
+    It 'reads an expectation for a changed, an added and a removed line, and refuses any other form' {
+        (ConvertFrom-CompareExpectation -Text 'stick found => stick found').Text | Should -BeExactly 'stick found => stick found'
+        $added = ConvertFrom-CompareExpectation -Text '=> note: Memory Integrity'
+        $added.Before | Should -BeExactly ''
+        $added.Text | Should -BeExactly '=> note: Memory Integrity'
+        (ConvertFrom-CompareExpectation -Text 'using VMware =>').Text | Should -BeExactly 'using VMware =>'
+        foreach ($bad in @('stick found', ' => ', 'a => b => c', '')) {
+            { ConvertFrom-CompareExpectation -Text $bad } | Should -Throw '*is not of the form*'
+        }
+    }
+}
+
+Describe 'Compare-StickDryRun: files and the listing' -Tag 'WindowsOnly' {
+    BeforeEach {
+        $script:folder = Join-Path $TestDrive 'files'
+        Remove-Item -LiteralPath $script:folder -Recurse -Force -ErrorAction SilentlyContinue
+        Write-TestFile -Path (Join-Path $script:folder 'Launcher\Start-PortableVM.ps1') -Text '# script'
+        Write-TestFile -Path (Join-Path $script:folder 'Launcher\VERSION') -Text "v1`n"
+        Write-TestFile -Path (Join-Path $script:folder 'LauncherData\logs\launcher.log') -Text 'line'
+        Write-TestFile -Path (Join-Path $script:folder 'VMware\Test VM.vmx') -Text 'displayName = "Test VM"'
+        Write-TestFile -Path (Join-Path $script:folder 'Private Name\diary.txt') -Text 'mine'
+        Write-TestFile -Path (Join-Path $script:folder 'Launcher.before-v0\Start-PortableVM.ps1') -Text '# old'
+        Write-TestFile -Path (Join-Path $script:folder 'System Volume Information\tracking.log') -Text 'windows'
+        Write-TestFile -Path (Join-Path $script:folder 'Start VM.cmd') -Text "start `"`" -File `"%~dp0Launcher\Start-PortableVM.ps1`"`r`n"
+        Write-TestFile -Path (Join-Path $script:folder 'Old Start.cmd') -Text "start `"`" -File `"%~dp0Launcher\Start-PortableVM.ps1`"`r`n"
+    }
+
+    It 'finds a changed, an added and a removed file, apart from the folders and names it leaves out' {
+        $before = @(Get-CompareManifest -Target $script:folder)
+        @($before | Where-Object { $_.Path -like 'System Volume Information*' }) | Should -BeNullOrEmpty
+        Write-TestFile -Path (Join-Path $script:folder 'VMware\Test VM.vmx') -Text 'changed'
+        Write-TestFile -Path (Join-Path $script:folder 'VMware\new.vmdk') -Text 'new'
+        Remove-Item -LiteralPath (Join-Path $script:folder 'Private Name\diary.txt')
+        Write-TestFile -Path (Join-Path $script:folder 'Launcher\Start-PortableVM.ps1') -Text '# changed'
+        Write-TestFile -Path (Join-Path $script:folder 'LauncherData\logs\launcher.log') -Text 'more'
+        Write-TestFile -Path (Join-Path $script:folder 'Start VM.cmd') -Text 'changed'
+        $after = @(Get-CompareManifest -Target $script:folder)
+        $change = Get-CompareFileChange -Before $before -After $after -Prefixes @('Launcher\', 'LauncherData\logs\') -Names 'Start VM.cmd'
+        $change.Changed | Should -BeExactly @('VMware\Test VM.vmx')
+        $change.Added | Should -BeExactly @('VMware\new.vmdk')
+        $change.Removed | Should -BeExactly @('Private Name\diary.txt')
+        $change.Count | Should -Be 4
+    }
+
+    It 'lists every top-level name, shows only known names, and counts the kinds of files' {
+        $listing = Get-CompareListing -Target $script:folder -Manifest @(Get-CompareManifest -Target $script:folder) -Version 'v1'
+        $listing.Lines | Should -BeExactly @(
+            '  Launcher: folder, a launcher copy of this clone, 2 file(s): .ps1 1, no extension 1'
+            '  other folder 1: folder, a launcher copy without VERSION, 1 file(s): .ps1 1'
+            '  LauncherData: folder, 1 file(s): .log 1'
+            '  other file 1: file (.cmd, starts the launcher)'
+            '  other folder 2: folder, 1 file(s): .txt 1'
+            '  Start VM.cmd: file (.cmd, starts the launcher)'
+            '  System Volume Information: folder of Windows, not read'
+            '  VMware: folder, 1 file(s): .vmx 1'
+        )
+        $listing.Labels['Private Name'] | Should -BeExactly 'other folder 2'
+        ($listing.Lines -join "`n") | Should -Not -Match 'Private|diary|before-v0|Old Start|Test VM'
+    }
+
+    It 'counts what a write or deploy that did not finish left' {
+        Write-TestFile -Path (Join-Path $script:folder 'VMware\stick.vmdk.pvm-tmp') -Text 'x'
+        $null = New-Item -ItemType Directory -Path (Join-Path $script:folder 'Launcher.new')
+        Get-CompareLeftover -Target $script:folder -Manifest @(Get-CompareManifest -Target $script:folder) | Should -BeExactly @('Launcher.new', '1 .pvm-tmp or .pvm-old file(s)')
+    }
+
+    It 'masks paths, numbers, UUIDs and the names it is given in the deploy''s lines' {
+        Format-CompareSafe -Text 'Deploy-PortableVM: X:\Kelda\stick 12345678 5ca1ab1e-0000-4000-8000-000000000001 Kelda VM, \\server\share' -Private 'Kelda VM' |
+            Should -BeExactly 'Deploy-PortableVM: <path> <number> <uuid> <private>, <path>'
+        Format-CompareSafe -Text 'Deploy-PortableVM: deployed 1234567 (Update), 7654321' -Version '1234567' |
+            Should -BeExactly 'Deploy-PortableVM: deployed 1234567 (Update), <number>'
+    }
+}
+
+Describe 'Compare-StickDryRun: a check on a scratch stick' -Tag 'WindowsOnly' {
+    BeforeAll {
+        # Write-PvmFile and Get-PvmAnsiEncoding come from the launcher's module.
+        Import-Module -Name (Join-Path $script:repoRoot 'src\PortableVM.psm1') -Force -Global -DisableNameChecking
+
+        # Write the folder $Path as a deploy of version $Version leaves it, without the .cmd.
+        function Initialize-TestCompareCopy {
+            param([string]$Path, [string]$Version)
+            $null = New-Item -ItemType Directory -Path $Path -Force
+            $lines = foreach ($name in 'Start-PortableVM.ps1', 'PortableVM.psm1') {
+                $file = Join-Path $Path $name
+                [IO.File]::WriteAllText($file, "# $name of $Version`r`n", $script:utf8)
+                '{0}  {1}' -f (Get-DeployHash -Path $file), $name
+            }
+            [IO.File]::WriteAllText((Join-Path $Path 'SHA256SUMS'), (($lines -join "`n") + "`n"), [Text.Encoding]::ASCII)
+            [IO.File]::WriteAllText((Join-Path $Path 'VERSION'), "$Version`n", [Text.Encoding]::ASCII)
+        }
+
+        # Return the messages of a dry run with the launcher of version $Version and the hypervisor
+        # $Hypervisor; $script:runEdit, when set, changes those of the version $script:editVersion.
+        function Get-TestRunMessage {
+            param([string]$Version, [string]$Hypervisor)
+            $program = if ($Hypervisor -eq 'VirtualBox') { 'VirtualBox' } else { 'VMware Workstation' }
+            $messages = @('----- Start VM (dry run) -----', "Launcher version $Version", 'Stick found: disk 3 (\\.\PhysicalDrive3), drive Q:, ID 5CA1AB1E',
+                "Using $(if ($Hypervisor -eq 'VirtualBox') { 'VirtualBox' } else { 'VMware' })", 'stick.vmdk already points at the stick',
+                "DRY RUN - would start Q:\Kelda\Test VM.vmx with $program (Q:\Programs)", 'Timings: setup 1 ms, total 9 ms', '----- End (dry run): exit code 0 -----')
+            if ($script:runEdit -and $Version -eq $script:editVersion) { $messages = & $script:runEdit $messages }
+            $messages
+        }
+
+        # Stand in for the launcher's dry run on the stick $Target: append the lines of a run to its
+        # log as the launcher writes them, for the version in Launcher and the settings' Hypervisor.
+        function Add-TestRun {
+            param([string]$Target)
+            $version = [IO.File]::ReadAllText((Join-Path $Target 'Launcher\VERSION')).Trim()
+            $settings = [IO.File]::ReadAllText((Join-Path $Target 'LauncherData\settings.psd1'))
+            $hypervisor = if ($settings -match "Hypervisor = 'VirtualBox'") { 'VirtualBox' } else { 'Auto' }
+            $script:hypervisors += $hypervisor
+            $log = Join-Path $Target 'LauncherData\logs\launcher.log'
+            $null = New-Item -ItemType Directory -Path (Split-Path $log) -Force
+            $text = (@(Get-TestRunMessage -Version $version -Hypervisor $hypervisor | ForEach-Object { "2026-01-02T03:04:05.678+01:00 [$PID]  $_" }) -join "`r`n") + "`r`n"
+            [IO.File]::AppendAllText($log, $text, (Get-PvmAnsiEncoding))
+        }
+
+        # Run the check on the scratch stick with the arguments $Arguments; return its result.
+        function Invoke-TestCompare {
+            param([hashtable]$Arguments = @{})
+            $script:run = Join-Path $script:out ('run-' + [Guid]::NewGuid().ToString('N'))
+            $null = New-Item -ItemType Directory -Path $script:run
+            Invoke-StickCompare -RepositoryPath $script:clone -Target $script:stick -OutputFolder $script:out -Folder $script:run @Arguments
+        }
+
+        # Return every file below the scratch stick, other than its log, with its hash.
+        function Get-TestStickState {
+            @(Get-TestTree -Root $script:stick | Where-Object { $_ -notlike 'LauncherData\logs*' })
+        }
+    }
+
+    BeforeEach {
+        Initialize-TestClone
+        $script:stick = Join-Path $TestDrive 'cstick'
+        $script:out = Join-Path $TestDrive 'checks'
+        foreach ($folder in $script:stick, $script:out) { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue }
+        $null = New-Item -ItemType Directory -Path $script:out
+        Write-TestFile -Path (Join-Path $script:stick 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        Write-TestFile -Path (Join-Path $script:stick 'VMware\Test VM.vmx') -Text "displayName = `"Test VM`"`r`n"
+        Write-TestFile -Path (Join-Path $script:stick 'Kelda Private\diary.txt') -Text 'mine'
+        Initialize-TestCompareCopy -Path (Join-Path $script:stick 'Launcher') -Version 'v1'
+        [IO.File]::Copy((Join-Path $script:clone 'Start VM.cmd'), (Join-Path $script:stick 'Start VM.cmd'))
+        $script:runEdit = $null
+        $script:editVersion = 'v2'
+        $script:hypervisors = @()
+        Mock Write-Host {}
+        Mock Test-CompareAdministrator { $true }
+        Mock Get-CompareVmProcess { @() }
+        Mock Get-CompareClone { [pscustomobject]@{ Version = 'v2'; Problem = '' } }
+        Mock Get-DeployVmProcess { @() }
+        Mock Get-DeployVersion { 'v2' }
+        Mock Invoke-CompareLauncher { Add-TestRun -Target $Target; 0 }
+        Mock Invoke-CompareDeploy {
+            try {
+                $done = Invoke-PvmDeploy -RepositoryPath $RepositoryPath -Target $Target
+                [pscustomobject]@{ Exit = 0; Lines = @(Format-DeployReport -Result $done | ForEach-Object { "Deploy-PortableVM: $_" }) }
+            } catch {
+                [pscustomobject]@{ Exit = 1; Lines = @("Deploy-PortableVM: $($_.Exception.Message)") }
+            }
+        }
+    }
+
+    It 'passes when the dry runs agree, deploys the clone, and keeps what Launcher held in Launcher.previous' {
+        $oldLauncher = @(Get-TestTree -Root (Join-Path $script:stick 'Launcher'))
+        $result = Invoke-TestCompare
+        $result.ExitCode | Should -Be 0
+        $result.Lines[-1] | Should -BeExactly 'RESULT: PASSED - deployed v2; the dry runs show no difference, and no other file changed'
+        $result.Lines | Should -Contain '    version line: another version'
+        $result.Lines | Should -Contain '    version line: this clone'
+        $result.Lines | Should -Contain '  Deploy-PortableVM: deployed v2 (Update).'
+        $result.Lines | Should -Contain "  Launcher.previous holds what Launcher held, plus the launcher's .cmd: yes"
+        Get-CompareFolderVersion -Folder (Join-Path $script:stick 'Launcher') | Should -BeExactly 'v2'
+        @(Get-TestTree -Root (Join-Path $script:stick 'Launcher.previous') | Where-Object { $_ -notlike 'Start VM.cmd *' }) | Should -BeExactly $oldLauncher
+        Should -Invoke Invoke-CompareLauncher -Times 2 -Exactly
+        @(Get-ChildItem -LiteralPath $script:run -Name | Sort-Object) | Should -BeExactly @('listing.txt', 'output.txt')
+        [IO.File]::ReadAllLines((Join-Path $script:run 'output.txt')) | Should -BeExactly $result.Lines
+    }
+
+    It 'prints and saves nothing from the stick: no path, name, number or ID' {
+        $result = Invoke-TestCompare -Arguments @{ AlsoVirtualBox = $true }
+        $result.ExitCode | Should -Be 0
+        # The run folder also keeps the bytes of the settings from before -AlsoVirtualBox, which stay on the PC.
+        $saved = @('listing.txt', 'output.txt' | ForEach-Object { [IO.File]::ReadAllText((Join-Path $script:run $_)) }) -join "`n"
+        foreach ($text in @(($result.Lines -join "`n"), $saved)) {
+            foreach ($value in @($script:stick, 'Kelda', 'diary', '5CA1AB1E', 'PhysicalDrive', 'Test VM', 'Q:\')) { $text.Contains($value) | Should -BeFalse -Because $value }
+        }
+    }
+
+    It 'refuses, changing nothing, when <Case>' -ForEach @(
+        @{ Case = 'it lacks administrator rights'; Set = { Mock Test-CompareAdministrator { $false } }; Reason = 'the check needs administrator rights; nothing was changed' }
+        @{ Case = 'a VM runs'; Set = { Mock Get-CompareVmProcess { 'vmware-vmx.exe' } }; Reason = 'a VM runs on this PC*' }
+        @{ Case = 'a write was left unfinished'; Set = { Write-TestFile -Path (Join-Path $script:stick 'VMware\Test VM.vmx.pvm-old') -Text 'x' }; Reason = '*left 1 .pvm-tmp or .pvm-old file(s); nothing was changed' }
+        @{ Case = 'a deploy left Launcher.new'; Set = { $null = New-Item -ItemType Directory -Path (Join-Path $script:stick 'Launcher.new') }; Reason = '*left Launcher.new; nothing was changed' }
+        @{ Case = 'the clone is not clean'; Set = { Mock Get-CompareClone { [pscustomobject]@{ Version = 'v2-dirty'; Problem = 'the clone has changes that are not committed' } } }; Reason = 'the clone has changes that are not committed; commit and push first. Nothing was changed' }
+        @{ Case = 'the clone is not pushed'; Set = { Mock Get-CompareClone { [pscustomobject]@{ Version = 'v2'; Problem = 'the clone is not at its pushed commit' } } }; Reason = 'the clone is not at its pushed commit*' }
+        @{ Case = 'the commit is on the stick already'; Set = { Mock Get-CompareClone { [pscustomobject]@{ Version = 'v1'; Problem = '' } } }; Reason = "the stick's Launcher holds the clone's commit already*" }
+        @{ Case = 'the settings of a cut-off run wait to be put back'; Set = { Write-TestFile -Path (Join-Path $script:out $ComparePendingName) -Text 'other settings' }; Reason = 'an earlier run with -AlsoVirtualBox was cut off*' }
+        @{ Case = 'an expected change has another form'; Set = { $script:extra = @{ ExpectChange = @('stick found') } }; Reason = "-ExpectChange 'stick found' is not of the form*" }
+    ) {
+        $script:extra = @{}
+        & $Set
+        $before = Get-TestStickState
+        $result = Invoke-TestCompare -Arguments $script:extra
+        $result.ExitCode | Should -Be 1
+        $result.Lines[-1] | Should -BeLike "RESULT: FAILED - $Reason"
+        Get-TestStickState | Should -BeExactly $before
+        Should -Invoke Invoke-CompareLauncher -Times 0 -Exactly
+        Should -Invoke Invoke-CompareDeploy -Times 0 -Exactly
+    }
+
+    It 'deploys nothing when the first dry run fails' {
+        Mock Invoke-CompareLauncher { Add-TestRun -Target $Target; 1 }
+        $before = Get-TestStickState
+        $result = Invoke-TestCompare
+        $result.Lines[-1] | Should -BeExactly 'RESULT: FAILED - the dry run (as configured) with the launcher on the stick ended with exit code 1; nothing was deployed'
+        Get-TestStickState | Should -BeExactly $before
+        Should -Invoke Invoke-CompareDeploy -Times 0 -Exactly
+    }
+
+    It 'fails without a second dry run when the deploy fails' {
+        Write-TestFile -Path (Join-Path $script:stick 'Launcher.previous\notes.txt') -Text 'mine'
+        $result = Invoke-TestCompare
+        $result.Lines[-1] | Should -BeExactly 'RESULT: FAILED - the deploy did not pass'
+        $result.Lines | Should -Contain '  deploy: exit code 1'
+        Should -Invoke Invoke-CompareLauncher -Times 1 -Exactly
+        Get-CompareFolderVersion -Folder (Join-Path $script:stick 'Launcher') | Should -BeExactly 'v1'
+    }
+
+    It 'fails when the second dry run fails' {
+        $script:runEdit = { param($m) @($m[0..5]) + @('STOPPED: Kelda', '----- End (dry run): exit code 1 -----') }
+        Mock Invoke-CompareLauncher { Add-TestRun -Target $Target; [int]([IO.File]::ReadAllText((Join-Path $Target 'Launcher\VERSION')).Trim() -eq 'v2') }
+        $result = Invoke-TestCompare
+        $result.ExitCode | Should -Be 1
+        $result.Lines[-1] | Should -BeLike 'RESULT: FAILED - the dry runs (as configured) differ in 2 line(s) that no -ExpectChange names; the dry runs (as configured) ended with different exit codes'
+        $result.Lines | Should -Contain "  as configured: unexpected change: 'end line (dry run), exit code 0 => STOPPED line'"
+    }
+
+    It 'fails on an unexpected difference, and passes it once -ExpectChange names it' {
+        $script:runEdit = { param($m) $m[4] = 'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0'; $m }
+        $result = Invoke-TestCompare
+        $result.Lines[-1] | Should -BeExactly 'RESULT: FAILED - the dry runs (as configured) differ in 1 line(s) that no -ExpectChange names'
+
+        $result = Invoke-StickCompare -RepositoryPath $script:clone -Target $script:stick -OutputFolder $script:out -Folder $script:run `
+            -ExpectChange 'descriptor already points at the stick => descriptor would be pointed at the stick'
+        $result.Lines[-1] | Should -BeExactly "RESULT: FAILED - the stick's Launcher holds the clone's commit already, so there is nothing to compare; run the check once per commit. Nothing was changed"
+
+        Mock Get-CompareClone { [pscustomobject]@{ Version = 'v3'; Problem = '' } }
+        Mock Get-DeployVersion { 'v3' }
+        $script:editVersion = 'v3'
+        $script:runEdit = { param($m) $m[4] = 'stick.vmdk -> RW 1 FLAT "x" 0'; $m }
+        $result = Invoke-TestCompare -Arguments @{ ExpectChange = @('descriptor already points at the stick => descriptor would be pointed at the stick') }
+        $result.Lines[-1] | Should -BeExactly 'RESULT: PASSED - deployed v3; the dry runs show only the 1 expected change(s), and no other file changed'
+    }
+
+    It 'fails when a file outside the launcher folders changes, and names only its top-level label' {
+        Mock Invoke-CompareDeploy {
+            Write-TestFile -Path (Join-Path $Target 'Kelda Private\diary.txt') -Text 'changed'
+            $done = Invoke-PvmDeploy -RepositoryPath $RepositoryPath -Target $Target
+            [pscustomobject]@{ Exit = 0; Lines = @(Format-DeployReport -Result $done | ForEach-Object { "Deploy-PortableVM: $_" }) }
+        }
+        $result = Invoke-TestCompare
+        $result.Lines[-1] | Should -BeExactly 'RESULT: FAILED - files outside the launcher folders changed, in: other folder 1'
+    }
+
+    It 'fails when the top-level folders after the deploy are not those of the listing' {
+        Mock Invoke-CompareDeploy {
+            $done = Invoke-PvmDeploy -RepositoryPath $RepositoryPath -Target $Target
+            $null = New-Item -ItemType Directory -Path (Join-Path $Target 'Empty Kelda')
+            [pscustomobject]@{ Exit = 0; Lines = @(Format-DeployReport -Result $done | ForEach-Object { "Deploy-PortableVM: $_" }) }
+        }
+        (Invoke-TestCompare).Lines[-1] | Should -BeExactly 'RESULT: FAILED - the top-level folders and files after the deploy are not those of the listing'
+    }
+
+    It 'fails when the dry runs before the deploy change a file other than the log' {
+        Mock Invoke-CompareLauncher { Add-TestRun -Target $Target; Write-TestFile -Path (Join-Path $Target 'VMware\Test VM.vmx') -Text 'changed'; 0 }
+        (Invoke-TestCompare).Lines[-1] | Should -BeExactly 'RESULT: FAILED - the dry runs with the launcher on the stick changed a file other than the log; nothing was deployed'
+        Should -Invoke Invoke-CompareDeploy -Times 0 -Exactly
+    }
+
+    It 'with -AlsoVirtualBox runs a second pair with VirtualBox and puts the settings back byte for byte' {
+        $settings = Join-Path $script:stick 'LauncherData\settings.psd1'
+        $original = [IO.File]::ReadAllBytes($settings)
+        $result = Invoke-TestCompare -Arguments @{ AlsoVirtualBox = $true }
+        $result.Lines[-1] | Should -BeExactly 'RESULT: PASSED - deployed v2; the dry runs show no difference, and no other file changed'
+        $script:hypervisors | Should -BeExactly @('Auto', 'VirtualBox', 'Auto', 'VirtualBox')
+        $result.Lines | Should -Contain '    using VirtualBox'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($settings)) | Should -BeExactly ([Convert]::ToBase64String($original))
+        Join-Path $script:out $ComparePendingName | Should -Not -Exist
+        @(Get-ChildItem -LiteralPath $script:stick -Recurse -Force -Name | Where-Object { $_ -like '*.pvm-*' }) | Should -BeNullOrEmpty
+    }
+
+    It 'with -AlsoVirtualBox puts the settings back when the dry run fails' {
+        $settings = Join-Path $script:stick 'LauncherData\settings.psd1'
+        $original = [IO.File]::ReadAllBytes($settings)
+        Mock Invoke-CompareLauncher {
+            Add-TestRun -Target $Target
+            if ($script:hypervisors[-1] -eq 'VirtualBox') { throw 'The dry run broke.' }
+            0
+        }
+        $result = Invoke-TestCompare -Arguments @{ AlsoVirtualBox = $true }
+        $result.ExitCode | Should -Be 1
+        $result.Lines[-1] | Should -BeLike 'RESULT: FAILED - unexpected error*'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($settings)) | Should -BeExactly ([Convert]::ToBase64String($original))
+        Join-Path $script:out $ComparePendingName | Should -Not -Exist
+        Join-Path $script:run "$ComparePendingName.1" | Should -Exist
+        Should -Invoke Invoke-CompareDeploy -Times 0 -Exactly
+    }
+
+    It 'after a cut-off -AlsoVirtualBox run, stops until the settings are back, then goes on' {
+        $settings = Join-Path $script:stick 'LauncherData\settings.psd1'
+        $original = [IO.File]::ReadAllBytes($settings)
+        # A run cut off after its safe write: the bytes before are on the PC, the stick has VirtualBox.
+        $null = Write-CompareHypervisor -SettingsPath $settings -PendingPath (Join-Path $script:out $ComparePendingName)
+        [IO.File]::ReadAllText($settings) | Should -Match "Hypervisor = 'VirtualBox'"
+        $result = Invoke-TestCompare
+        $result.Lines[-1] | Should -BeLike 'RESULT: FAILED - an earlier run with -AlsoVirtualBox was cut off before it put the settings back. Copy virtualbox-settings.original*'
+        [IO.File]::WriteAllBytes($settings, $original)
+        $result = Invoke-TestCompare
+        $result.Lines | Should -Contain '  the settings of an earlier -AlsoVirtualBox run were back in place already'
+        $result.Lines[-1] | Should -BeLike 'RESULT: PASSED*'
+        Join-Path $script:out $ComparePendingName | Should -Not -Exist
+    }
+
+    It 'with -ListOnly lists the stick and runs and changes nothing' {
+        Mock Test-CompareAdministrator { $false }
+        $before = Get-TestStickState
+        $result = Invoke-TestCompare -Arguments @{ ListOnly = $true }
+        $result.ExitCode | Should -Be 0
+        $result.Lines[-1] | Should -BeExactly 'RESULT: PASSED - listed the stick; nothing was run or changed'
+        $result.Lines | Should -Contain '  other folder 1: folder, 1 file(s): .txt 1'
+        [IO.File]::ReadAllLines((Join-Path $script:run 'listing.txt')) | Should -BeExactly @($result.Lines | Where-Object { $_ -like '  *' })
+        Get-TestStickState | Should -BeExactly $before
+        Should -Invoke Invoke-CompareLauncher -Times 0 -Exactly
+        Should -Invoke Invoke-CompareDeploy -Times 0 -Exactly
+    }
+
+    It 'finds the stick folder by itself one level below a drive''s root, and stops at none or two' {
+        Mock Get-CompareDriveRoot { @($TestDrive) }
+        $script:run = Join-Path $script:out 'found'
+        $null = New-Item -ItemType Directory -Path $script:run
+        $result = Invoke-StickCompare -RepositoryPath $script:clone -OutputFolder $script:out -Folder $script:run -ListOnly
+        $result.Lines[0] | Should -BeExactly 'Compare-StickDryRun: the stick folder was found by its Launcher and LauncherData folders.'
+        $result.ExitCode | Should -Be 0
+
+        # A folder this account may not read is passed over; Test-Path reports an error for it, which
+        # $ErrorActionPreference Stop would make a stop.
+        $denied = Join-Path $TestDrive 'locked\Launcher'
+        $null = New-Item -ItemType File -Path (Join-Path $denied 'Start-PortableVM.ps1') -Force
+        $null = & icacls.exe $denied /deny "$($env:USERNAME):(OI)(CI)(RD,RA,REA)"
+        try {
+            { $null = Test-Path -LiteralPath (Join-Path $denied 'Start-PortableVM.ps1') -ErrorAction Stop } | Should -Throw
+            (Invoke-StickCompare -RepositoryPath $script:clone -OutputFolder $script:out -Folder $script:run -ListOnly).Lines[-1] | Should -BeLike 'RESULT: PASSED*'
+        } finally {
+            $null = & icacls.exe $denied /remove:d "$($env:USERNAME)"
+            $null = & icacls.exe (Join-Path $denied 'Start-PortableVM.ps1') /remove:d "$($env:USERNAME)"
+        }
+
+        Copy-Item -LiteralPath $script:stick -Destination (Join-Path $TestDrive 'cstick2') -Recurse
+        $result = Invoke-StickCompare -RepositoryPath $script:clone -OutputFolder $script:out -Folder $script:run -ListOnly
+        $result.Lines[-1] | Should -BeLike 'RESULT: FAILED - found 2 folders with Launcher and LauncherData*'
+        # A refusal before the stick is known still saves its reason for the first window.
+        [IO.File]::ReadAllLines((Join-Path $script:run 'output.txt'))[-1] | Should -BeExactly $result.Lines[-1]
+        Remove-Item -LiteralPath (Join-Path $TestDrive 'cstick2') -Recurse -Force
+    }
+
+    It 'refuses an output folder on the stick or in the repository' {
+        foreach ($out in @((Join-Path $script:stick 'checks'), (Join-Path $script:clone 'checks'))) {
+            $null = New-Item -ItemType Directory -Path $out -Force
+            $result = Invoke-StickCompare -RepositoryPath $script:clone -Target $script:stick -OutputFolder $out -Folder $out
+            $result.Lines[-1] | Should -BeLike 'RESULT: FAILED - the output folder is on the stick or in the repository*'
+            Join-Path $out 'output.txt' | Should -Not -Exist
+            Should -Invoke Invoke-CompareLauncher -Times 0 -Exactly
+            Remove-Item -LiteralPath $out -Recurse -Force
+        }
+    }
+}
+
+Describe 'Compare-StickDryRun: adapters' {
+    It '<Name> throws when a test reaches it unmocked' -ForEach @(
+        @{ Name = 'Test-CompareAdministrator'; Call = { Test-CompareAdministrator } }
+        @{ Name = 'Get-CompareVmProcess'; Call = { Get-CompareVmProcess } }
+        @{ Name = 'Get-CompareDriveRoot'; Call = { Get-CompareDriveRoot } }
+        @{ Name = 'Invoke-CompareGit'; Call = { Invoke-CompareGit -RepositoryPath $TestDrive -Arguments 'status' } }
+        @{ Name = 'Invoke-CompareLauncher'; Call = { Invoke-CompareLauncher -Target $TestDrive } }
+        @{ Name = 'Invoke-CompareDeploy'; Call = { Invoke-CompareDeploy -RepositoryPath $TestDrive -Target $TestDrive } }
+        @{ Name = 'Invoke-CompareElevated'; Call = { Invoke-CompareElevated -ScriptPath 'none.ps1' -Folder $TestDrive } }
+    ) {
+        $previous = $env:PVM_TEST
+        $env:PVM_TEST = '1'
+        try { $Call | Should -Throw "$Name reached this PC during a test; mock it." }
+        finally { $env:PVM_TEST = $previous }
+    }
+}
+
+Describe 'Compare-StickDryRun as a script' -Tag 'WindowsOnly' {
+    BeforeAll {
+        # Run the tool as the owner does, in Windows PowerShell 5.1, with $Arguments, in a process
+        # that reaches the PC: -ListOnly reads the stick folder and this clone's git state only.
+        function Invoke-TestCompareScript {
+            param([string[]]$Arguments)
+            $previous = $env:PVM_TEST
+            $env:PVM_TEST = ''
+            try { $lines = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:repoRoot 'tools\Compare-StickDryRun.ps1') @Arguments 2>&1 | ForEach-Object { "$_" }) }
+            finally { $env:PVM_TEST = $previous }
+            [pscustomobject]@{ Exit = $LASTEXITCODE; Lines = $lines }
+        }
+        $script:listStick = Join-Path $TestDrive 'list stick'
+        Write-TestFile -Path (Join-Path $script:listStick 'LauncherData\settings.psd1') -Text (Get-TestSchema2Text)
+        Write-TestFile -Path (Join-Path $script:listStick 'Launcher\Start-PortableVM.ps1') -Text '# script'
+    }
+
+    It 'lists the stick with -ListOnly, saves the listing below -OutputFolder and exits 0' {
+        $out = Join-Path $TestDrive 'list checks'
+        $result = Invoke-TestCompareScript -Arguments @('-Target', $script:listStick, '-ListOnly', '-OutputFolder', $out)
+        $result.Exit | Should -Be 0
+        $result.Lines[-1] | Should -BeExactly 'RESULT: PASSED - listed the stick; nothing was run or changed'
+        $runs = @(Get-ChildItem -LiteralPath $out -Directory)
+        $runs.Count | Should -Be 1
+        @(Get-ChildItem -LiteralPath $runs[0].FullName -Name | Sort-Object) | Should -BeExactly @('listing.txt', 'output.txt')
+    }
+
+    It 'refuses an output folder in the repository before it creates anything' {
+        $out = Join-Path $script:repoRoot ('checks-' + [Guid]::NewGuid().ToString('N'))
+        $result = Invoke-TestCompareScript -Arguments @('-Target', $script:listStick, '-ListOnly', '-OutputFolder', $out)
+        $result.Exit | Should -Be 1
+        $result.Lines[-1] | Should -BeLike 'RESULT: FAILED - the output folder is on the stick or in the repository*'
+        $out | Should -Not -Exist
+    }
+}
+
+Describe 'Compare-StickDryRun: a full run with a stand-in for the PC' -Tag 'WindowsOnly' {
+    BeforeAll {
+        # Run git with $Arguments in the repository $Path; throw when it fails. A sample repository
+        # gets no hooks or settings of this PC's other clones, since its remote is a local folder.
+        function Invoke-TestGit {
+            param([string]$Path, [string[]]$Arguments)
+            $previous = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try { $output = & git -C $Path -c core.autocrlf=false -c commit.gpgsign=false -c user.name=Test -c user.email=test@example.com @Arguments 2>&1 }
+            finally { $ErrorActionPreference = $previous }
+            if ($LASTEXITCODE -ne 0) { throw "git $($Arguments[0]) failed: $output" }
+        }
+
+        # The clone: the real launcher code and .cmd, committed and pushed to a bare repository.
+        $script:gitClone = Join-Path $TestDrive 'gitclone'
+        $script:remote = Join-Path $TestDrive 'remote.git'
+        $null = New-Item -ItemType Directory -Path (Join-Path $script:gitClone 'src') -Force
+        foreach ($name in 'src\Start-PortableVM.ps1', 'src\PortableVM.psm1', 'Start VM.cmd') {
+            [IO.File]::Copy((Join-Path $script:repoRoot $name), (Join-Path $script:gitClone $name))
+        }
+        Invoke-TestGit -Path $TestDrive -Arguments @('init', '-q', '--bare', $script:remote)
+        Invoke-TestGit -Path $script:gitClone -Arguments @('init', '-q', '-b', 'work')
+        Invoke-TestGit -Path $script:gitClone -Arguments @('add', '-A')
+        Invoke-TestGit -Path $script:gitClone -Arguments @('commit', '-q', '-m', 'first')
+        Invoke-TestGit -Path $script:gitClone -Arguments @('remote', 'add', 'origin', $script:remote)
+        Invoke-TestGit -Path $script:gitClone -Arguments @('push', '-q', '-u', 'origin', 'work')
+
+        # The scratch stick, as the real one is shaped, with the first commit deployed.
+        $script:fullStick = Join-Path $TestDrive 'fullstick'
+        Write-TestFile -Path (Join-Path $script:fullStick 'LauncherData\settings.psd1') -Text ((@('@{', '    SchemaVersion = 2', "    Hypervisor = 'VMware'", "    StickMbrSignature = '5CA1AB1E'",
+                    '    StickSectors = 4000000', '    VmSectors = 3900000', '    DataPartitionStart = 2500000', "    VirtualBoxVmUuid = '5ca1ab1e-0000-4000-8000-000000000001'",
+                    "    VirtualBoxHome = 'VirtualBox'", "    VirtualBoxVbox = 'VirtualBox\Test VM\Test VM.vbox'", "    VirtualBoxDisk = 'VirtualBox\Test VM\stick.vmdk'",
+                    "    VMwareVmx = 'VMware\Test VM.vmx'", "    VMwareDisk = 'VMware\stick.vmdk'", '}', '') -join "`r`n"))
+        Write-TestFile -Path (Join-Path $script:fullStick 'VMware\Test VM.vmx') -Text ((@('.encoding = "windows-1252"', 'config.version = "8"', 'displayName = "Test VM"', 'uuid.action = "keep"', 'suspend.disabled = "TRUE"', '') -join "`r`n"))
+        $descriptor = @('# Disk DescriptorFile', 'version=1', 'encoding="windows-1252"', 'CID=fffffffe', 'parentCID=ffffffff', 'createType="fullDevice"', '', '# Extent description',
+            'RW 2500000 FLAT "\\.\PhysicalDrive99" 0', 'RW 1400000 ZERO ', '', '# The Disk Data Base', '#DDB', '', 'ddb.adapterType = "ide"', '') -join "`r`n"
+        Write-TestFile -Path (Join-Path $script:fullStick 'VMware\stick.vmdk') -Text $descriptor
+        Write-TestFile -Path (Join-Path $script:fullStick 'VirtualBox\Test VM\stick.vmdk') -Text ($descriptor.Replace("`r`n", "`n"))
+        $below = $script:fullStick.Substring(2)
+        Write-TestFile -Path (Join-Path $script:fullStick 'VirtualBox\Test VM\Test VM.vbox') -Text ((@('<?xml version="1.0"?>', '<VirtualBox xmlns="http://www.virtualbox.org/" version="1.19-windows">',
+                    '  <Machine uuid="{5ca1ab1e-0000-4000-8000-000000000001}" name="Test VM" OSType="Debian_64">', '    <MediaRegistry><HardDisks>',
+                    "      <HardDisk uuid=`"{5ca1ab1e-0000-4000-8000-000000000002}`" location=`"Q:$below\VirtualBox\Test VM\stick.vmdk`" format=`"VMDK`"/>",
+                    '    </HardDisks></MediaRegistry>', '  </Machine>', '</VirtualBox>', '') -join "`n"))
+        Write-TestFile -Path (Join-Path $script:fullStick 'VirtualBox\VirtualBox.xml') -Text ((@('<?xml version="1.0"?>', '<VirtualBox xmlns="http://www.virtualbox.org/" version="1.12-windows">', '  <Global><MachineRegistry>',
+                    "    <MachineEntry uuid=`"{5ca1ab1e-0000-4000-8000-000000000001}`" src=`"Q:$($below.Replace('\', '/'))/VirtualBox/Test VM/Test VM.vbox`"/>",
+                    '  </MachineRegistry></Global>', '</VirtualBox>', '') -join "`n"))
+        $script:programs = Join-Path $TestDrive 'programs'
+        Write-TestFile -Path (Join-Path $script:programs 'VMware\vmware.exe') -Text ''
+        Write-TestFile -Path (Join-Path $script:programs 'VirtualBox\VBoxManage.exe') -Text ''
+        Mock Get-DeployVmProcess { @() }
+        $null = Invoke-PvmDeploy -RepositoryPath $script:gitClone -Target $script:fullStick
+
+        # The stand-in launcher: the stick's own module, in Windows PowerShell 5.1, with every
+        # adapter replaced by the synthetic PC: disk 99 is the stick, both programs are installed,
+        # nothing runs, and starting a program is an error.
+        $script:standIn = Join-Path $TestDrive 'stand-in.ps1'
+        Write-TestFile -Path $script:standIn -Text (@'
+param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$Programs)
+$ErrorActionPreference = 'Stop'
+$module = Import-Module (Join-Path $Root 'Launcher\PortableVM.psm1') -PassThru -Force -DisableNameChecking
+& $module {
+    param($Programs)
+    $script:TestPrograms = $Programs
+    function script:Invoke-PvmTestAdministrator { $true }
+    function script:Invoke-PvmEnterLock { param($Name) [pscustomobject]@{ State = 'Acquired'; Mutex = $null } }
+    function script:Invoke-PvmExitLock { param($Lock) }
+    function script:Invoke-PvmGetPartition { param($DriveLetter) [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512 } }
+    function script:Invoke-PvmGetDisk { param($Number) [pscustomobject]@{ Number = 99; PartitionStyle = 'MBR'; Signature = [uint32]0x5CA1AB1E; LogicalSectorSize = 512; Size = [uint64]4000000 * 512; IsBoot = $false; IsSystem = $false } }
+    function script:Invoke-PvmGetProcess { param($Name) @() }
+    function script:Invoke-PvmTestProcess { param($Name) $false }
+    function script:Invoke-PvmGetDeviceGuard { $null }
+    function script:Invoke-PvmGetRegistryValue {
+        param($Path, $Name)
+        if ($Path -like '*\Oracle\VirtualBox') { return (Join-Path $script:TestPrograms 'VirtualBox') }
+        if ($Path -like '*\VMware Workstation' -and $Path -notlike '*WOW6432Node*') { return (Join-Path $script:TestPrograms 'VMware') }
+        $null
+    }
+    function script:Invoke-PvmNative {
+        param($FilePath, $ArgumentList)
+        switch ($ArgumentList[0]) {
+            'list' { [pscustomobject]@{ ExitCode = 0; Output = '"Test VM" {5ca1ab1e-0000-4000-8000-000000000001}' } }
+            'showvminfo' { [pscustomobject]@{ ExitCode = 0; Output = "name=`"Test VM`"`nVMState=`"poweroff`"" } }
+            default { throw "Unexpected VBoxManage call: $ArgumentList" }
+        }
+    }
+    function script:Invoke-PvmStartProcess { param($FilePath, $ArgumentList) throw 'A dry run must start nothing.' }
+    function script:Invoke-PvmSetEnvironment { param($Name, $Value) }
+    function script:Invoke-PvmSleep { param($Seconds) }
+} $Programs
+$result = Invoke-PortableVM -LauncherPath (Join-Path $Root 'Launcher') -DryRun
+exit $result.ExitCode
+'@)
+    }
+
+    BeforeEach {
+        Mock Write-Host {}
+        Mock Test-CompareAdministrator { $true }
+        Mock Get-CompareVmProcess { @() }
+        Mock Get-DeployVmProcess { @() }
+        Mock Invoke-CompareGit {
+            $previous = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            try { $lines = @(& git -C $RepositoryPath @Arguments 2>&1 | ForEach-Object { "$_" }) }
+            finally { $ErrorActionPreference = $previous }
+            [pscustomobject]@{ Exit = $LASTEXITCODE; Lines = $lines }
+        }
+        Mock Invoke-CompareLauncher {
+            $null = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $script:standIn -Root $Target -Programs $script:programs *>&1
+            $LASTEXITCODE
+        }
+        Mock Invoke-CompareDeploy {
+            try {
+                $done = Invoke-PvmDeploy -RepositoryPath $RepositoryPath -Target $Target
+                [pscustomobject]@{ Exit = 0; Lines = @(Format-DeployReport -Result $done | ForEach-Object { "Deploy-PortableVM: $_" }) }
+            } catch {
+                [pscustomobject]@{ Exit = 1; Lines = @("Deploy-PortableVM: $($_.Exception.Message)") }
+            }
+        }
+        $script:fullOut = Join-Path $TestDrive 'fullchecks'
+        $script:fullRun = Join-Path $script:fullOut ('run-' + [Guid]::NewGuid().ToString('N'))
+        $null = New-Item -ItemType Directory -Path $script:fullRun -Force
+    }
+
+    It 'reads whether the clone is clean at its pushed commit' {
+        $clean = Get-CompareClone -RepositoryPath $script:gitClone
+        $clean.Problem | Should -BeExactly ''
+        $clean.Version | Should -Match '^[0-9a-f]{7,}$'
+        Write-TestFile -Path (Join-Path $script:gitClone 'notes.txt') -Text 'x'
+        (Get-CompareClone -RepositoryPath $script:gitClone).Problem | Should -BeExactly 'the clone has changes that are not committed'
+        Invoke-TestGit -Path $script:gitClone -Arguments @('add', '-A')
+        Invoke-TestGit -Path $script:gitClone -Arguments @('commit', '-q', '-m', 'notes')
+        (Get-CompareClone -RepositoryPath $script:gitClone).Problem | Should -BeExactly 'the clone is not at its pushed commit'
+        Invoke-TestGit -Path $script:gitClone -Arguments @('push', '-q')
+        (Get-CompareClone -RepositoryPath $script:gitClone).Problem | Should -BeExactly ''
+    }
+
+    It 'passes on a scratch stick with the real launcher and deploy, in both programs' {
+        Add-Content -LiteralPath (Join-Path $script:gitClone 'src\Start-PortableVM.ps1') -Value '# a later commit'
+        Invoke-TestGit -Path $script:gitClone -Arguments @('commit', '-q', '-a', '-m', 'later')
+        Invoke-TestGit -Path $script:gitClone -Arguments @('push', '-q')
+        $previousVersion = Get-CompareFolderVersion -Folder (Join-Path $script:fullStick 'Launcher')
+        $result = Invoke-StickCompare -RepositoryPath $script:gitClone -Target $script:fullStick -AlsoVirtualBox -OutputFolder $script:fullOut -Folder $script:fullRun
+        $result.Lines[-1] | Should -BeLike 'RESULT: PASSED - deployed *; the dry runs show no difference, and no other file changed'
+        $result.Lines | Should -Contain '    descriptor already points at the stick'
+        $result.Lines | Should -Contain '    would start with VMware Workstation'
+        $result.Lines | Should -Contain '    would start with VirtualBox'
+        $result.Lines | Should -Not -Contain '    other line'
+        Get-CompareFolderVersion -Folder (Join-Path $script:fullStick 'Launcher.previous') | Should -BeExactly $previousVersion
+        Should -Invoke Invoke-CompareLauncher -Times 4 -Exactly
+    }
+
+    It 'fails when an expected change did not happen, after the deploy' {
+        Add-Content -LiteralPath (Join-Path $script:gitClone 'src\Start-PortableVM.ps1') -Value '# another commit'
+        Invoke-TestGit -Path $script:gitClone -Arguments @('commit', '-q', '-a', '-m', 'another')
+        Invoke-TestGit -Path $script:gitClone -Arguments @('push', '-q')
+        $result = Invoke-StickCompare -RepositoryPath $script:gitClone -Target $script:fullStick -ExpectChange 'stick found => stick found' -OutputFolder $script:fullOut -Folder $script:fullRun
+        $result.ExitCode | Should -Be 1
+        $result.Lines[-1] | Should -BeExactly "RESULT: FAILED - the expected change 'stick found => stick found' did not happen"
     }
 }

@@ -250,6 +250,7 @@ What a stick, a script or a user may rely on between versions:
   when the request was declined (the log says so), and 1 when another run held the lock.
   `tools\Deploy-PortableVM.ps1` returns 0 when done, 1 when it refused or failed;
   `tools\Get-StickInventory.ps1` 0 after its report, 2 when it cannot run;
+  `tools\Compare-StickDryRun.ps1` 0 when the check passed, 1 when it refused or failed;
   `tools\Find-PrivateData.ps1` 0 when clean, 1 on a finding, 2 when it cannot run.
 - The settings are `LauncherData\settings.psd1` in schema 2; `examples\settings.example.psd1`
   lists every key with its default.
@@ -309,6 +310,18 @@ or history:
 ```text
 powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Find-PrivateData.ps1 -History
 ```
+
+A pull request that changes the launcher is checked on the stick before it is merged. The first
+part of that check is one command, run from the clone at the pull request's pushed commit, with
+the stick plugged in and no VM running:
+
+```text
+powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Compare-StickDryRun.ps1 -Target X:\
+```
+
+It asks for administrator rights, deploys the clone between two dry runs and compares them. It
+ends with `RESULT: PASSED` or `RESULT: FAILED - <reason>`;
+[docs/stick-tests.md](docs/stick-tests.md) says how to read it.
 
 [CONTRIBUTING.md](CONTRIBUTING.md) describes the workflow and the git hooks,
 [SECURITY.md](SECURITY.md) the trust model, and [docs/stick-tests.md](docs/stick-tests.md) how

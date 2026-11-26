@@ -130,6 +130,15 @@ All notable changes to this project are listed here. The format follows
   letter on Windows) and stops, on a system without one yet, before it reads a disk; running
   VMs are found by program name. The pre-push hook runs its privacy check in `pwsh` where
   `powershell.exe` is missing. 497 tests now run in the Linux job, up from 287.
+- `tools\Compare-StickDryRun.ps1`, the first part of every stick check as one tested command. It
+  lists the stick's top folders and saves that listing on the PC, runs a dry run with the
+  launcher on the stick, deploys the clone, runs the same dry run again and compares the two
+  line by line. A pull request names the differences it expects with `-ExpectChange`, by the
+  kinds of the lines; any other difference, a changed file outside the launcher's folders, or
+  folders that differ from the listing fail the check. `-AlsoVirtualBox` adds a pair of dry runs
+  with VirtualBox and puts the settings back byte for byte. It asks for administrator rights in
+  a second window, refuses while a VM runs, a write was left unfinished or the clone is not clean
+  at its pushed commit, and prints kinds of log lines, counts and the deploy's own lines.
 
 ### Changed
 
