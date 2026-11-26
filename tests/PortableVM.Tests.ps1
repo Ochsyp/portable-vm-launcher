@@ -3437,7 +3437,7 @@ Describe 'A guided fix after a cut-off write' {
         Mock -ModuleName PortableVM Get-PvmNow { [DateTimeOffset]::new(2026, 11, 12, 10, 15, 30, 123, [TimeSpan]::FromHours(1)) }
         $script:xml = $script:stick.VirtualBoxXml
         $script:copy = Join-Path $script:stick.Backups 'VirtualBox\VirtualBox.xml.previous.launcher-backup'
-        $script:removed = Join-Path $script:stick.Backups 'removed\20261112-101530'
+        $script:removed = Join-Path $script:stick.Backups 'removed\20261112-101530-123'
         $script:now = [IO.File]::ReadAllText($script:xml)
         $script:before = $script:now.Replace('version="1.12-windows"', 'version="1.12-windows" before="1"')
         $script:new = $script:now.Replace('version="1.12-windows"', 'version="1.12-windows" new="1"')
@@ -3544,6 +3544,44 @@ Describe 'A guided fix after a cut-off write' {
         foreach ($key in $tree.Keys) { $after[$key] | Should -BeExactly $tree[$key] }
         Get-TestLog -Path $script:stick.Log | Where-Object { $_ -like 'Fix confirmed*' -or $_ -like 'Moved aside*' -or $_ -like 'Renamed*' } | Should -BeNullOrEmpty
         Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+    }
+
+    It 'asks nothing and changes nothing, a dry run too, while <Case> runs' -ForEach @(
+        @{ Case = 'a VM in VMware'; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'vmware-vmx.exe'; CommandLine = $null }) } }
+        @{ Case = 'VMware Workstation'; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'vmware.exe'; CommandLine = $null }) } }
+        @{ Case = 'VirtualBox'; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'VirtualBox.exe'; CommandLine = $null }) } }
+        @{ Case = 'a VM in VirtualBox'; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'VBoxHeadless.exe'; CommandLine = $null }) } }
+        @{ Case = 'VirtualBox''s background service'; Setup = { Mock -ModuleName PortableVM Invoke-PvmTestProcess { $true } -ParameterFilter { $Name -eq 'VBoxSVC' } } }
+    ) {
+        & $Setup
+        Write-TestFile -Path "$script:xml.pvm-old" -Text $script:before
+        $tree = Get-TestTreeHash -Root $script:stick.Root
+        $expected = ("A write of $script:xml did not finish. To set it right, remove VirtualBox.xml, then rename VirtualBox.xml.pvm-old back to VirtualBox.xml, " +
+            'which holds the version before the write. The launcher offers to do this only while VMware and VirtualBox are closed. Nothing was started.')
+        foreach ($dryRun in $false, $true) {
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun -AskFix { throw 'Nothing must be asked.' }
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly $expected
+        }
+        $after = Get-TestTreeHash -Root $script:stick.Root
+        @($after.Keys | Sort-Object) | Should -BeExactly @($tree.Keys | Sort-Object)
+        foreach ($key in $tree.Keys) { $after[$key] | Should -BeExactly $tree[$key] }
+        Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+    }
+
+    It 'puts back the version before of the VMware descriptor on Yes, then points it at the stick and keeps its copies in the same start' {
+        $disarmed = (Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', '\\.\PortableVM-disarmed')
+        Rename-Item -LiteralPath $script:stick.VMwareDisk -NewName 'stick.vmdk.pvm-old'
+        $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskFix { $true }
+        $result.ExitCode | Should -Be 0 -Because $result.Message
+        "$($script:stick.VMwareDisk).pvm-old" | Should -Not -Exist
+        [IO.File]::ReadAllText($script:stick.VMwareDisk) | Should -BeLike '*RW 2500000 FLAT "\\.\PhysicalDrive3" 0*'
+        [IO.File]::ReadAllText((Join-Path $script:stick.Backups 'VMware\stick.vmdk.orig')) | Should -BeExactly $disarmed
+        [IO.File]::ReadAllText((Join-Path $script:stick.Backups 'VMware\stick.vmdk.previous.orig')) | Should -BeExactly $disarmed
+        $log = Get-TestLog -Path $script:stick.Log
+        $log | Should -Contain "Renamed: $($script:stick.VMwareDisk).pvm-old -> $($script:stick.VMwareDisk)"
+        $log | Should -Contain 'stick.vmdk: rewritten because the disk device, a size and the number of extents differ'
+        Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
     }
 
     It 'asks once for each leftover, in order, and stops at the first No with that one''s step' {

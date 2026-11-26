@@ -2464,21 +2464,26 @@ function Get-PvmWrittenPath {
 # At a write that did not finish of a file the start may write or of a copy of one
 # (Get-PvmWrittenPath), ask whether to take the step that sets it right (Confirm-PvmLeftoverFix),
 # and take it on Yes (Repair-PvmLeftover); else stop the start with that step, as for a step the
-# launcher does not take by itself, which a dry run logs as a stop. A dry run goes on with the
-# files as they are, so its later lines are those of a start that was not set right. A file's own step comes before
-# its copies', which are checked against the file as it is then: after its fix, or, while it is
-# not fixed, not at all.
+# launcher does not take by itself, which a dry run logs as a stop. While VMware, VirtualBox or
+# its background service runs (Test-PvmHypervisorOpen), which may hold or rewrite these files, it
+# offers no fix and stops with the step. A dry run goes on with the files as they are, so its
+# later lines are those of a start that was not set right. A file's own step comes before its
+# copies', which are checked against the file as it is then: after its fix, or, while it is not
+# fixed, not at all.
 function Assert-PvmNoWrittenLeftover {
     [CmdletBinding()]
     param([Parameter(Mandatory)][pscustomobject]$Context)
     $broken = @{}
+    $open = $null
     foreach ($entry in @(Get-PvmWrittenPath -Context $Context)) {
         if ($entry.Of -and $broken.ContainsKey($entry.Of)) { continue }
         $step = Get-PvmWrittenLeftoverStep -Entry $entry
         if (-not $step) { continue }
-        if (-not $step.Actions.Count) {
+        if ($step.Actions.Count -and $null -eq $open) { $open = Test-PvmHypervisorOpen }
+        if (-not $step.Actions.Count -or $open) {
             if (-not $entry.Of) { $broken[$entry.Path] = $true }
-            Invoke-PvmStopUnlessDryRun -Context $Context -Message "$($step.Problem) Nothing was started."
+            $why = if ($step.Actions.Count) { ' The launcher offers to do this only while VMware and VirtualBox are closed.' } else { '' }
+            Invoke-PvmStopUnlessDryRun -Context $Context -Message "$($step.Problem)$why Nothing was started."
             continue
         }
         if (-not (Confirm-PvmLeftoverFix -Context $Context -Step $step)) {
@@ -2496,6 +2501,16 @@ function Assert-PvmNoWrittenLeftover {
         $left = Get-PvmWrittenLeftoverStep -Entry $entry
         if ($left) { throw (Get-PvmStopException -Message "$($left.Problem) Nothing was started.") }
     }
+}
+
+# Return whether VMware Workstation, VirtualBox, a VM of either, or VirtualBox's background
+# service in this Windows session runs, any of which may hold or rewrite the files a fix changes.
+function Test-PvmHypervisorOpen {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+    if (@(Invoke-PvmGetProcess -Name 'vmware', 'vmware-vmx', 'VirtualBox', 'VirtualBoxVM', 'VBoxHeadless').Count) { return $true }
+    [bool](Invoke-PvmTestProcess -Name 'VBoxSVC')
 }
 
 # Return the step for a write that did not finish of the file or copy $Entry of Get-PvmWrittenPath,
@@ -2538,13 +2553,13 @@ function Confirm-PvmLeftoverFix {
 }
 
 # Return the folder, below LauncherData\backups\removed and named for the time of the run's first
-# fix, into which the guided fix moves what it removes; the same for every fix of the run.
+# fix to the millisecond, into which the guided fix moves what it removes; the same for every fix of the run.
 function Get-PvmRemovedFolder {
     [CmdletBinding()]
     [OutputType([string])]
     param([Parameter(Mandatory)][pscustomobject]$Context)
     if (-not $Context.RemovedFolder) {
-        $Context.RemovedFolder = Join-Path (Join-Path $Context.Backups 'removed') (Get-PvmNow).ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture)
+        $Context.RemovedFolder = Join-Path (Join-Path $Context.Backups 'removed') (Get-PvmNow).ToString('yyyyMMdd-HHmmss-fff', [Globalization.CultureInfo]::InvariantCulture)
     }
     $Context.RemovedFolder
 }

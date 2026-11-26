@@ -81,7 +81,8 @@ rather than guess.
 The start shows that step as a question, with No as the default, and says what a Yes puts
 aside, such as the file as it is now when the step puts its version before back. On Yes it takes
 exactly that step, checks the file again and goes on; on No it stops, and you can take the step
-by hand. It deletes nothing: a file the step removes goes to
+by hand. While VMware, VirtualBox or VirtualBox's background service runs, it does not ask and
+stops with the step. It deletes nothing: a file the step removes goes to
 `LauncherData\backups\removed\<date-time>`, under its path below the stick folder, from where you
 can move it back. Delete that folder when you no longer need it. A dry run asks nothing; it logs
 that a real start would ask.

@@ -165,9 +165,10 @@ All notable changes to this project are listed here. The format follows
   the start; it asks once for each such write. It deletes nothing: a file the step removes is
   moved to `LauncherData\backups\removed\<date-time>`, under its path below the stick folder, so
   each Yes can be undone. No, a closed box or a step the launcher cannot take by itself stops the
-  start as before. A dry run asks nothing and changes nothing; it logs that a real start would ask
-  and ends with the step, as a No would. The stick-check tool does not count what the fix put
-  aside as a write that did not finish.
+  start as before, and so does any step while VMware, VirtualBox or VirtualBox's background
+  service runs, since they may hold or rewrite these files. A dry run asks nothing and changes
+  nothing; it logs that a real start would ask and ends with the step, as a No would. The
+  stick-check tool does not count what the fix put aside as a write that did not finish.
 
 ### Changed
 
