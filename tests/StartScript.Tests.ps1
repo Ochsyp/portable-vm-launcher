@@ -402,15 +402,17 @@ Describe 'The launcher run' -Tag 'WindowsOnly' {
     # The test with the real Import-Module may leave no module behind.
     AfterAll { Import-Module (Join-Path $script:repoRoot 'src\PortableVM.psm1') -Force }
 
-    It 'runs the module and passes the resume question on to the dialog' {
+    It 'runs the module and passes the resume question and the question of a fix on to the dialog' {
         $script:ask = $null
         Mock Import-Module {}
-        Mock Invoke-PortableVM { $script:ask = $AskResume; [pscustomobject]@{ ExitCode = 0; Message = ''; Icon = ''; Caption = 'Portable VM' } }
+        Mock Invoke-PortableVM { $script:ask = $AskResume; $script:askFix = $AskFix; [pscustomobject]@{ ExitCode = 0; Message = ''; Icon = ''; Caption = 'Portable VM' } }
         Mock Show-Question { $true }
         (Invoke-Launcher).ExitCode | Should -Be 0
         Should -Invoke Invoke-PortableVM -Times 1 -Exactly -ParameterFilter { $LauncherPath -ceq $script:Here -and -not $DryRun }
         & $script:ask 'Q' 'C' | Should -BeTrue
         Should -Invoke Show-Question -Times 1 -Exactly -ParameterFilter { $Message -ceq 'Q' -and $Caption -ceq 'C' }
+        & $script:askFix 'F' 'C' | Should -BeTrue
+        Should -Invoke Show-Question -Times 1 -Exactly -ParameterFilter { $Message -ceq 'F' -and $Caption -ceq 'C' }
     }
 
     It 'names the step when the module cannot be loaded, and logs the details' {

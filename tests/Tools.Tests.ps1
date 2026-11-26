@@ -1627,6 +1627,12 @@ Describe 'Compare-StickDryRun: kinds of log lines' {
         @{ Message = 'VirtualBox.xml: paths moved to drive Q:'; Kind = 'VirtualBox.xml: paths would move to the drive letter' }
         @{ Message = 'DRY RUN - would start Q:\VMware\Test VM.vmx with VMware Workstation (Q:\Programs\VMware)'; Kind = 'would start with VMware Workstation' }
         @{ Message = 'DRY RUN - a real start would ask whether to resume the saved state in VMware.'; Kind = 'a real start would ask whether to resume' }
+        @{ Message = 'DRY RUN - a real start would ask whether to set it right: A write of Q:\VMware\stick.vmdk did not finish. To set it right, rename stick.vmdk.pvm-old back to stick.vmdk.'
+            Kind = 'a real start would ask whether to set right a write that did not finish'
+        }
+        @{ Message = 'Fix confirmed: A write of Q:\VMware\stick.vmdk did not finish. To set it right, remove stick.vmdk.pvm-tmp; stick.vmdk itself is whole.'; Kind = 'fix of a write that did not finish confirmed' }
+        @{ Message = 'Moved aside: Q:\VMware\stick.vmdk.pvm-tmp -> Q:\LauncherData\backups\removed\20261112-101530\VMware\stick.vmdk.pvm-tmp'; Kind = 'a file the fix moved aside' }
+        @{ Message = 'Renamed: Q:\VMware\stick.vmdk.pvm-old -> Q:\VMware\stick.vmdk'; Kind = 'a file the fix renamed' }
         @{ Message = 'Started with VirtualBox 7.1.4r165100'; Kind = 'started with VirtualBox' }
     ) {
         Get-CompareKind -Message $Message -Version 'v2' | Should -BeExactly $Kind
@@ -1784,8 +1790,9 @@ Describe 'Compare-StickDryRun: files and the listing' -Tag 'WindowsOnly' {
         ($listing.Lines -join "`n") | Should -Not -Match 'Private|diary|before-v0|Old Start|Test VM'
     }
 
-    It 'counts what a write or deploy that did not finish left' {
+    It 'counts what a write or deploy that did not finish left, but not what a guided fix put aside' {
         Write-TestFile -Path (Join-Path $script:folder 'VMware\stick.vmdk.pvm-tmp') -Text 'x'
+        Write-TestFile -Path (Join-Path $script:folder 'LauncherData\backups\removed\20261112-101530\VMware\stick.vmdk.pvm-old') -Text 'x'
         $null = New-Item -ItemType Directory -Path (Join-Path $script:folder 'Launcher.new')
         Get-CompareLeftover -Target $script:folder -Manifest @(Get-CompareManifest -Target $script:folder) | Should -BeExactly @('Launcher.new', '1 .pvm-tmp or .pvm-old file(s)')
     }
@@ -2386,7 +2393,7 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
                 '  settings pass the launcher''s checks: yes'
                 '  the stick is the configured one: yes'
                 '  writes that did not finish (.pvm-tmp or .pvm-old files): 0'
-                '  the next start would stop at a write that did not finish: no'
+                '  the next start would ask about or stop at a write that did not finish: no'
                 '  left by a deploy that did not finish: nothing'
                 '  VMware disk file: found'
                 '  VMware disk file points at the stick: yes'
@@ -2412,12 +2419,13 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
         Get-StateTree -Root $TestDrive | Should -BeExactly $before
     }
 
-    It 'counts writes that did not finish, and says the next start would stop at one' {
+    It 'counts writes that did not finish, but not what a guided fix put aside, and says the next start would ask about or stop at one' {
         Write-TestFile -Path (Join-Path $script:stateStick 'VMware\stick.vmdk.pvm-tmp') -Text 'x'
         Write-TestFile -Path (Join-Path $script:stateStick 'Other\notes.txt.pvm-old') -Text 'x'
+        Write-TestFile -Path (Join-Path $script:stateStick 'LauncherData\backups\removed\20261112-101530\VMware\stick.vmdk.pvm-old') -Text 'x'
         $result = Invoke-StateCheck
         $result.Lines | Should -Contain '  writes that did not finish (.pvm-tmp or .pvm-old files): 2'
-        $result.Lines | Should -Contain '  the next start would stop at a write that did not finish: yes'
+        $result.Lines | Should -Contain '  the next start would ask about or stop at a write that did not finish: yes'
         $result.ExitCode | Should -Be 1
         $result.Lines[-1] | Should -BeExactly 'RESULT: ATTENTION - writes that did not finish'
     }
@@ -2455,7 +2463,7 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
     It 'answers unknown when it cannot tell whether the next start would stop, and goes on' {
         Mock Get-PvmLeftoverProblem { throw [IO.IOException]::new('The process cannot access the file.') }
         $result = Invoke-StateCheck
-        $result.Lines | Should -Contain '  the next start would stop at a write that did not finish: unknown, since a file cannot be read now'
+        $result.Lines | Should -Contain '  the next start would ask about or stop at a write that did not finish: unknown, since a file cannot be read now'
         $result.Lines[-1] | Should -BeExactly 'RESULT: OK - nothing needs attention'
     }
 
