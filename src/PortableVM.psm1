@@ -1573,11 +1573,12 @@ function Get-PvmDescriptorDifference {
     for ($index = 0; $index -lt [Math]::Min($oldExtents.Count, $newExtents.Count); $index++) {
         $before = $oldExtents[$index]
         $after = $newExtents[$index]
-        if ($before.Sectors -ne $after.Sectors) { $found['a size'] = $true }
+        # Numbers compare by value, so leading zeros alone are other line content.
+        if ([int64]$before.Sectors -ne [int64]$after.Sectors) { $found['a size'] = $true }
         if ($before.Access -ne $after.Access) { $found['the access mode'] = $true }
         if ($before.Type -ne $after.Type) { $found['the extent type'] = $true; continue }
         if ($before.Target -ne $after.Target) { $found['the disk device'] = $true }
-        if ($before.Offset -ne $after.Offset) { $found['a start offset'] = $true }
+        if ($before.Offset -ne $after.Offset -and -not ($before.Offset -and $after.Offset -and [int64]$before.Offset -eq [int64]$after.Offset)) { $found['a start offset'] = $true }
     }
     if ($oldExtents.Count -ne $newExtents.Count) { $found['the number of extents'] = $true }
     $blanks = [char[]]@(' ', "`t")

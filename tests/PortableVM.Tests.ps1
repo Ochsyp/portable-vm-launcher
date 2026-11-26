@@ -972,6 +972,10 @@ Describe 'Raw-disk descriptors' {
             Old = "createType=`"partitionedDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
             New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
         }
+        @{ Case = 'a size and an offset written with leading zeros'; Kinds = @('other line content')
+            Old = "createType=`"fullDevice`"`r`nRW 09 FLAT `"\\.\PhysicalDrive3`" 00`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+        }
         @{ Case = 'blanks inside an extent line'; Kinds = @('other line content')
             Old = "createType=`"fullDevice`"`r`nRW  9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
             New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"

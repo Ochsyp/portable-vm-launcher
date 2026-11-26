@@ -1637,6 +1637,7 @@ Describe 'Compare-StickDryRun: kinds of log lines' {
         }
         Get-CompareKind -Message 'Hello Kelda' | Should -BeExactly 'other line'
         Get-CompareKind -Message 'STOPPED: Kelda' | Should -BeExactly 'STOPPED line'
+        Get-CompareKind -Message 'Note: Kelda: rewritten because x' | Should -BeExactly 'other line'
     }
 
     It 'reads the message after the first two spaces, and keeps only the lines two launchers must log alike' {
