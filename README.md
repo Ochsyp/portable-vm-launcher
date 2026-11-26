@@ -155,6 +155,12 @@ of the process that wrote it:
   `launcher.log`, the elevated launcher did not run, and an elevated dry run shows why. A log
   that was moved aside can end with the request line of the run that moved it; that run's lines
   start the new `launcher.log`.
+- When a start points a disk file at the stick, the line with the new layout is followed by one
+  that says why, by kinds only and never a value from the stick, for example
+  `stick.vmdk: rewritten because the disk device differs`. The kinds are the disk device, a size,
+  a start offset, the access mode, the extent type, the number of extents, a missing or different
+  `createType` line, and other line content. A file that differs only in blanks or tabs at the end
+  of those lines, or in case, is left alone and logged as `already points at the stick`.
 - An unexpected error adds `Error detail:`, `Error ID:` and `Error trace:` lines, which can name
   paths on the stick.
 - When `launcher.log` holds 1 MiB or more, or its first line is in the format of a launcher before

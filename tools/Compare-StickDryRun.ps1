@@ -273,6 +273,7 @@ function Get-CompareKind {
         '^DRY RUN - a real start would stop here: ' { return 'a real start would stop here' }
         '^Started with (VMware Workstation|VirtualBox)\b' { return "started with $($Matches[1])" }
         '^Creating .+ -> ' { return 'descriptor would be created' }
+        ': rewritten because ' { return 'reason for the descriptor rewrite' }
         '\.vbox: drive letter OK$' { return 'the .vbox file: drive letter OK' }
         '^VirtualBox\.xml: drive letter OK$' { return 'VirtualBox.xml: drive letter OK' }
         '\.vbox: paths moved to drive [A-Za-z]:$' { return 'the .vbox file: paths would move to the drive letter' }

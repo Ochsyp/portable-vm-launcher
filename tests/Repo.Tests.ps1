@@ -470,10 +470,11 @@ Describe 'Static guards' {
 
     It 'word every log cause after "because" in the module through Format-PvmBecause' {
         # A new sentence with a cause after "because" needs a change of these counts on purpose.
-        # Get-PvmWriteCause words a cause of Windows through Format-PvmBecause too.
+        # Get-PvmWriteCause words a cause of Windows through Format-PvmBecause too. The reason for a
+        # descriptor rewrite is no error, and Format-PvmDescriptorReason words it.
         $text = [IO.File]::ReadAllText($script:module)
-        [regex]::Matches($text, 'because \$').Count | Should -Be 4
-        [regex]::Matches($text, 'because \$\((Format-PvmBecause -Cause|Get-PvmWriteCause -ErrorRecord) ').Count | Should -Be 4
+        [regex]::Matches($text, 'because \$').Count | Should -Be 5
+        [regex]::Matches($text, 'because \$\((Format-PvmBecause -Cause|Get-PvmWriteCause -ErrorRecord|Format-PvmDescriptorReason -Kinds) ').Count | Should -Be 5
     }
 
     It 'check the lock in the script before its administrator-rights block, and end the script there when another run holds it' {

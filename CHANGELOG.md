@@ -139,6 +139,14 @@ All notable changes to this project are listed here. The format follows
   with VirtualBox and puts the settings back byte for byte. It asks for administrator rights in
   a second window, refuses while a VM runs, a write was left unfinished or the clone is not clean
   at its pushed commit, and prints kinds of log lines, counts and the deploy's own lines.
+- The log says why a disk file was rewritten: after the line with the new layout, a line such as
+  `stick.vmdk: rewritten because the disk device differs`. It names kinds only (the disk device, a
+  size, a start offset, the access mode, the extent type, the number of extents, a missing or
+  different `createType` line, other line content), never a value from the stick. A dry run logs
+  it too, and the stick-check tool knows the line.
+- Tests of whole VMware starts and dry runs with VMware's blank at the end of the extent line and
+  a tab at the end of the `createType` line: the disk file and its copies stay byte for byte as
+  they were, so a later start path that compares the file another way fails a test.
 
 ### Changed
 
