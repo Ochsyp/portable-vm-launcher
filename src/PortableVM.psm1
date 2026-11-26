@@ -2487,8 +2487,9 @@ function Get-PvmVmxDisk {
 }
 
 # Return the full path of the file $File that a VM file in the folder $Folder names: relative to
-# that folder, or absolute; either slash is a separator. A name that the system cannot make a
-# path of gives ''.
+# that folder, or absolute; either slash is a separator. A path with a drive letter is absolute on
+# every system; outside Windows it names no file there and stays as written. A name that the
+# system cannot make a path of gives ''.
 function Resolve-PvmVmFilePath {
     [CmdletBinding()]
     [OutputType([string])]
@@ -2496,6 +2497,7 @@ function Resolve-PvmVmFilePath {
         [Parameter(Mandatory)][string]$Folder,
         [Parameter(Mandatory)][string]$File
     )
+    if ($File -match '\A[A-Za-z]:[\\/]' -and [IO.Path]::DirectorySeparatorChar -ne '\') { return $File }
     $separator = [IO.Path]::DirectorySeparatorChar
     $name = $File.Replace('\', $separator).Replace('/', $separator)
     try {
