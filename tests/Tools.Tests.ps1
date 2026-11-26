@@ -1,6 +1,7 @@
-# Tests of tools\Deploy-PortableVM.ps1, tools\Get-StickInventory.ps1 and
-# tools\Compare-StickDryRun.ps1 on a synthetic clone and stick in TestDrive. Each tool is dot-sourced for its functions, which skips its main block, and
-# the functions that read the PC (processes, git, disks, registry) are mocked. The deploy tool
+# Tests of tools\Deploy-PortableVM.ps1, tools\Get-StickInventory.ps1, tools\Compare-StickDryRun.ps1
+# and tools\Test-StickState.ps1 on a synthetic clone and stick in TestDrive. Each tool is
+# dot-sourced for its functions, which skips its main block, and the functions that read the PC
+# (processes, git, disks, registry) are mocked. The deploy tool
 # imports the clone's src\PortableVM.psm1, so the fake clone holds a copy of the real module.
 
 BeforeAll {
@@ -11,6 +12,7 @@ BeforeAll {
     . (Join-Path $script:repoRoot 'tools\Deploy-PortableVM.ps1')
     . (Join-Path $script:repoRoot 'tools\Get-StickInventory.ps1')
     . (Join-Path $script:repoRoot 'tools\Compare-StickDryRun.ps1')
+    . (Join-Path $script:repoRoot 'tools\Test-StickState.ps1')
 
     # Return the system's ANSI code page, read from the registry: the encoding of old settings
     # files, which Windows PowerShell 5.1 calls Default.
@@ -2311,5 +2313,274 @@ exit $result.ExitCode
         $result = Invoke-StickCompare -RepositoryPath $script:gitClone -Target $script:fullStick -ExpectChange 'stick found => stick found' -OutputFolder $script:fullOut -Folder $script:fullRun
         $result.ExitCode | Should -Be 1
         $result.Lines[-1] | Should -BeExactly "RESULT: FAILED - the expected change 'stick found => stick found' did not happen"
+    }
+}
+
+Describe 'Test-StickState' -Tag 'WindowsOnly' {
+    BeforeAll {
+        # The launcher's module, whose adapters the stand-in PC below replaces; the deploy tests load
+        # copies of it from their fake clones, and mocks need exactly one.
+        Get-Module -Name PortableVM | Remove-Module -Force
+        Import-Module -Name (Join-Path $script:repoRoot 'src\PortableVM.psm1') -Force -Global -DisableNameChecking
+
+        # Write the scratch stick $Root as the real one is shaped, every file as a start leaves it:
+        # both disk files point at disk 99, the synthetic stick.
+        function Initialize-StateStick {
+            param([string]$Root)
+            Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue
+            Write-TestFile -Path (Join-Path $Root 'LauncherData\settings.psd1') -Text ((@('@{', '    SchemaVersion = 2', "    Hypervisor = 'VMware'", "    StickMbrSignature = '5CA1AB1E'",
+                        '    StickSectors = 4000000', '    VmSectors = 3900000', '    DataPartitionStart = 2500000', "    VirtualBoxVmUuid = '5ca1ab1e-0000-4000-8000-000000000001'",
+                        "    VirtualBoxHome = 'VirtualBox'", "    VirtualBoxVbox = 'VirtualBox\Test VM\Test VM.vbox'", "    VirtualBoxDisk = 'VirtualBox\Test VM\stick.vmdk'",
+                        "    VMwareVmx = 'VMware\Test VM.vmx'", "    VMwareDisk = 'VMware\stick.vmdk'", "    VmDisplayName = 'Kelda Box'", '}', '') -join "`r`n"))
+            Write-TestFile -Path (Join-Path $Root 'VMware\Test VM.vmx') -Text ((@('.encoding = "windows-1252"', 'config.version = "8"', 'displayName = "Test VM"', 'uuid.action = "keep"', 'suspend.disabled = "TRUE"', '') -join "`r`n"))
+            Write-TestFile -Path (Join-Path $Root 'VMware\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 2500000 FLAT "\\.\PhysicalDrive99" 0', 'RW 1400000 ZERO')
+            Write-TestFile -Path (Join-Path $Root 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 3900000 FLAT "\\.\PhysicalDrive99" 0')
+            Write-TestFile -Path (Join-Path $Root 'VirtualBox\Test VM\Test VM.vbox') -Text ((@('<?xml version="1.0"?>', '<VirtualBox xmlns="http://www.virtualbox.org/" version="1.19-windows">',
+                        '  <Machine uuid="{5ca1ab1e-0000-4000-8000-000000000001}" name="Test VM" OSType="Debian_64">', '  </Machine>', '</VirtualBox>', '') -join "`n"))
+            Write-TestFile -Path (Join-Path $Root 'VirtualBox\VirtualBox.xml') -Text ((@('<?xml version="1.0"?>', '<VirtualBox xmlns="http://www.virtualbox.org/" version="1.12-windows">', '</VirtualBox>', '') -join "`n"))
+            Write-TestFile -Path (Join-Path $Root 'Launcher\Start-PortableVM.ps1') -Text '# script'
+        }
+
+        # Return a descriptor text with the extent lines $Extents and createType fullDevice.
+        function Get-StateDescriptorText {
+            param([string[]]$Extents)
+            (@('# Disk DescriptorFile', 'version=1', 'createType="fullDevice"', '') + $Extents + @('', 'ddb.adapterType = "ide"', '')) -join "`r`n"
+        }
+
+        # Return a log line as the launcher writes it, at $Time by process $ProcessId.
+        function Get-StateLogLine {
+            param([string]$Message, [string]$Time = '2026-11-20T10:00:00.000+01:00', [int]$ProcessId = 4242)
+            "$Time [$ProcessId]  $Message"
+        }
+
+        # Return every file below $Root with its hash, and every folder, as sorted lines.
+        function Get-StateTree {
+            param([string]$Root)
+            @(Get-ChildItem -LiteralPath $Root -Recurse -Force | Sort-Object FullName | ForEach-Object {
+                    if ($_.PSIsContainer) { "$($_.FullName)\" } else { "$($_.FullName) $((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash) $($_.LastWriteTimeUtc.Ticks)" }
+                })
+        }
+
+        # Run the check on the scratch stick, at the time $Now; return its result.
+        function Invoke-StateCheck {
+            param([datetimeoffset]$Now = [datetimeoffset]::new(2026, 11, 23, 12, 0, 0, [TimeSpan]::FromHours(1)))
+            Invoke-StickState -RepositoryPath $script:repoRoot -Target $script:stateStick -Now $Now
+        }
+    }
+
+    BeforeEach {
+        $script:stateStick = Join-Path $TestDrive 'state stick'
+        Initialize-StateStick -Root $script:stateStick
+        Mock Write-Host {}
+        # The stand-in PC: the stick folder's partition is on disk 99, which is the stick.
+        Mock -ModuleName PortableVM Invoke-PvmGetPartition { [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512 } }
+        Mock -ModuleName PortableVM Invoke-PvmGetDisk { [pscustomobject]@{ Number = 99; PartitionStyle = 'MBR'; Signature = [uint32]0x5CA1AB1E; LogicalSectorSize = 512; Size = [uint64]4000000 * 512; IsBoot = $false; IsSystem = $false } }
+    }
+
+    It 'reports a stick as a start leaves it, and that nothing needs attention' {
+        $result = Invoke-StateCheck
+        $result.ExitCode | Should -Be 0
+        $result.Lines[-1] | Should -BeExactly 'RESULT: OK - nothing needs attention'
+        foreach ($line in @(
+                '  settings pass the launcher''s checks: yes'
+                '  the stick is the configured one: yes'
+                '  writes that did not finish (.pvm-tmp or .pvm-old files): 0'
+                '  the next start would stop at a write that did not finish: no'
+                '  left by a deploy that did not finish: nothing'
+                '  VMware disk file: found'
+                '  VMware disk file points at the stick: yes'
+                '  VMware disk file, first copy: no'
+                '  VMware disk file, copy of the version before the latest rewrite: no'
+                '  VirtualBox disk file points at the stick: yes'
+                '  VirtualBox .vbox file: found'
+                '  VirtualBox.xml: found'
+                '  VMware saved state: no'
+                '  VirtualBox saved state: no'
+                '  last run in the log: none'
+            )) { $result.Lines | Should -Contain $line }
+    }
+
+    It 'changes nothing on the stick, in any of these states' {
+        $logLines = @((Get-StateLogLine '----- Start VM -----'), (Get-StateLogLine 'Using VMware'), (Get-StateLogLine '----- End: exit code 0 -----'))
+        Write-TestFile -Path (Join-Path $script:stateStick 'LauncherData\logs\launcher.log') -Text (($logLines -join "`r`n") + "`r`n")
+        Write-TestFile -Path (Join-Path $script:stateStick 'VMware\stick.vmdk.pvm-tmp') -Text 'x'
+        Write-TestFile -Path (Join-Path $script:stateStick 'LauncherData\backups\VMware\stick.vmdk.orig') -Text (Get-StateDescriptorText -Extents 'RW 9 FLAT "\\.\PortableVM-disarmed" 0')
+        Write-TestFile -Path (Join-Path $script:stateStick 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 3900000 FLAT "\\.\PhysicalDrive1" 0')
+        $before = Get-StateTree -Root $TestDrive
+        $null = Invoke-StateCheck
+        Get-StateTree -Root $TestDrive | Should -BeExactly $before
+    }
+
+    It 'counts writes that did not finish, and says the next start would stop at one' {
+        Write-TestFile -Path (Join-Path $script:stateStick 'VMware\stick.vmdk.pvm-tmp') -Text 'x'
+        Write-TestFile -Path (Join-Path $script:stateStick 'Other\notes.txt.pvm-old') -Text 'x'
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  writes that did not finish (.pvm-tmp or .pvm-old files): 2'
+        $result.Lines | Should -Contain '  the next start would stop at a write that did not finish: yes'
+        $result.ExitCode | Should -Be 1
+        $result.Lines[-1] | Should -BeExactly 'RESULT: ATTENTION - writes that did not finish'
+    }
+
+    It 'names what a deploy that did not finish left' {
+        $null = New-Item -ItemType Directory -Path (Join-Path $script:stateStick 'Launcher.new')
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  left by a deploy that did not finish: Launcher.new'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: ATTENTION - what a deploy left'
+    }
+
+    It 'says why the next start rewrites a disk file that does not point at the stick, which needs no attention' {
+        Write-TestFile -Path (Join-Path $script:stateStick 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 3900000 FLAT "\\.\PortableVM-disarmed" 0')
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  VirtualBox disk file points at the stick: no; the next start rewrites it because the disk device differs'
+        $result.ExitCode | Should -Be 0
+    }
+
+    It 'says when the next start stops at a disk file it cannot read' {
+        Write-TestFile -Path (Join-Path $script:stateStick 'VMware\stick.vmdk') -Text 'no descriptor'
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  VMware disk file points at the stick: unknown; the launcher cannot read it, so the next start with VMware stops'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: ATTENTION - a disk file the launcher cannot read'
+    }
+
+    It 'reports a disk file it cannot read now, as while a program holds it, and goes on' {
+        $held = [IO.File]::Open((Join-Path $script:stateStick 'VMware\stick.vmdk'), 'Open', 'Read', 'None')
+        try { $result = Invoke-StateCheck }
+        finally { $held.Dispose() }
+        $result.Lines | Should -Contain '  VMware disk file points at the stick: unknown, since it cannot be read now'
+        $result.Lines | Should -Contain '  VirtualBox disk file points at the stick: yes'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: OK - nothing needs attention'
+    }
+
+    It 'answers unknown when it cannot tell whether the next start would stop, and goes on' {
+        Mock Get-PvmLeftoverProblem { throw [IO.IOException]::new('The process cannot access the file.') }
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  the next start would stop at a write that did not finish: unknown, since a file cannot be read now'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: OK - nothing needs attention'
+    }
+
+    It 'says when it could not read every folder for the count of writes that did not finish' {
+        $locked = Join-Path $script:stateStick 'Locked'
+        $null = New-Item -ItemType Directory -Path $locked
+        $null = & icacls.exe $locked /deny "$($env:USERNAME):(OI)(CI)(RD)"
+        try { $result = Invoke-StateCheck }
+        finally { $null = & icacls.exe $locked /remove:d "$($env:USERNAME)" }
+        $result.Lines | Should -Contain '  writes that did not finish (.pvm-tmp or .pvm-old files): 0, but some folders could not be read'
+    }
+
+    It 'says when a request or a stop without a run follows the last run' {
+        $log = @(
+            (Get-StateLogLine -Message '----- Start VM -----' -Time '2026-11-20T09:00:00.000+01:00' -ProcessId 10)
+            (Get-StateLogLine -Message '----- End: exit code 0 -----' -Time '2026-11-20T09:00:05.000+01:00' -ProcessId 10)
+            (Get-StateLogLine -Message 'Asking for administrator rights' -Time '2026-11-22T10:00:00.000+01:00' -ProcessId 11)
+            (Get-StateLogLine -Message 'STOPPED: The request for administrator rights was declined.' -Time '2026-11-22T10:00:01.000+01:00' -ProcessId 11)
+        )
+        Write-TestFile -Path (Join-Path $script:stateStick 'LauncherData\logs\launcher.log') -Text (($log -join "`r`n") + "`r`n")
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  after the last run, the log holds a request or a stop of no run: yes'
+    }
+
+    It 'reports the copies, and whether a disk file''s copies name no raw disk' {
+        $copy = Join-Path $script:stateStick 'LauncherData\backups\VMware\stick.vmdk.orig'
+        Write-TestFile -Path $copy -Text (Get-StateDescriptorText -Extents 'RW 2500000 FLAT "\\.\PortableVM-disarmed" 0', 'RW 1400000 ZERO')
+        Write-TestFile -Path (Join-Path $script:stateStick 'LauncherData\backups\VMware\stick.vmdk.previous.orig') -Text (Get-StateDescriptorText -Extents 'RW 2500000 FLAT "\\.\PortableVM-disarmed" 0', 'RW 1400000 ZERO')
+        Write-TestFile -Path (Join-Path $script:stateStick 'LauncherData\backups\VirtualBox\VirtualBox.xml.launcher-backup') -Text '<VirtualBox/>'
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  VMware disk file, first copy: yes'
+        $result.Lines | Should -Contain '  VMware disk file, copy of the version before the latest rewrite: yes'
+        $result.Lines | Should -Contain '  VMware disk file, its copies name no raw disk: yes'
+        $result.Lines | Should -Contain '  VirtualBox.xml, first copy: yes'
+        $result.ExitCode | Should -Be 0
+
+        Write-TestFile -Path $copy -Text (Get-StateDescriptorText -Extents 'RW 2500000 FLAT "\\.\PhysicalDrive99" 0', 'RW 1400000 ZERO')
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  VMware disk file, its copies name no raw disk: no'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: ATTENTION - a copy that names a raw disk'
+    }
+
+    It 'says when the stick is not the configured one, or when Windows does not say' {
+        Mock -ModuleName PortableVM Invoke-PvmGetDisk { [pscustomobject]@{ Number = 99; PartitionStyle = 'MBR'; Signature = [uint32]0x5CA1AB1F; LogicalSectorSize = 512; Size = [uint64]4000000 * 512; IsBoot = $false; IsSystem = $false } }
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  the stick is the configured one: no'
+        $result.Lines | Should -Contain '  VMware disk file points at the stick: unknown, since the stick is not the configured one'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: ATTENTION - not the configured stick'
+
+        Mock -ModuleName PortableVM Invoke-PvmGetDisk { throw 'Access is denied.' }
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  the stick is the configured one: unknown, since Windows did not say which disk it is'
+        $result.ExitCode | Should -Be 0
+    }
+
+    It 'checks no VM file when the settings do not pass' {
+        Write-TestFile -Path (Join-Path $script:stateStick 'LauncherData\settings.psd1') -Text "@{ SchemaVersion = 2; Hypervisor = 'VBox' }"
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  settings pass the launcher''s checks: no'
+        $result.Lines | Should -Contain '  the VM files: not checked, since the settings do not pass'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: ATTENTION - settings that do not pass'
+        Should -Invoke -CommandName Invoke-PvmGetDisk -ModuleName PortableVM -Times 0 -Exactly
+    }
+
+    It 'reports a saved state' {
+        Write-TestFile -Path (Join-Path $script:stateStick 'VMware\Test VM.vmx') -Text ((@('config.version = "8"', 'suspend.disabled = "TRUE"', 'checkpoint.vmState = "Test VM.vmss"', '') -join "`r`n"))
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  VMware saved state: yes'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: ATTENTION - a saved state'
+    }
+
+    It 'sums up the last run in the log by kinds, its program, its end and its age' {
+        $log = @(
+            (Get-StateLogLine -Message '----- Start VM -----' -Time '2026-11-18T09:00:00.000+01:00' -ProcessId 10)
+            (Get-StateLogLine -Message '----- End: exit code 0 -----' -Time '2026-11-18T09:00:05.000+01:00' -ProcessId 10)
+            (Get-StateLogLine -Message 'Asking for administrator rights' -Time '2026-11-20T10:00:00.000+01:00' -ProcessId 11)
+            (Get-StateLogLine -Message '----- Start VM (dry run) -----' -Time '2026-11-20T10:00:01.000+01:00' -ProcessId 12)
+            (Get-StateLogLine -Message 'Stick found: disk 99 (\\.\PhysicalDrive99), drive Q:, ID 5CA1AB1E' -Time '2026-11-20T10:00:02.000+01:00' -ProcessId 12)
+            (Get-StateLogLine -Message 'Using VirtualBox' -Time '2026-11-20T10:00:02.100+01:00' -ProcessId 12)
+            (Get-StateLogLine -Message 'DRY RUN - a real start would stop here: Kelda Box is gone' -Time '2026-11-20T10:00:02.200+01:00' -ProcessId 12)
+            (Get-StateLogLine -Message '----- End (dry run): exit code 1 -----' -Time '2026-11-20T10:00:03.000+01:00' -ProcessId 12)
+        )
+        Write-TestFile -Path (Join-Path $script:stateStick 'LauncherData\logs\launcher.log') -Text (($log -join "`r`n") + "`r`n")
+        $result = Invoke-StateCheck
+        foreach ($line in @(
+                '  last run in the log: a dry run, 3 day(s) ago'
+                '  last run used: VirtualBox'
+                '  last run ended: yes, with exit code 1'
+                '  last run stopped, or a real start would have: yes'
+                '    stick found'
+                '    a real start would stop here'
+            )) { $result.Lines | Should -Contain $line }
+        $result.ExitCode | Should -Be 0
+    }
+
+    It 'says when the last run has no End line' {
+        Write-TestFile -Path (Join-Path $script:stateStick 'LauncherData\logs\launcher.log') -Text ((Get-StateLogLine '----- Start VM -----') + "`r`n" + (Get-StateLogLine 'Using VMware') + "`r`n")
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  last run in the log: a start, 3 day(s) ago'
+        $result.Lines | Should -Contain '  last run ended: no; its End line is missing, as when it was cut off'
+    }
+
+    It 'prints nothing from the stick: no path, name, number or ID' {
+        Write-TestFile -Path (Join-Path $script:stateStick 'LauncherData\logs\launcher.log') -Text ((Get-StateLogLine 'Stick found: disk 99 (\\.\PhysicalDrive99), drive Q:, ID 5CA1AB1E') + "`r`n" + (Get-StateLogLine 'STOPPED: Kelda Box is gone') + "`r`n")
+        Write-TestFile -Path (Join-Path $script:stateStick 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 3900000 FLAT "\\.\PhysicalDrive1" 0')
+        $text = (Invoke-StateCheck).Lines -join "`n"
+        foreach ($value in @($script:stateStick, 'Kelda', 'Test VM', '5CA1AB1E', 'PhysicalDrive', '3900000', 'Q:')) { $text.Contains($value) | Should -BeFalse -Because $value }
+    }
+
+    It 'finds the stick folder by itself, and fails with exit code 2 when it finds none' {
+        Mock Get-CompareDriveRoot { @($TestDrive) }
+        $result = Invoke-StickState -RepositoryPath $script:repoRoot -Now ([datetimeoffset]::Now)
+        $result.Lines[0] | Should -BeExactly '  stick folder: found by its Launcher and LauncherData folders'
+        Remove-Item -LiteralPath (Join-Path $script:stateStick 'Launcher') -Recurse -Force
+        $result = Invoke-StickState -RepositoryPath $script:repoRoot -Now ([datetimeoffset]::Now)
+        $result.ExitCode | Should -Be 2
+        $result.Lines[-1] | Should -BeLike 'RESULT: FAILED - found 0 folders with Launcher and LauncherData*'
+    }
+
+    It 'runs as a script and exits with the check''s code' {
+        Write-TestFile -Path (Join-Path $script:stateStick 'LauncherData\settings.psd1') -Text '@{ SchemaVersion = 2 }'
+        $previous = $env:PVM_TEST
+        $env:PVM_TEST = ''
+        try { $lines = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:repoRoot 'tools\Test-StickState.ps1') -Target $script:stateStick 2>&1 | ForEach-Object { "$_" }) }
+        finally { $env:PVM_TEST = $previous }
+        $LASTEXITCODE | Should -Be 1
+        $lines[-1] | Should -BeExactly 'RESULT: ATTENTION - settings that do not pass'
     }
 }

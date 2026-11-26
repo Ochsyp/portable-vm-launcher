@@ -64,5 +64,6 @@ or commits: they identify one stick and the PCs it was used on.
   a deploy wrote. It never touches `LauncherData`, the VM files or any other folder. The
   stick-check tool, `tools\Compare-StickDryRun.ps1`, changes the stick only through the deploy
   tool and, with `-AlsoVirtualBox`, the safe write of the settings, and writes its own files only
-  below its output folder on the PC.
+  below its output folder on the PC. The read-only check, `tools\Test-StickState.ps1`, writes,
+  moves, deletes and starts nothing, which `tests\Repo.Tests.ps1` checks too.
 - Dependabot keeps the pinned GitHub Actions up to date.

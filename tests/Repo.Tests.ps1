@@ -162,7 +162,7 @@ BeforeAll {
 Describe 'Tracked files' {
     It 'include the launcher and its tools, so the other checks have something to check' {
         foreach ($path in 'src/Start-PortableVM.ps1', 'src/PortableVM.psm1', 'tools/Deploy-PortableVM.ps1',
-            'tools/Get-StickInventory.ps1', 'tools/Compare-StickDryRun.ps1', 'examples/settings.example.psd1', 'tests/Settings.Tests.ps1') {
+            'tools/Get-StickInventory.ps1', 'tools/Compare-StickDryRun.ps1', 'tools/Test-StickState.ps1', 'examples/settings.example.psd1', 'tests/Settings.Tests.ps1') {
             $script:tracked | Should -Contain $path
         }
     }
@@ -377,6 +377,24 @@ Describe 'Static guards' {
         $functions['Invoke-CompareLauncher'] | Should -Match ([regex]::Escape("-File `$script -DryRun *>&1"))
         $functions['Invoke-CompareDeploy'] | Should -Match ([regex]::Escape("'tools\Deploy-PortableVM.ps1'"))
         $functions['Invoke-CompareDeploy'] | Should -Not -Match 'MigrateSettings'
+    }
+
+    It 'keep the stick check read-only: it writes, moves, deletes and starts nothing' {
+        $path = Join-Path $script:repoRoot 'tools\Test-StickState.ps1'
+        $ast = Get-SourceAst -Path $path
+        Get-SourceFileChange -Ast $ast | Should -BeNullOrEmpty
+        Get-SourceFileWrite -Ast $ast | Should -BeNullOrEmpty
+        $forbidden = 'Set-Content', 'Add-Content', 'Out-File', 'New-Item', 'Remove-Item', 'Move-Item', 'Copy-Item', 'Rename-Item', 'Set-Item',
+        'Set-ItemProperty', 'New-ItemProperty', 'Remove-ItemProperty', 'Clear-Content', 'Clear-Item', 'Start-Process', 'Invoke-Expression',
+        'Export-Csv', 'Export-Clixml', 'Tee-Object', 'Start-Transcript', 'Set-Acl', 'Write-PvmFile', 'Write-PvmLog', 'Invoke-PortableVM',
+        'Invoke-PvmLaunch', 'Set-PvmDiskDescriptor', 'Save-PvmFileChange', 'Move-PvmOldLog', 'Save-CompareFile', 'Invoke-StickCompare',
+        'Invoke-CompareCheck', 'Invoke-CompareDeploy', 'Invoke-CompareLauncher', 'Invoke-CompareElevated', 'Write-CompareHypervisor', 'Undo-CompareHypervisor'
+        $commands = @(Get-SourceCommand -Ast $ast)
+        $commands | Where-Object { $forbidden -contains $_.Name } | ForEach-Object { "$($_.Name) at line $($_.Line)" } | Should -BeNullOrEmpty
+        # It runs no program, and dot-sources only the stick-check tool for its read-only helpers.
+        @($commands | Where-Object { $_.Operator -eq 'Ampersand' }) | Should -BeNullOrEmpty
+        @($commands | Where-Object { $_.Operator -eq 'Dot' } | ForEach-Object { $_.Function }) | Should -BeExactly @('')
+        [IO.File]::ReadAllText($path) | Should -Match ([regex]::Escape(". (Join-Path `$PSScriptRoot 'Compare-StickDryRun.ps1')"))
     }
 
     It 'catch the ways a source could change or write a file past the safe write: <Code>' -ForEach @(

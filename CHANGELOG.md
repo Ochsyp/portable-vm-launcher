@@ -144,6 +144,12 @@ All notable changes to this project are listed here. The format follows
   size, a start offset, the access mode, the extent type, the number of extents, a missing or
   different `createType` line, other line content), never a value from the stick. A dry run logs
   it too, and the stick-check tool knows the line.
+- `tools\Test-StickState.ps1`, a read-only check of the stick that can run at any time without
+  administrator rights and writes no file. It reports, by kinds, yes or no and counts only, the
+  settings, whether the stick is the configured one, writes that did not finish and what a deploy
+  left, the VM files and their copies, whether each disk file points at the stick and why the
+  next start would rewrite it, saved states, and the last run in the log. It ends with `RESULT:
+  OK`, `RESULT: ATTENTION - <what>` or `RESULT: FAILED - <reason>`.
 - Tests of whole VMware starts and dry runs with VMware's blank at the end of the extent line and
   a tab at the end of the `createType` line: the disk file and its copies stay byte for byte as
   they were, so a later start path that compares the file another way fails a test.
