@@ -2292,9 +2292,9 @@ Describe 'A start' {
             $sav = Join-Path (Split-Path $script:stick.Vbox) 'Snapshots\x.sav'
             if ($VMwareDay) {
                 Write-TestFile -Path $vmss -Text 'state'
-                [IO.File]::SetLastWriteTimeUtc($vmss, [datetime]::new(2026, 11, $VMwareDay, 0, 0, 0, 'Utc'))
+                [IO.File]::SetLastWriteTimeUtc($vmss, [datetime]::new(2026, 11, $VMwareDay, 0, 0, 0, [DateTimeKind]::Utc))
                 Write-TestFile -Path $sav -Text 'state'
-                [IO.File]::SetLastWriteTimeUtc($sav, [datetime]::new(2026, 11, $VirtualBoxDay, 0, 0, 0, 'Utc'))
+                [IO.File]::SetLastWriteTimeUtc($sav, [datetime]::new(2026, 11, $VirtualBoxDay, 0, 0, 0, [DateTimeKind]::Utc))
             }
             $before = Get-TestTreeHash -Root $script:stick.Root
             $message = "The VM has a saved state in VMware and one in VirtualBox, and only one of them can match the guest's disk; resuming the other can corrupt it. $Newer Discard the saved state you do not want in the program that holds it (in VirtualBox: Discard Saved State), then start the VM again. The launcher discards neither. Nothing was started."
@@ -3183,7 +3183,14 @@ Describe 'Unexpected errors' -Tag 'WindowsOnly' {
             }
         }
         @{ Text = 'checking this PC and the saved states'; Releases = 1; Setup = { Mock -ModuleName PortableVM Invoke-PvmGetDeviceGuard { throw 'boom' } } }
-        @{ Text = 'checking for running VMs'; Releases = 1; Setup = { Mock -ModuleName PortableVM Invoke-PvmGetProcess { throw 'boom' } } }
+        # The snapshot reads the VM processes while it checks this PC; VirtualBox's own check of its
+        # open windows comes with the checks for running VMs.
+        @{ Text = 'checking this PC and the saved states'; Releases = 1; Setup = { Mock -ModuleName PortableVM Invoke-PvmGetProcess { throw 'boom' } } }
+        @{ Text = 'checking for running VMs'; Releases = 1; Setup = {
+                $script:testInstalled = @('VirtualBox')
+                Mock -ModuleName PortableVM Invoke-PvmGetProcess { throw 'boom' } -ParameterFilter { ($Name -join ',') -eq 'VirtualBox,VirtualBoxVM,VBoxHeadless' }
+            }
+        }
         @{ Text = 'asking whether to resume the saved state'; Releases = 1; Setup = {
                 Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Add 'checkpoint.vmState = "Test VM.vmss"')
                 $script:ask = { throw 'boom' }

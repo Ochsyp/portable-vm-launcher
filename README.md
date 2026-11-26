@@ -34,7 +34,15 @@ Before every start the launcher:
 - checks every VM file it would change before it changes the first one, and writes each so that
   a crash or a pulled stick leaves the old or the new version, never a mix;
 - refuses to start the VM in one hypervisor while it runs in the other, or while the other
-  holds a saved or suspended state;
+  holds a saved or suspended state; when both hold one, it stops, says which one is newer, and
+  leaves it to you to discard the other in its own program;
+- runs `vmware.exe` or `VBoxManage.exe` only when it is signed by its maker: VMware, Inc. or
+  Broadcom Inc. for VMware Workstation, Oracle America, Inc. or Oracle Corporation for
+  VirtualBox, since it runs them with administrator rights;
+- asks VirtualBox what the VM is doing and waits for nothing it cannot see: a VM that VirtualBox
+  is still saving, stopping or snapshotting, one it reports as stuck or inaccessible, and a
+  VirtualBox call that fails each stop the start with what to do; only VirtualBox's background
+  service of your own Windows session counts;
 - refuses to start the VM in VMware unless its `.vmx` has `suspend.disabled = "TRUE"` and
   `uuid.action = "keep"`, and says which line to add;
 - asks before it resumes a saved state: any VirtualBox save, or a VMware suspend from before

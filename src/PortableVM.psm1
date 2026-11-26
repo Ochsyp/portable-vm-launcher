@@ -415,13 +415,15 @@ function ConvertTo-PvmProcessFilter {
     (@($Name | ForEach-Object { "Name='$_.exe'" })) -join ' OR '
 }
 
-# Return whether a process named $Name runs on this PC.
+# Return whether a process named $Name runs in this Windows session, so that another signed-in
+# user's VirtualBox background service does not count.
 function Invoke-PvmTestProcess {
     [CmdletBinding()]
     [OutputType([bool])]
     param([Parameter(Mandatory)][string]$Name)
     Assert-PvmNotUnderTest -Name $MyInvocation.MyCommand.Name
-    [bool](Get-Process -Name $Name -ErrorAction SilentlyContinue)
+    $session = (Get-Process -Id $PID).SessionId
+    [bool](Get-Process -Name $Name -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $session })
 }
 
 # Return the Win32_DeviceGuard instance, or nothing where Windows has no such class.
@@ -522,6 +524,18 @@ function Invoke-PvmExitLock {
     param([Parameter(Mandatory)][pscustomobject]$Lock)
     Assert-PvmNotUnderTest -Name $MyInvocation.MyCommand.Name
     Exit-PvmMutex -Lock $Lock
+}
+
+# Return the Authenticode signature of the program $Path: its Status, 'Valid' when Windows trusts
+# it, and the Signer, the common name of the certificate that signed it ('' when there is none).
+function Invoke-PvmGetSignature {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param([Parameter(Mandatory)][string]$Path)
+    Assert-PvmNotUnderTest -Name $MyInvocation.MyCommand.Name
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    $signer = if ($signature.SignerCertificate) { $signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) } else { '' }
+    [pscustomobject]@{ Status = "$($signature.Status)"; Signer = "$signer" }
 }
 
 # --- Data folder -----------------------------------------------------------------------------
@@ -2200,6 +2214,25 @@ function Test-PvmVirtualBoxVmListed {
     $false
 }
 
+# Return how the output $Output of `VBoxManage list vms` lists the VM $VmUuid: 'Listed', 'Inaccessible'
+# when VirtualBox cannot read its .vbox and shows "<inaccessible>" for its name, or 'Missing'
+# (Test-PvmVirtualBoxVmListed).
+function Get-PvmVirtualBoxListing {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [AllowEmptyString()][string]$Output,
+        [Parameter(Mandatory)][string]$VmUuid
+    )
+    foreach ($line in ($Output -split "`n")) {
+        if ($line -match '\{([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\}\s*\z' -and [guid]$Matches[1] -eq [guid]$VmUuid) {
+            if ($line -match '\A\s*"<inaccessible>"') { return 'Inaccessible' }
+            return 'Listed'
+        }
+    }
+    'Missing'
+}
+
 # Return whether a VirtualBox VM process on this PC (VirtualBoxVM or VBoxHeadless) may be
 # the VM $VmUuid (Test-PvmVirtualBoxVmProcess).
 function Test-PvmRunningInVirtualBox {
@@ -2297,7 +2330,8 @@ function Get-PvmVMwareState {
 
 # Return what the .vbox $Path says about a VirtualBox save: State 'Saved' when its Machine element
 # has a stateFile, 'NotSaved' when it has none, or 'Unknown' with the Reason when the file is
-# missing, cannot be read, is no XML or has no Machine element. DTDs are refused.
+# missing, cannot be read, is no XML or has no Machine element. DTDs are refused. A file that was
+# read also gives its StateFile, as the .vbox names it.
 function Get-PvmVirtualBoxState {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -2326,7 +2360,7 @@ function Get-PvmVirtualBoxState {
     $machine = $document.SelectSingleNode("/*[local-name()='VirtualBox']/*[local-name()='Machine']")
     if ($null -eq $machine) { return [pscustomobject]@{ State = 'Unknown'; Reason = 'the file has no Machine element' } }
     $state = if ($machine.GetAttribute('stateFile')) { 'Saved' } else { 'NotSaved' }
-    [pscustomobject]@{ State = $state; Reason = '' }
+    [pscustomobject]@{ State = $state; Reason = ''; StateFile = $machine.GetAttribute('stateFile') }
 }
 
 # Return the files a start may write, as the settings in $Context name them, each followed by its
@@ -2458,13 +2492,13 @@ function Assert-PvmVMwareReady {
 
 # --- Hypervisor choice -----------------------------------------------------------------------
 
-# Return the VMware Workstation folder from the registry, the 32-bit key first, or $null when no
-# key names a folder that holds vmware.exe.
+# Return the VMware Workstation folder from the registry, the native key first, as a 64-bit
+# installation writes it, or $null when no key names a folder that holds vmware.exe.
 function Get-PvmVMwareDir {
     [CmdletBinding()]
     [OutputType([string])]
     param()
-    foreach ($key in 'HKLM:\SOFTWARE\WOW6432Node\VMware, Inc.\VMware Workstation', 'HKLM:\SOFTWARE\VMware, Inc.\VMware Workstation') {
+    foreach ($key in 'HKLM:\SOFTWARE\VMware, Inc.\VMware Workstation', 'HKLM:\SOFTWARE\WOW6432Node\VMware, Inc.\VMware Workstation') {
         $dir = Invoke-PvmGetRegistryValue -Path $key -Name 'InstallPath'
         if ($dir -and (Test-Path -LiteralPath (Join-Path $dir 'vmware.exe'))) { return $dir }
     }
@@ -2508,6 +2542,154 @@ function Select-PvmHypervisor {
     'VirtualBox'
 }
 
+# Return whether the program $Path of $Program ('VMware' or 'VirtualBox') is signed by its maker,
+# as Signed, and Why not, in words that end a sentence: Windows does not trust its signature, it is
+# signed by another publisher, or Windows could not read the signature. The launcher runs it with
+# administrator rights, so a program put in its place must not run.
+function Test-PvmSignedProgram {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][ValidateSet('VMware', 'VirtualBox')][string]$Program,
+        [Parameter(Mandatory)][string]$Path
+    )
+    # The common names in the makers' certificates; VMware Workstation is Broadcom's since 2023.
+    $makers = if ($Program -eq 'VMware') { @('VMware, Inc.', 'Broadcom Inc', 'Broadcom Inc.') } else { @('Oracle America, Inc.', 'Oracle Corporation') }
+    try { $signature = Invoke-PvmGetSignature -Path $Path }
+    catch { return [pscustomobject]@{ Signed = $false; Why = 'Windows could not read its signature' } }
+    if ($signature.Status -ne 'Valid') { return [pscustomobject]@{ Signed = $false; Why = "Windows reports its signature as $($signature.Status)" } }
+    if ($makers -notcontains $signature.Signer) { return [pscustomobject]@{ Signed = $false; Why = "it is signed by $($signature.Signer)" } }
+    [pscustomobject]@{ Signed = $true; Why = '' }
+}
+
+# Return what a start needs to know of this PC and the VM before it chooses, read once, as
+# $Context describes them (Invoke-PvmLaunch reads the saved states into it first): each program's
+# folder (Get-PvmVMwareDir, Get-PvmVirtualBoxDir), whether it is signed by its maker and why not,
+# the two saved states, whether the .vmx is there, and whether the VM runs in either program. It
+# runs no VirtualBox program, which would start VirtualBox's background service.
+function Get-PvmStartSnapshot {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param([Parameter(Mandatory)][pscustomobject]$Context)
+    $settings = $Context.Settings
+    $vmwareDir = Get-PvmVMwareDir
+    $virtualBoxDir = Get-PvmVirtualBoxDir
+    $vmx = Join-PvmStickPath -Root $Context.Root -Path $settings['VMwareVmx']
+    $vmware = if ($vmwareDir) { Test-PvmSignedProgram -Program 'VMware' -Path (Join-Path $vmwareDir 'vmware.exe') } else { [pscustomobject]@{ Signed = $false; Why = '' } }
+    $virtualBox = if ($virtualBoxDir) { Test-PvmSignedProgram -Program 'VirtualBox' -Path (Join-Path $virtualBoxDir 'VBoxManage.exe') } else { [pscustomobject]@{ Signed = $false; Why = '' } }
+    [pscustomobject]@{
+        VMwareDir           = $vmwareDir
+        VirtualBoxDir       = $virtualBoxDir
+        VMwareSigned        = $vmware.Signed
+        VMwareWhy           = $vmware.Why
+        VirtualBoxSigned    = $virtualBox.Signed
+        VirtualBoxWhy       = $virtualBox.Why
+        VMwareSaved         = $Context.VMwareState.State -eq 'Saved'
+        VirtualBoxSaved     = $Context.VirtualBoxState.State -eq 'Saved'
+        VmxExists           = Test-Path -LiteralPath $vmx
+        RunningInVMware     = Test-PvmRunningInVMware -Vmx $vmx
+        RunningInVirtualBox = Test-PvmRunningInVirtualBox -VmUuid $settings['VirtualBoxVmUuid']
+    }
+}
+
+# Return the start decision for the snapshot $Snapshot (Get-PvmStartSnapshot) and the Hypervisor
+# setting $Setting, as kinds that name no file: Use, the program to start (Select-PvmHypervisor);
+# Stop, a stop that ends a dry run too, or '': BothSaved (saved states in both programs, of which
+# the launcher resumes neither), VMwareNotInstalled, VirtualBoxNotInstalled (named in the setting
+# while VMware is installed) or NoneInstalled; AlreadyRunning, when the VM runs in VMware and VMware
+# is the one to use; and Stops, the stops a dry run logs and carries on past, in this order:
+# Unsigned, then for VMware VirtualBoxVmRunning and VirtualBoxSaved, for VirtualBox VMwareRunning
+# and VMwareSaved. Whether VirtualBox runs the VM, VirtualBox itself is asked later.
+function Get-PvmStartDecision {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [AllowEmptyString()][string]$Setting = '',
+        [Parameter(Mandatory)][pscustomobject]$Snapshot
+    )
+    if ($Snapshot.VMwareSaved -and $Snapshot.VirtualBoxSaved) {
+        return [pscustomobject]@{ Use = ''; Stop = 'BothSaved'; AlreadyRunning = $false; Stops = @() }
+    }
+    $choice = @{
+        Setting = $Setting; VMwareInstalled = [bool]$Snapshot.VMwareDir; VirtualBoxInstalled = [bool]$Snapshot.VirtualBoxDir
+        VMwareSuspended = $Snapshot.VMwareSaved; VirtualBoxSaved = $Snapshot.VirtualBoxSaved; VMwareVmxExists = $Snapshot.VmxExists
+    }
+    $use = Select-PvmHypervisor @choice
+    $stop = ''
+    if ($use -eq 'VMware' -and -not $Snapshot.VMwareDir) { $stop = 'VMwareNotInstalled' }
+    elseif ($use -eq 'VirtualBox' -and -not $Snapshot.VirtualBoxDir) { $stop = if ($Snapshot.VMwareDir) { 'VirtualBoxNotInstalled' } else { 'NoneInstalled' } }
+    if ($stop) { return [pscustomobject]@{ Use = $use; Stop = $stop; AlreadyRunning = $false; Stops = @() } }
+    if ($use -eq 'VMware' -and $Snapshot.RunningInVMware) { return [pscustomobject]@{ Use = $use; Stop = ''; AlreadyRunning = $true; Stops = @() } }
+    $stops = New-Object System.Collections.Generic.List[string]
+    if ($use -eq 'VMware') {
+        if (-not $Snapshot.VMwareSigned) { $stops.Add('Unsigned') }
+        if ($Snapshot.RunningInVirtualBox) { $stops.Add('VirtualBoxVmRunning') }
+        if ($Snapshot.VirtualBoxSaved) { $stops.Add('VirtualBoxSaved') }
+    } else {
+        if (-not $Snapshot.VirtualBoxSigned) { $stops.Add('Unsigned') }
+        if ($Snapshot.RunningInVMware) { $stops.Add('VMwareRunning') }
+        if ($Snapshot.VMwareSaved) { $stops.Add('VMwareSaved') }
+    }
+    [pscustomobject]@{ Use = $use; Stop = ''; AlreadyRunning = $false; Stops = $stops.ToArray() }
+}
+
+# Return which program's saved state, as $Context's VMwareState and VirtualBoxState name its file,
+# was written last: 'VMware' or 'VirtualBox', or '' when a file is not there or both have the
+# same time.
+function Get-PvmNewerSave {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][pscustomobject]$Context)
+    $settings = $Context.Settings
+    $vmx = Join-PvmStickPath -Root $Context.Root -Path $settings['VMwareVmx']
+    $vbox = Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxVbox']
+    $names = @("$($Context.VMwareState.Values['checkpoint.vmstate'])", "$($Context.VirtualBoxState.StateFile)")
+    if (-not $names[0] -or -not $names[1]) { return '' }
+    # A relative name lies beside its .vmx or .vbox; Combine keeps a name with a root as it is.
+    $files = @([IO.Path]::Combine((Split-Path $vmx), $names[0]), [IO.Path]::Combine((Split-Path $vbox), $names[1]))
+    if (-not ([IO.File]::Exists($files[0]) -and [IO.File]::Exists($files[1]))) { return '' }
+    $times = @($files | ForEach-Object { [IO.File]::GetLastWriteTimeUtc($_) })
+    if ($times[0] -gt $times[1]) { return 'VMware' }
+    if ($times[1] -gt $times[0]) { return 'VirtualBox' }
+    ''
+}
+
+# Return the message for the kind $Kind of a start decision (Get-PvmStartDecision) for the program
+# $Use, naming the VM as $Context says, with why a program is not trusted from $Snapshot.
+function Get-PvmDecisionMessage {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$Kind,
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][pscustomobject]$Snapshot,
+        [AllowEmptyString()][string]$Use = ''
+    )
+    $names = $Context.Names
+    switch ($Kind) {
+        'BothSaved' {
+            $newer = switch (Get-PvmNewerSave -Context $Context) {
+                'VMware' { 'The one in VMware is newer.' }
+                'VirtualBox' { 'The one in VirtualBox is newer.' }
+                default { 'The launcher cannot tell which one is newer.' }
+            }
+            return Format-PvmMessage -Names $names -Template "{VM} has a saved state in VMware and one in VirtualBox, and only one of them can match {guest}'s disk; resuming the other can corrupt it. {Newer} Discard the saved state you do not want in the program that holds it (in VirtualBox: Discard Saved State), then start {vm} again. The launcher discards neither. Nothing was started." -Values @{ Newer = $newer }
+        }
+        'VMwareNotInstalled' { return 'VMware Workstation is not installed on this PC.' }
+        'VirtualBoxNotInstalled' { return "VirtualBox is not installed on this PC, and Hypervisor in settings.psd1 is 'VirtualBox'. Install VirtualBox, or set Hypervisor to 'Auto' to use VMware Workstation." }
+        'NoneInstalled' { return 'Neither VMware Workstation nor VirtualBox is installed on this PC.' }
+        'Unsigned' {
+            $program = if ($Use -eq 'VMware') { @{ Program = 'VMware Workstation'; File = 'vmware.exe'; Why = $Snapshot.VMwareWhy } } else { @{ Program = 'VirtualBox'; File = 'VBoxManage.exe'; Why = $Snapshot.VirtualBoxWhy } }
+            return Format-PvmMessage -Names $names -Template "{Program}'s {File} is not signed by its maker: {Why}. The launcher would run it with administrator rights, so it starts nothing. Reinstall {Program} from its maker, then start {vm} again." -Values $program
+        }
+        'VirtualBoxVmRunning' { return Format-PvmMessage -Names $names -Template 'A VirtualBox VM is running, possibly this one. Close it before starting {vm} in VMware - the stick must never be used by two VMs at once.' }
+        'VirtualBoxSaved' { return Format-PvmMessage -Names $names -Template '{VM} has a saved state in VirtualBox. Resume it in VirtualBox (on a PC with VirtualBox) and shut {guest} down normally before starting it in VMware - otherwise {guest}''s disk can get corrupted.' }
+        'VMwareRunning' { return Format-PvmMessage -Names $names -Template '{VM} is running in VMware. Close it before starting it in VirtualBox.' }
+        'VMwareSaved' { return Format-PvmMessage -Names $names -Template '{VM} is suspended in VMware. Resume it in VMware (on a PC with VMware Workstation) and shut {guest} down normally before starting it in VirtualBox - otherwise {guest}''s disk can get corrupted.' }
+    }
+    throw "Unknown kind of start decision: $Kind"
+}
+
 # --- VMware Workstation ----------------------------------------------------------------------
 
 # Start the VM $Vmx in VMware Workstation from the folder $VMwareDir without waiting for it, in
@@ -2538,7 +2720,9 @@ function Invoke-PvmVMware {
     param(
         [Parameter(Mandatory)][pscustomobject]$Context,
         [Parameter(Mandatory)][string]$VMwareDir,
-        [Parameter(Mandatory)][string]$Drive
+        [Parameter(Mandatory)][string]$Drive,
+        [Parameter(Mandatory)][pscustomobject]$Decision,
+        [Parameter(Mandatory)][pscustomobject]$Snapshot
     )
     Enter-PvmStep -Context $Context -Name 'checks'
     $settings = $Context.Settings
@@ -2546,16 +2730,11 @@ function Invoke-PvmVMware {
     $layout = Get-PvmDiskLayout -Drive $Drive -VmSectors $settings['VmSectors'] -DataPartitionStart $settings['DataPartitionStart'] -HideData $true
     $layout.CreateType = 'fullDevice'
     $vmx = Join-PvmStickPath -Root $Context.Root -Path $settings['VMwareVmx']
-    if (Test-PvmRunningInVMware -Vmx $vmx) {
+    if ($Decision.AlreadyRunning) {
         Write-PvmLog -Path $log -Message 'Already running in VMware.'
         return 'AlreadyRunning'
     }
-    if (Test-PvmRunningInVirtualBox -VmUuid $settings['VirtualBoxVmUuid']) {
-        Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $Context.Names -Template 'A VirtualBox VM is running, possibly this one. Close it before starting {vm} in VMware - the stick must never be used by two VMs at once.')
-    }
-    if ($Context.VirtualBoxState.State -eq 'Saved') {
-        Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $Context.Names -Template '{VM} has a saved state in VirtualBox. Resume it in VirtualBox (on a PC with VirtualBox) and shut {guest} down normally before starting it in VMware - otherwise {guest}''s disk can get corrupted.')
-    }
+    foreach ($kind in $Decision.Stops) { Invoke-PvmStopUnlessDryRun -Context $Context -Message (Get-PvmDecisionMessage -Kind $kind -Context $Context -Snapshot $Snapshot -Use 'VMware') }
     Assert-PvmVMwareReady -Context $Context -Vmx $vmx
 
     Enter-PvmStep -Context $Context -Name 'files'
@@ -2599,6 +2778,41 @@ function Get-PvmVirtualBoxVmState {
     ($Output -split "`n" | Where-Object { $_ -like 'VMState=*' }) -replace '^VMState=', ''
 }
 
+# Return what the VM state $State (Get-PvmVirtualBoxVmState, with or without its quotes) means for
+# a start: 'Running' when the VM runs or is on its way there, 'Busy' while VirtualBox saves, stops,
+# moves or snapshots it, 'Stuck' when it hangs, 'Off' when it can start, or 'Unknown' for any other
+# state, also none.
+function Get-PvmVirtualBoxActivity {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowEmptyString()][string]$State = '')
+    $word = $State.Trim().Trim('"')
+    if (@('running', 'paused', 'starting', 'restoring') -contains $word) { return 'Running' }
+    if (@('saving', 'stopping', 'snapshotting', 'livesnapshotting', 'onlinesnapshotting', 'teleporting', 'teleportingpausedvm', 'teleportingin',
+            'deletingsnapshot', 'deletingsnapshotlive', 'deletingsnapshotlivepaused', 'restoringsnapshot', 'settingup') -contains $word) { return 'Busy' }
+    if (@('stuck', 'gurumeditation') -contains $word) { return 'Stuck' }
+    if (@('poweroff', 'saved', 'aborted', 'aborted-saved') -contains $word) { return 'Off' }
+    'Unknown'
+}
+
+# Return the stop message for the VM in the VirtualBox state $State when its activity
+# (Get-PvmVirtualBoxActivity) is Busy, Stuck or Unknown, naming the VM as $Names says.
+function Get-PvmVirtualBoxStateMessage {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [AllowEmptyString()][string]$State = '',
+        [Parameter(Mandatory)][hashtable]$Names
+    )
+    $word = $State.Trim().Trim('"')
+    $template = switch (Get-PvmVirtualBoxActivity -State $State) {
+        'Busy' { 'VirtualBox is still busy with {vm} ({State}). Wait until it is done, then start {vm} again.' }
+        'Stuck' { 'VirtualBox reports {vm} as stuck ({State}). Power it off in VirtualBox, then start {vm} again.' }
+        default { 'VirtualBox reports a state of {vm} that the launcher does not know ({State}). Close VirtualBox, then start {vm} again.' }
+    }
+    Format-PvmMessage -Names $Names -Template $template -Values @{ State = $word }
+}
+
 # Start the VirtualBox VM $VmUuid with VBoxManage at $VBoxManage and log to $LogPath which version
 # of VirtualBox started it. Throws a stop with VBoxManage's output when the start fails, naming
 # the VM as $Names says (Format-PvmMessage).
@@ -2630,7 +2844,9 @@ function Invoke-PvmVirtualBox {
     param(
         [Parameter(Mandatory)][pscustomobject]$Context,
         [Parameter(Mandatory)][string]$VirtualBoxDir,
-        [Parameter(Mandatory)][string]$Drive
+        [Parameter(Mandatory)][string]$Drive,
+        [Parameter(Mandatory)][pscustomobject]$Decision,
+        [Parameter(Mandatory)][pscustomobject]$Snapshot
     )
     Enter-PvmStep -Context $Context -Name 'checks'
     $settings = $Context.Settings
@@ -2640,23 +2856,27 @@ function Invoke-PvmVirtualBox {
     $uuid = $settings['VirtualBoxVmUuid']
     Invoke-PvmSetEnvironment -Name 'VBOX_USER_HOME' -Value (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxHome'])
     $names = $Context.Names
-    $vmx = Join-PvmStickPath -Root $Context.Root -Path $settings['VMwareVmx']
-    if (Test-PvmRunningInVMware -Vmx $vmx) {
-        Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $names -Template '{VM} is running in VMware. Close it before starting it in VirtualBox.')
-    }
-    if ($Context.VMwareState.State -eq 'Saved') {
-        Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $names -Template '{VM} is suspended in VMware. Resume it in VMware (on a PC with VMware Workstation) and shut {guest} down normally before starting it in VirtualBox - otherwise {guest}''s disk can get corrupted.')
-    }
-
+    foreach ($kind in $Decision.Stops) { Invoke-PvmStopUnlessDryRun -Context $Context -Message (Get-PvmDecisionMessage -Kind $kind -Context $Context -Snapshot $Snapshot -Use 'VirtualBox') }
     $open = @(Invoke-PvmGetProcess -Name 'VirtualBox', 'VirtualBoxVM', 'VBoxHeadless')
     if ($open.Count) {
-        # VirtualBox hides its VM processes' command lines, so VirtualBox is asked whether this VM is the one running.
-        $info = Invoke-PvmNative -FilePath $vboxManage -ArgumentList @('showvminfo', $uuid, '--machinereadable')
-        if ($info.Output -match 'VMState="(running|paused|starting|restoring)"') {
+        # VirtualBox hides its VM processes' command lines, so VirtualBox is asked whether this VM is
+        # the one running; a VBoxManage not signed by its maker is not run, also in a dry run.
+        $state = ''
+        $activity = 'Unknown'
+        if ($Snapshot.VirtualBoxSigned) {
+            $info = Invoke-PvmNative -FilePath $vboxManage -ArgumentList @('showvminfo', $uuid, '--machinereadable')
+            if ($info.ExitCode -eq 0) {
+                $state = "$(Get-PvmVirtualBoxVmState -Output $info.Output)"
+                $activity = Get-PvmVirtualBoxActivity -State $state
+            }
+        }
+        if ($activity -eq 'Running') {
             Write-PvmLog -Path $log -Message 'Already running in VirtualBox.'
             return 'AlreadyRunning'
         }
-        Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $names -Template 'VirtualBox is already open on this PC. Close all VirtualBox windows, then start {vm} again.')
+        $message = if ($activity -eq 'Busy' -or $activity -eq 'Stuck') { Get-PvmVirtualBoxStateMessage -State $state -Names $names }
+        else { Format-PvmMessage -Names $names -Template 'VirtualBox is already open on this PC. Close all VirtualBox windows, then start {vm} again.' }
+        Invoke-PvmStopUnlessDryRun -Context $Context -Message $message
     }
     # A real start waits for VirtualBox's background service, so a dry run does too, unless it has
     # found a stop already, at which a real start would have ended before the wait.
@@ -2667,7 +2887,7 @@ function Invoke-PvmVirtualBox {
         Enter-PvmStep -Context $Context -Name 'checks'
     }
     if (Invoke-PvmTestProcess -Name 'VBoxSVC') {
-        Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $names -Template 'VirtualBox is still running in the background. Wait half a minute, then start {vm} again.')
+        Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $names -Template "VirtualBox's background service (VBoxSVC) is still running in this Windows session. Close every VirtualBox window, wait until it has ended, which can take a few minutes, then start {vm} again.")
     }
 
     # The launcher records no VirtualBox save yet, so every saved state asks before it is resumed,
@@ -2699,14 +2919,25 @@ function Invoke-PvmVirtualBox {
     }
 
     $list = Invoke-PvmNative -FilePath $vboxManage -ArgumentList @('list', 'vms')
-    if (-not (Test-PvmVirtualBoxVmListed -Output $list.Output -VmUuid $uuid)) {
+    if ($list.ExitCode -ne 0) {
+        throw (Get-PvmStopException -Message (Format-PvmMessage -Names $names -Template "VirtualBox could not list its VMs:`n`n{Output}" -Values @{ Output = $list.Output }))
+    }
+    $listing = Get-PvmVirtualBoxListing -Output $list.Output -VmUuid $uuid
+    if ($listing -eq 'Inaccessible') {
+        throw (Get-PvmStopException -Message (Format-PvmMessage -Names $names -Template "VirtualBox lists {vm} as inaccessible, so it cannot read {vm}'s .vbox file. Open VirtualBox to see why, then start {vm} again."))
+    }
+    if ($listing -eq 'Missing') {
         throw (Get-PvmStopException -Message (Format-PvmMessage -Names $names -Template "VirtualBox did not find {vm} in the stick's VM list:`n`n{Output}" -Values @{ Output = $list.Output }))
     }
     $info = Invoke-PvmNative -FilePath $vboxManage -ArgumentList @('showvminfo', $uuid, '--machinereadable')
+    if ($info.ExitCode -ne 0) {
+        throw (Get-PvmStopException -Message (Format-PvmMessage -Names $names -Template "VirtualBox could not tell {vm}'s state:`n`n{Output}" -Values @{ Output = $info.Output }))
+    }
     $state = Get-PvmVirtualBoxVmState -Output $info.Output
     Write-PvmLog -Path $log -Message "VirtualBox VM state: $state"
-    if ($state -match 'running|paused|starting|restoring') { return 'AlreadyRunning' }
-
+    $activity = Get-PvmVirtualBoxActivity -State "$state"
+    if ($activity -eq 'Running') { return 'AlreadyRunning' }
+    if ($activity -ne 'Off') { throw (Get-PvmStopException -Message (Get-PvmVirtualBoxStateMessage -State "$state" -Names $names)) }
     Start-PvmVirtualBoxVm -VBoxManage $vboxManage -VmUuid $uuid -Names $names -LogPath $log
     'Started'
 }
@@ -2739,9 +2970,7 @@ function Invoke-PvmLaunch {
         Write-PvmLog -Path $log -Message 'Note: Memory Integrity is on, so the VM runs on top of Hyper-V (slower than native).'
     }
 
-    # 2. Pick the hypervisor.
-    $vmwareDir = Get-PvmVMwareDir
-    $virtualBoxDir = Get-PvmVirtualBoxDir
+    # 2. Read the PC and the VM once, and decide.
     $vmx = Join-PvmStickPath -Root $Context.Root -Path $settings['VMwareVmx']
     # Each state is logged as soon as it is known, so a .vbox that cannot be read does not hide a
     # VMware suspend from the log. A state the launcher cannot tell stops it.
@@ -2755,22 +2984,16 @@ function Invoke-PvmLaunch {
     $Context.VirtualBoxState = Get-PvmVirtualBoxState -Path $vbox
     if ($Context.VirtualBoxState.State -eq 'Saved') { Write-PvmLog -Path $log -Message 'Saved state found: saved in VirtualBox' }
     Assert-PvmKnownState -Context $Context -State $Context.VirtualBoxState -What 'whether {vm} has a saved state in VirtualBox' -Setting 'VirtualBoxVbox' -Path $vbox
-    $choice = @{
-        Setting             = $settings['Hypervisor']
-        VMwareInstalled     = [bool]$vmwareDir
-        VirtualBoxInstalled = [bool]$virtualBoxDir
-        VMwareSuspended     = ($Context.VMwareState.State -eq 'Saved')
-        VirtualBoxSaved     = ($Context.VirtualBoxState.State -eq 'Saved')
-        VMwareVmxExists     = (Test-Path -LiteralPath $vmx)
-    }
-    $use = Select-PvmHypervisor @choice
-    if ($use -eq 'VMware' -and -not $vmwareDir) { throw (Get-PvmStopException -Message 'VMware Workstation is not installed on this PC.') }
-    if ($use -eq 'VirtualBox' -and -not $virtualBoxDir) { throw (Get-PvmStopException -Message 'Neither VMware Workstation nor VirtualBox is installed on this PC.') }
+    $snapshot = Get-PvmStartSnapshot -Context $Context
+    $decision = Get-PvmStartDecision -Setting $settings['Hypervisor'] -Snapshot $snapshot
+    if ($decision.Stop) { throw (Get-PvmStopException -Message (Get-PvmDecisionMessage -Kind $decision.Stop -Context $Context -Snapshot $snapshot -Use $decision.Use)) }
+    $use = $decision.Use
     Write-PvmLog -Path $log -Message "Using $use"
 
     # 3. Start.
-    if ($use -eq 'VMware') { Invoke-PvmVMware -Context $Context -VMwareDir $vmwareDir -Drive $drive }
-    else { Invoke-PvmVirtualBox -Context $Context -VirtualBoxDir $virtualBoxDir -Drive $drive }
+    $path = @{ Context = $Context; Drive = $drive; Decision = $decision; Snapshot = $snapshot }
+    if ($use -eq 'VMware') { Invoke-PvmVMware @path -VMwareDir $snapshot.VMwareDir }
+    else { Invoke-PvmVirtualBox @path -VirtualBoxDir $snapshot.VirtualBoxDir }
 }
 
 # Run the launcher from the folder $LauncherPath, which holds the code and the VERSION that the

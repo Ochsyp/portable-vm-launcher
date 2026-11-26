@@ -150,6 +150,12 @@ All notable changes to this project are listed here. The format follows
   left, the VM files and their copies, whether each disk file points at the stick and why the
   next start would rewrite it, saved states, and the last run in the log. It ends with `RESULT:
   OK`, `RESULT: ATTENTION - <what>` or `RESULT: FAILED - <reason>`.
+- Before a start the launcher reads this PC and the VM once, into one snapshot, and one
+  table-tested rule decides (phase 6). It runs `vmware.exe` or `VBoxManage.exe` only when it is
+  signed by its maker, and says why not. Saved states in both programs stop the start with one
+  message that says which is newer, instead of each program sending you to the other; the
+  launcher discards neither. A VM that VirtualBox is still busy with, reports as stuck or lists
+  as inaccessible, and a VirtualBox call that fails, each stop the start with what to do.
 - Tests of whole VMware starts and dry runs with VMware's blank at the end of the extent line and
   a tab at the end of the `createType` line: the disk file and its copies stay byte for byte as
   they were, so a later start path that compares the file another way fails a test.
@@ -239,6 +245,10 @@ Compared with the launcher on a stick before the redesign:
   folder. A deploy that is cut off leaves the older copy as `Launcher.previous.remove`, and the
   next one finishes the removal or names the renames to do. A deploy of the commit that
   `Launcher` already holds stops before any change, so the earlier version stays.
+- VMware Workstation is found through the native registry key first, then the 32-bit one. Only
+  VirtualBox's background service of your own Windows session makes a start wait, and its stop
+  message says to close every VirtualBox window and wait until the service has ended. With
+  `Hypervisor = 'VirtualBox'` and only VMware installed, the message names VirtualBox as missing.
 
 ### Fixed
 
