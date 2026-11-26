@@ -144,7 +144,9 @@ function Invoke-StickState {
         Add-StateLine "  settings pass the launcher's checks: $(if ($settings) { 'yes' } else { 'no' })"
         if (-not $settings) { $attention.Add('settings that do not pass') }
         $device = $null
+        $stickDisk = $null
         $noDevice = ''
+        $location = $null
         if ($settings) {
             $location = Get-PvmStickLocation -LauncherPath $launcher -Root $Target
             if (-not $location) {
@@ -153,7 +155,10 @@ function Invoke-StickState {
                 try {
                     $stick = Get-PvmStickDevice -Location $location -Names @{ VM = $null; Guest = $null }
                     if (Get-PvmStickProblem -Disk $stick.Disk -Partition $stick.Partition -Settings $settings) { $noDevice = 'since the stick is not the configured one' }
-                    else { $device = $stick.Device }
+                    else {
+                        $device = $stick.Device
+                        $stickDisk = $stick.Disk
+                    }
                 } catch {
                     $noDevice = 'since Windows did not say which disk the stick is'
                 }
@@ -171,8 +176,18 @@ function Invoke-StickState {
             } | Where-Object { ($_.Name -like '*.pvm-tmp' -or $_.Name -like '*.pvm-old') -and -not (Test-StatePutAside -Path $_.FullName -Target $Target) })
         Add-StateLine "  writes that did not finish (.pvm-tmp or .pvm-old files): $($pending.Count)$(if ($unread.Count) { ', but some folders could not be read' })"
         $stops = $false
+        # The disk files and the UUID as the VM's own files have them, as a start reads them.
+        $context = $null
         if ($settings) {
-            $context = [pscustomobject]@{ Settings = $settings; Root = $Target; Backups = $paths.Backups }
+            $context = [pscustomobject]@{
+                Settings = $settings; Root = $Target; Backups = $paths.Backups; Location = $location
+                Names = @{ VM = 'the VM'; Guest = 'the guest' }; VmFiles = $null
+            }
+            $context.VmFiles = New-PvmVmFileRecord -Context $context
+            Resolve-PvmVMwareFile -Context $context
+            Resolve-PvmVirtualBoxFile -Context $context
+        }
+        if ($settings) {
             $answer = 'no'
             try {
                 foreach ($entry in @(Get-PvmWrittenPath -Context $context)) {
@@ -190,18 +205,48 @@ function Invoke-StickState {
         Add-StateLine "  left by a deploy that did not finish: $(if ($deployLeft.Count) { $deployLeft -join ', ' } else { 'nothing' })"
         if ($deployLeft.Count) { $attention.Add('what a deploy left') }
 
+        # Whether the VM's own files agree with the settings, and VirtualBox's storage settings of
+        # the stick's disk, which a start checks (phase 7).
+        if ($context) {
+            $files = $context.VmFiles
+            $words = @{
+                Setting = 'the settings name another file'; None = 'no raw-disk file is attached'; Several = 'more than one raw-disk file is attached'
+                Outside = 'it is not below the stick folder'; Uuid = 'the settings name another UUID'; Unlisted = 'it attaches a disk that its media registry does not list'
+            }
+            $vmware = if (-not $files.VMwareRead) { 'unknown, since the .vmx cannot be read' } elseif ($files.VMwareKind) { "no, $($words[$files.VMwareKind])" } else { 'yes' }
+            Add-StateLine "  VMware disk file as the .vmx attaches it: $vmware"
+            $virtualBox = if (-not $files.VirtualBoxRead) { 'unknown, since the .vbox cannot be read' } elseif ($files.VirtualBoxKind) { "no, $($words[$files.VirtualBoxKind])" } else { 'yes' }
+            Add-StateLine "  VirtualBox disk file and UUID as the .vbox has them: $virtualBox"
+            if ($vmware -like 'no*' -or $virtualBox -like 'no*') { $attention.Add('VM files that disagree with the settings') }
+            $known = $files.VirtualBoxRead -and -not $files.VirtualBoxKind
+            $cache = if (-not $known) { 'unknown' } elseif ($files.HostIOCache -eq 'true') { 'yes' } else { 'no' }
+            $group = if (-not $known) { 'unknown' } elseif ($files.BandwidthGroup) { 'set' } else { 'none' }
+            Add-StateLine "  VirtualBox host I/O cache on for the stick disk: $cache"
+            Add-StateLine "  VirtualBox bandwidth group on the stick disk: $group"
+            $mounts = if (-not $stickDisk) { "unknown, $noDevice" } else {
+                $mounted = Get-PvmMountedVmPartition -Disk $stickDisk -DataPartitionStart $settings['DataPartitionStart']
+                if ($mounted.Problem) { 'unknown, since Windows did not list the stick''s partitions' } else { "$(@($mounted.Mounts).Count)" }
+            }
+            Add-StateLine "  partitions mounted in the VM's part of the stick: $mounts"
+            if ($cache -eq 'no' -or $group -eq 'set' -or ($mounts -match '\A\d+\z' -and $mounts -ne '0')) { $attention.Add('VirtualBox storage settings') }
+        }
+
         # The files a start may write, their copies, and where each disk file points.
         if (-not $settings) {
             Add-StateLine '  the VM files: not checked, since the settings do not pass'
         } else {
             $files = @(
-                @{ Label = 'VMware disk file'; Path = (Join-PvmStickPath -Root $Target -Path $settings['VMwareDisk']); Suffix = '.orig'; Program = 'VMware'; HideData = $true }
-                @{ Label = 'VirtualBox disk file'; Path = (Join-PvmStickPath -Root $Target -Path $settings['VirtualBoxDisk']); Suffix = '.orig'; Program = 'VirtualBox'; HideData = [bool]$settings['HideDataPartition'] }
+                @{ Label = 'VMware disk file'; Path = $context.VmFiles.VMwareDisk; Suffix = '.orig'; Program = 'VMware'; HideData = $true }
+                @{ Label = 'VirtualBox disk file'; Path = $context.VmFiles.VirtualBoxDisk; Suffix = '.orig'; Program = 'VirtualBox'; HideData = [bool]$settings['HideDataPartition'] }
                 @{ Label = 'VirtualBox .vbox file'; Path = (Join-PvmStickPath -Root $Target -Path $settings['VirtualBoxVbox']); Suffix = '.launcher-backup' }
                 @{ Label = 'VirtualBox.xml'; Path = (Join-Path (Join-PvmStickPath -Root $Target -Path $settings['VirtualBoxHome']) 'VirtualBox.xml'); Suffix = '.launcher-backup' }
             )
             foreach ($file in $files) {
                 $label = $file.Label
+                if (-not $file.Path) {
+                    Add-StateLine "  ${label}: unknown, since neither the settings nor the VM's file name it"
+                    continue
+                }
                 $found = [IO.File]::Exists($file.Path)
                 Add-StateLine "  ${label}: $(if ($found) { 'found' } else { 'missing' })"
                 if ($file.Suffix -eq '.orig') {

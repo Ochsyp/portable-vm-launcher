@@ -2195,7 +2195,8 @@ Describe 'Compare-StickDryRun: a full run with a stand-in for the PC' -Tag 'Wind
                     '    StickSectors = 4000000', '    VmSectors = 3900000', '    DataPartitionStart = 2500000', "    VirtualBoxVmUuid = '5ca1ab1e-0000-4000-8000-000000000001'",
                     "    VirtualBoxHome = 'VirtualBox'", "    VirtualBoxVbox = 'VirtualBox\Test VM\Test VM.vbox'", "    VirtualBoxDisk = 'VirtualBox\Test VM\stick.vmdk'",
                     "    VMwareVmx = 'VMware\Test VM.vmx'", "    VMwareDisk = 'VMware\stick.vmdk'", '}', '') -join "`r`n"))
-        Write-TestFile -Path (Join-Path $script:fullStick 'VMware\Test VM.vmx') -Text ((@('.encoding = "windows-1252"', 'config.version = "8"', 'displayName = "Test VM"', 'uuid.action = "keep"', 'suspend.disabled = "TRUE"', '') -join "`r`n"))
+        Write-TestFile -Path (Join-Path $script:fullStick 'VMware\Test VM.vmx') -Text ((@('.encoding = "windows-1252"', 'config.version = "8"', 'displayName = "Test VM"', 'uuid.action = "keep"', 'suspend.disabled = "TRUE"',
+                    'scsi0:0.fileName = "stick.vmdk"', 'scsi0:0.present = "TRUE"', '') -join "`r`n"))
         $descriptor = @('# Disk DescriptorFile', 'version=1', 'encoding="windows-1252"', 'CID=fffffffe', 'parentCID=ffffffff', 'createType="fullDevice"', '', '# Extent description',
             'RW 2500000 FLAT "\\.\PhysicalDrive99" 0', 'RW 1400000 ZERO ', '', '# The Disk Data Base', '#DDB', '', 'ddb.adapterType = "ide"', '') -join "`r`n"
         Write-TestFile -Path (Join-Path $script:fullStick 'VMware\stick.vmdk') -Text $descriptor
@@ -2204,7 +2205,9 @@ Describe 'Compare-StickDryRun: a full run with a stand-in for the PC' -Tag 'Wind
         Write-TestFile -Path (Join-Path $script:fullStick 'VirtualBox\Test VM\Test VM.vbox') -Text ((@('<?xml version="1.0"?>', '<VirtualBox xmlns="http://www.virtualbox.org/" version="1.19-windows">',
                     '  <Machine uuid="{5ca1ab1e-0000-4000-8000-000000000001}" name="Test VM" OSType="Debian_64">', '    <MediaRegistry><HardDisks>',
                     "      <HardDisk uuid=`"{5ca1ab1e-0000-4000-8000-000000000002}`" location=`"Q:$below\VirtualBox\Test VM\stick.vmdk`" format=`"VMDK`"/>",
-                    '    </HardDisks></MediaRegistry>', '  </Machine>', '</VirtualBox>', '') -join "`n"))
+                    '    </HardDisks></MediaRegistry>', '    <Hardware><StorageControllers><StorageController name="SATA" type="AHCI" useHostIOCache="true">',
+                    '      <AttachedDevice type="HardDisk" port="0" device="0"><Image uuid="{5ca1ab1e-0000-4000-8000-000000000002}"/></AttachedDevice>',
+                    '    </StorageController></StorageControllers></Hardware>', '  </Machine>', '</VirtualBox>', '') -join "`n"))
         Write-TestFile -Path (Join-Path $script:fullStick 'VirtualBox\VirtualBox.xml') -Text ((@('<?xml version="1.0"?>', '<VirtualBox xmlns="http://www.virtualbox.org/" version="1.12-windows">', '  <Global><MachineRegistry>',
                     "    <MachineEntry uuid=`"{5ca1ab1e-0000-4000-8000-000000000001}`" src=`"Q:$($below.Replace('\', '/'))/VirtualBox/Test VM/Test VM.vbox`"/>",
                     '  </MachineRegistry></Global>', '</VirtualBox>', '') -join "`n"))
@@ -2229,6 +2232,7 @@ $module = Import-Module (Join-Path $Root 'Launcher\PortableVM.psm1') -PassThru -
     function script:Invoke-PvmEnterLock { param($Name) [pscustomobject]@{ State = 'Acquired'; Mutex = $null } }
     function script:Invoke-PvmExitLock { param($Lock) }
     function script:Invoke-PvmGetPartition { param($DriveLetter) [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512 } }
+    function script:Invoke-PvmGetDiskPartition { param($Number) [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512 } }
     function script:Invoke-PvmGetDisk { param($Number) [pscustomobject]@{ Number = 99; PartitionStyle = 'MBR'; Signature = [uint32]0x5CA1AB1E; LogicalSectorSize = 512; Size = [uint64]4000000 * 512; IsBoot = $false; IsSystem = $false } }
     function script:Invoke-PvmGetProcess { param($Name) @() }
     function script:Invoke-PvmTestProcess { param($Name) $false }
@@ -2572,7 +2576,8 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
     }
 
     It 'reports a saved state' {
-        Write-TestFile -Path (Join-Path $script:stateStick 'VMware\Test VM.vmx') -Text ((@('config.version = "8"', 'suspend.disabled = "TRUE"', 'checkpoint.vmState = "Test VM.vmss"', '') -join "`r`n"))
+        Write-TestFile -Path (Join-Path $script:stateStick 'VMware\Test VM.vmx') -Text ((@('config.version = "8"', 'suspend.disabled = "TRUE"', 'checkpoint.vmState = "Test VM.vmss"',
+                    'scsi0:0.fileName = "stick.vmdk"', 'scsi0:0.present = "TRUE"', '') -join "`r`n"))
         $result = Invoke-StateCheck
         $result.Lines | Should -Contain '  VMware saved state: yes'
         $result.Lines[-1] | Should -BeExactly 'RESULT: ATTENTION - a saved state'

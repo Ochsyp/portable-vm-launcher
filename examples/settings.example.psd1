@@ -57,13 +57,16 @@
     # The paths below are relative to the folder that holds Launcher and LauncherData, use \ or /,
     # and have no drive letter, no '.' or '..' part and no part that ends in a dot or a blank.
 
-    # VirtualBox: the VM's UUID (VBoxManage list vms) and its files.
-    VirtualBoxVmUuid = '5ca1ab1e-0000-4000-8000-000000000000'
+    # VirtualBox: its home folder (VBOX_USER_HOME) and the VM's .vbox file. The launcher reads the
+    # VM's UUID and the disk file it points at the stick from the .vbox. To name them here too,
+    # which the launcher then checks against the .vbox, remove the # in front of these lines:
+    #VirtualBoxVmUuid = '5ca1ab1e-0000-4000-8000-000000000000'
+    #VirtualBoxDisk   = 'VirtualBox\Example VM\example-stick.vmdk'
     VirtualBoxHome   = 'VirtualBox'
     VirtualBoxVbox   = 'VirtualBox\Example VM\Example VM.vbox'
-    VirtualBoxDisk   = 'VirtualBox\Example VM\example-stick.vmdk'
 
-    # VMware Workstation: the VM's files.
+    # VMware Workstation: the VM's .vmx file. The launcher reads the disk file it points at the
+    # stick from the .vmx. To name it here too, which the launcher then checks, remove the #:
+    #VMwareDisk = 'VMware\example-stick.vmdk'
     VMwareVmx  = 'VMware\Example VM.vmx'
-    VMwareDisk = 'VMware\example-stick.vmdk'
 }

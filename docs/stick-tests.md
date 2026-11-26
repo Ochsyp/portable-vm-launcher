@@ -322,6 +322,20 @@ phase 6:
 No VM start is needed, and no cut-off write is ever made on the stick. Each kind of step, its
 question, its Yes and its No are covered by the tests on a synthetic stick.
 
+## Phase 7 checks
+
+Phase 7 reads the disk files from the VM's own files and checks VirtualBox's storage settings.
+The real stick may disagree with its settings, so the read-only check from the branch runs
+first, before anything is deployed:
+
+1. Run the branch's read-only check. Its lines on the VM's files, host I/O cache, the bandwidth
+   group and mounted partitions must say yes, none and 0, and it must end with `RESULT: OK`. A
+   "no" stops the check: nothing is deployed until you decide which file is right.
+2. Run the dry-run check with `-AlsoVirtualBox`, deploying the branch. Both pairs of dry runs
+   must show no difference.
+
+No VM start is needed, and nothing is changed in VirtualBox or VMware.
+
 ## Rules for the real stick
 
 - Never switch VirtualBox's host I/O cache off for the stick's controller.

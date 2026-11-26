@@ -261,19 +261,19 @@ Describe 'Checking settings against schema 2' {
     }
 
     It 'names every bad key in one list, unknown keys first, then in schema order, and no value' {
-        $settings = Get-GoodSetting -Change @{ VMwareDisk = $null; Zeta = 'Q7'; alpha = 'Q8'; Hypervisor = 'Q9'; StickSectors = 'Q10' }
+        $settings = Get-GoodSetting -Change @{ VMwareVmx = $null; Zeta = 'Q7'; alpha = 'Q8'; Hypervisor = 'Q9'; StickSectors = 'Q10' }
         Test-PvmSetting -Settings $settings | Should -BeExactly @(
             'alpha: unknown setting; compare it with examples\settings.example.psd1'
             'Zeta: unknown setting; compare it with examples\settings.example.psd1'
             "Hypervisor: must be 'Auto', 'VMware' or 'VirtualBox'"
             'StickSectors: must be a whole number above 0'
-            'VMwareDisk: missing'
+            'VMwareVmx: missing'
         )
     }
 
     It 'names each required key that is missing' -ForEach @(
-        @{ Key = 'StickMbrSignature' }, @{ Key = 'StickSectors' }, @{ Key = 'VmSectors' }, @{ Key = 'DataPartitionStart' }, @{ Key = 'VirtualBoxVmUuid' }
-        @{ Key = 'VirtualBoxHome' }, @{ Key = 'VirtualBoxVbox' }, @{ Key = 'VirtualBoxDisk' }, @{ Key = 'VMwareVmx' }, @{ Key = 'VMwareDisk' }
+        @{ Key = 'StickMbrSignature' }, @{ Key = 'StickSectors' }, @{ Key = 'VmSectors' }, @{ Key = 'DataPartitionStart' }
+        @{ Key = 'VirtualBoxHome' }, @{ Key = 'VirtualBoxVbox' }, @{ Key = 'VMwareVmx' }
     ) {
         Test-PvmSetting -Settings (Get-GoodSetting -Change @{ $Key = $null }) | Should -BeExactly @("${Key}: missing")
     }
@@ -321,9 +321,9 @@ Describe 'Importing the settings' {
         $path = Write-TestByte -Name 'problems.psd1' -Bytes ([Text.Encoding]::ASCII.GetBytes("@{ SchemaVersion = 2; Hypervisor = 'VBox' }"))
         $message = try { $null = Import-PvmSetting -Path $path } catch { Get-PvmStopMessage -ErrorRecord $_ }
         $lines = @($message -split "`n")
-        $lines[0] | Should -BeExactly 'LauncherData\settings.psd1 has 11 problems:'
+        $lines[0] | Should -BeExactly 'LauncherData\settings.psd1 has 8 problems:'
         $lines[1] | Should -BeExactly "- Hypervisor: must be 'Auto', 'VMware' or 'VirtualBox'"
-        $lines.Count | Should -Be 12
+        $lines.Count | Should -Be 9
     }
 
     It 'stops when the file is open in another program, naming the cause but no path, and keeps the message from Windows aside' -Tag 'WindowsOnly' {

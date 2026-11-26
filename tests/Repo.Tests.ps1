@@ -273,7 +273,7 @@ Describe 'Static guards' {
     }
 
     It 'let only the adapters in the module read the PC or run programs' {
-        $adapters = 'Invoke-PvmGetPartition', 'Invoke-PvmGetDisk', 'Invoke-PvmGetProcess', 'Invoke-PvmTestProcess', 'Invoke-PvmGetDeviceGuard',
+        $adapters = 'Invoke-PvmGetPartition', 'Invoke-PvmGetDiskPartition', 'Invoke-PvmGetDisk', 'Invoke-PvmGetProcess', 'Invoke-PvmTestProcess', 'Invoke-PvmGetDeviceGuard',
         'Invoke-PvmGetRegistryValue', 'Invoke-PvmNative', 'Invoke-PvmStartProcess', 'Invoke-PvmSetEnvironment', 'Invoke-PvmSleep',
         'Invoke-PvmTestAdministrator', 'Invoke-PvmEnterLock', 'Invoke-PvmExitLock', 'Invoke-PvmGetSignature'
         $reads = 'Get-Partition', 'Get-Disk', 'Get-Volume', 'Get-PhysicalDisk', 'Get-CimInstance', 'Get-WmiObject', 'Get-Process',
@@ -595,8 +595,11 @@ Describe 'Example settings' {
         Remove-Module PortableVM
     }
 
-    It 'has exactly the keys of settings schema 2' {
-        (@($script:settings.Keys | Sort-Object) -join ', ') | Should -BeExactly (@($script:schema | Sort-Object) -join ', ')
+    It 'has exactly the keys of settings schema 2, those the VM''s files give as comments' {
+        $fromVm = 'VirtualBoxVmUuid', 'VirtualBoxDisk', 'VMwareDisk'
+        (@($script:settings.Keys | Sort-Object) -join ', ') | Should -BeExactly (@($script:schema | Where-Object { $fromVm -notcontains $_ } | Sort-Object) -join ', ')
+        $text = [IO.File]::ReadAllText($script:example)
+        foreach ($key in $fromVm) { $text | Should -Match ('(?m)^    #' + $key + ' +=') }
     }
 
     It 'names only keys of the schema where the module reads a setting' {
@@ -613,7 +616,7 @@ Describe 'Example settings' {
     }
 
     It 'uses the synthetic 5ca1ab1e UUID' {
-        $script:settings.VirtualBoxVmUuid | Should -Match '^5ca1ab1e-'
+        [IO.File]::ReadAllText($script:example) | Should -Match "(?m)^    #VirtualBoxVmUuid = '5ca1ab1e-"
     }
 }
 

@@ -3714,6 +3714,7 @@ Describe 'The VM''s own files' {
             @{ Case = 'a present SCSI disk'; Lines = @('scsi0.virtualDev = "lsisas1068"', 'scsi0:0.fileName = "stick.vmdk"', 'scsi0:0.present = "TRUE"'); Expect = @('scsi0:0|scsi|lsisas1068|<folder>stick.vmdk') }
             @{ Case = 'a disk that is not present'; Lines = @('sata0:0.fileName = "stick.vmdk"', 'sata0:0.present = "FALSE"'); Expect = @() }
             @{ Case = 'a disk without a present line'; Lines = @('sata0:0.fileName = "stick.vmdk"'); Expect = @() }
+            @{ Case = 'a disk on a controller that is switched off'; Lines = @('sata0.present = "FALSE"', 'sata0:0.fileName = "stick.vmdk"', 'sata0:0.present = "TRUE"'); Expect = @() }
             @{ Case = 'a CD drive'; Lines = @('ide1:0.fileName = "disc.vmdk"', 'ide1:0.present = "TRUE"', 'ide1:0.deviceType = "cdrom-image"'); Expect = @() }
             @{ Case = 'an image that is no .vmdk'; Lines = @('sata0:1.fileName = "disc.iso"', 'sata0:1.present = "TRUE"'); Expect = @() }
             @{ Case = 'disks on SATA, NVMe and IDE, in any case'; Lines = @('SATA0:0.fileName = "a.vmdk"', 'sata0:0.present = "true"', 'nvme0:0.fileName = "b.VMDK"', 'nvme0:0.present = "TRUE"',

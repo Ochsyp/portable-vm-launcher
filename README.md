@@ -26,8 +26,16 @@ Before every start the launcher:
   disk signature, size, 512-byte sectors and the position of the Data partition it runs from.
   Otherwise nothing starts;
 - refuses the PC's own Windows disk;
-- points the VM's raw-disk descriptor (`.vmdk`) at that disk number, changing only its extent
-  lines and `createType`, and stops at a descriptor it does not understand;
+- reads which raw-disk descriptor (`.vmdk`) the VM uses from its own `.vmx` or `.vbox`, and
+  the VM's UUID from the `.vbox`; settings that name them too must agree, and a VM file that
+  attaches no raw disk, more than one, or one outside the stick folder stops the start;
+- points that descriptor at the disk number, changing only its extent lines and `createType`,
+  and stops at a descriptor it does not understand or whose extent names a file, also through
+  a long path such as `\\?\C:\...`; a missing VMware descriptor is created where the `.vmx`
+  names it, with the adapter type of its controller;
+- before a VirtualBox start, checks the stick's disk in the `.vbox`: host I/O cache on for its
+  controller and no bandwidth group, or VirtualBox takes the stick's volumes away from Windows;
+  and no partition that Windows has mounted in the VM's part of the stick, before Data;
 - fixes the stick's drive letter in the VirtualBox files: below a drive root in every quoted
   path below the stick folder, whatever its letter, as before; when the stick folder is a drive
   root, only in the paths on the stick's old letter, so that a path on another drive never moves;
@@ -198,6 +206,10 @@ Until then the launcher stops and says the file is still the example. The settin
 schema 2 (`SchemaVersion = 2`): every value is checked before the launcher reads the PC, and a
 value of the wrong type or an unknown word is refused rather than guessed. The path settings are
 relative to the folder that holds `Launcher` and `LauncherData`, without a drive, `.` or `..`.
+`VMwareDisk`, `VirtualBoxDisk` and `VirtualBoxVmUuid` are optional: the launcher reads them from
+the `.vmx` and the `.vbox`. Set one only to have the launcher check it; a value that differs
+from the VM's file stops the start and names both. A launcher from before phase 7 still needs all
+three.
 Keep the file ASCII, or save it as UTF-8 with BOM; a file without a byte order mark that holds
 other characters is refused. The file is read as data, so nothing in it runs.
 
@@ -296,7 +308,8 @@ The redesign removes these. Until then:
   window or library. Between runs the descriptor still names the disk number of the last run,
   which another disk may have by then.
 - **VirtualBox: keep "Use Host I/O Cache" on** for the controller that holds the raw disk. With
-  it off, VirtualBox takes every volume of the stick offline, the Data partition included.
+  it off, VirtualBox takes every volume of the stick offline, the Data partition included. A
+  VirtualBox start stops when it is off.
 - `HideDataPartition = $false` shows the Data partition to a VirtualBox guest. Never mount it
   inside the guest: Windows writes to it at the same time, and it holds the VM's own files.
 - A second double-click while Windows still asks for administrator rights for the first one, or

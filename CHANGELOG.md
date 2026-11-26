@@ -159,6 +159,17 @@ All notable changes to this project are listed here. The format follows
 - Tests of whole VMware starts and dry runs with VMware's blank at the end of the extent line and
   a tab at the end of the `createType` line: the disk file and its copies stay byte for byte as
   they were, so a later start path that compares the file another way fails a test.
+- VM config checks (phase 7, first pull request). The launcher reads which raw-disk file the VM
+  uses from its own `.vmx` and `.vbox`, and the VM's UUID from the `.vbox`, and points exactly
+  those files at the stick. `VMwareDisk`, `VirtualBoxDisk` and `VirtualBoxVmUuid` become
+  optional; when set, they must agree with the VM's files, or the start stops and names both. A
+  VM file that attaches no raw disk, more than one, or one outside the stick folder stops the
+  start. Before a VirtualBox start, the stick's disk must have host I/O cache on and no bandwidth
+  group, and Windows may have mounted no partition in the VM's part of the stick, before Data.
+  A FLAT extent that names a file through a long path, such as `\\?\C:\...`, counts as a file,
+  not a raw disk. A missing VMware descriptor is created where the `.vmx` names it, with the
+  adapter type of its controller instead of always `ide`. A dry run logs each stop and goes on;
+  a start where all agrees logs no new line. The read-only check reports each of these by kind.
 - A guided fix after a cut-off write (request r4). Where a start finds a write that did not
   finish, it shows the step that sets it right as a question, with No as the default, and says
   what a Yes puts aside. On Yes it takes exactly that step, checks the file again and goes on with
