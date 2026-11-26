@@ -386,6 +386,14 @@ function Invoke-PvmGetPartition {
     Get-Partition -DriveLetter $DriveLetter -ErrorAction Stop
 }
 
+# Return the partitions of the disk with the number $Number.
+function Invoke-PvmGetDiskPartition {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][uint32]$Number)
+    Assert-PvmNotUnderTest -Name $MyInvocation.MyCommand.Name
+    Get-Partition -DiskNumber $Number -ErrorAction Stop
+}
+
 # Return the disk with the number $Number.
 function Invoke-PvmGetDisk {
     [CmdletBinding()]
@@ -786,12 +794,12 @@ function Get-PvmSettingSchema {
     [pscustomobject]@{ Name = 'StickSectors'; Required = $true; Default = $null; Kind = 'Count'; Values = @() }
     [pscustomobject]@{ Name = 'VmSectors'; Required = $true; Default = $null; Kind = 'Count'; Values = @() }
     [pscustomobject]@{ Name = 'DataPartitionStart'; Required = $true; Default = $null; Kind = 'Count'; Values = @() }
-    [pscustomobject]@{ Name = 'VirtualBoxVmUuid'; Required = $true; Default = $null; Kind = 'Uuid'; Values = @() }
+    [pscustomobject]@{ Name = 'VirtualBoxVmUuid'; Required = $false; Default = $null; Kind = 'Uuid'; Values = @() }
     [pscustomobject]@{ Name = 'VirtualBoxHome'; Required = $true; Default = $null; Kind = 'Path'; Values = @() }
     [pscustomobject]@{ Name = 'VirtualBoxVbox'; Required = $true; Default = $null; Kind = 'Path'; Values = @('.vbox') }
-    [pscustomobject]@{ Name = 'VirtualBoxDisk'; Required = $true; Default = $null; Kind = 'Path'; Values = @('.vmdk') }
+    [pscustomobject]@{ Name = 'VirtualBoxDisk'; Required = $false; Default = $null; Kind = 'Path'; Values = @('.vmdk') }
     [pscustomobject]@{ Name = 'VMwareVmx'; Required = $true; Default = $null; Kind = 'Path'; Values = @('.vmx') }
-    [pscustomobject]@{ Name = 'VMwareDisk'; Required = $true; Default = $null; Kind = 'Path'; Values = @('.vmdk') }
+    [pscustomobject]@{ Name = 'VMwareDisk'; Required = $false; Default = $null; Kind = 'Path'; Values = @('.vmdk') }
 }
 
 # Return what is wrong with the path setting $Value, or nothing when it names a file that ends in
@@ -1686,24 +1694,28 @@ function Format-PvmDescriptorReason {
 function Get-PvmVMwareDescriptorText {
     [CmdletBinding()]
     [OutputType([string])]
-    param([Parameter(Mandatory)][hashtable]$Layout)
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [ValidateSet('ide', 'buslogic', 'lsilogic')][string]$AdapterType = 'ide'
+    )
     $lines = @('# Disk DescriptorFile', 'version=1', 'encoding="windows-1252"', 'CID=fffffffe', 'parentCID=ffffffff',
         ('createType="{0}"' -f $Layout.CreateType), '', '# Extent description') +
     $Layout.Extents +
-    @('', '# The Disk Data Base', '#DDB', '', 'ddb.adapterType = "ide"', 'ddb.geometry.cylinders = "16383"',
+    @('', '# The Disk Data Base', '#DDB', '', ('ddb.adapterType = "{0}"' -f $AdapterType), 'ddb.geometry.cylinders = "16383"',
         'ddb.geometry.heads = "16"', 'ddb.geometry.sectors = "63"', 'ddb.virtualHWVersion = "20"', '')
     $lines -join "`r`n"
 }
 
 # Return whether the FLAT extent target $Target names a raw device, as a descriptor of a raw disk
 # does: a Windows device path, which starts with \\.\ or \\?\, or a device below /dev on Linux,
-# such as /dev/sdb. A /dev path counts only when every name after /dev/ is there, is not . or ..
+# such as /dev/sdb. Such a path names a file when a drive letter and a \ or UNC\ follow, as in
+# \\?\C:\disk.img. A /dev path counts only when every name after /dev/ is there, is not . or ..
 # and holds no \, so that no spelling of it leads out of /dev. Any other target names a file.
 function Test-PvmRawDeviceTarget {
     [CmdletBinding()]
     [OutputType([bool])]
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Target)
-    if ($Target -match '\A\\\\[.?]\\') { return $true }
+    if ($Target -match '\A\\\\[.?]\\') { return ($Target -notmatch '\A\\\\[.?]\\(?:[A-Za-z]:\\|UNC\\)') }
     if (-not $Target.StartsWith('/dev/', [StringComparison]::Ordinal)) { return $false }
     $names = $Target.Substring(5).Split('/')
     @($names | Where-Object { -not $_ -or $_ -eq '.' -or $_ -eq '..' -or $_.Contains('\') }).Count -eq 0
@@ -2100,7 +2112,8 @@ function New-PvmVMwareDescriptor {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][hashtable]$Layout,
-        [Parameter(Mandatory)][string]$LogPath
+        [Parameter(Mandatory)][string]$LogPath,
+        [ValidateSet('ide', 'buslogic', 'lsilogic')][string]$AdapterType = 'ide'
     )
     Assert-PvmNoLeftover -Paths $Path
     Write-PvmLog -Path $LogPath -Message "Creating $(Split-Path $Path -Leaf) -> $($Layout.Extents -join ' | ')"
@@ -2109,7 +2122,7 @@ function New-PvmVMwareDescriptor {
     }
     if (-not $PSCmdlet.ShouldProcess($Path, 'Create the raw-disk descriptor')) { return }
     try {
-        $null = Write-PvmFile -Path $Path -Bytes ([Text.Encoding]::ASCII.GetBytes((Get-PvmVMwareDescriptorText -Layout $Layout)))
+        $null = Write-PvmFile -Path $Path -Bytes ([Text.Encoding]::ASCII.GetBytes((Get-PvmVMwareDescriptorText -Layout $Layout -AdapterType $AdapterType)))
     } catch {
         if (-not (Test-PvmWriteError -ErrorRecord $_)) { throw }
         throw (Get-PvmWriteStop -ErrorRecord $_ -Path $Path -Values @{ Path = $Path } -Template 'The launcher could not create {Path}, because {Cause}. Nothing was started.')
@@ -2313,6 +2326,8 @@ function Test-PvmRunningInVirtualBox {
     [OutputType([bool])]
     param([string]$VmUuid)
     $processes = @(Invoke-PvmGetProcess -Name 'VirtualBoxVM', 'VBoxHeadless')
+    # Without the VM's UUID, any VirtualBox VM may be this one.
+    if (-not $VmUuid) { return [bool]$processes.Count }
     [bool]($processes | Where-Object { Test-PvmVirtualBoxVmProcess -Process $_ -VmUuid $VmUuid })
 }
 
@@ -2436,28 +2451,413 @@ function Get-PvmVirtualBoxState {
     [pscustomobject]@{ State = $state; Reason = ''; StateFile = $machine.GetAttribute('stateFile') }
 }
 
-# Return the files a start may write, as the settings in $Context name them, each followed by its
-# first copy and the copy of the version before its latest rewrite below the backups folder: the
-# VMware descriptor, the .vbox, VirtualBox.xml and the VirtualBox descriptor. Each has its Path;
-# a copy also the file it is Of, whether its copies are disarmed (Disarm), and whether it is the
-# copy of the version before (Previous).
-function Get-PvmWrittenPath {
+# --- The VM's own files ----------------------------------------------------------------------
+# The .vmx and the .vbox say which disk file the VM uses, and the .vbox holds the VM's UUID. The
+# launcher points exactly those files at the stick; settings that name them too must agree.
+
+# Return the disk files that the .vmx settings $Values (ConvertFrom-PvmVmxText) of the .vmx $Vmx
+# attach: each <bus><n>:<m>.fileName on an ide, sata, scsi or nvme bus whose device is present,
+# on a controller that is not switched off, is no CD drive and names a .vmdk. Each has its Key, such as scsi0:0, its Bus, the controller's
+# VirtualDev and the File as the .vmx names it, with its Path (Resolve-PvmVmFilePath) relative
+# to the .vmx folder.
+function Get-PvmVmxDisk {
     [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][hashtable]$Values,
+        [Parameter(Mandatory)][string]$Vmx
+    )
+    foreach ($key in @($Values.Keys | Sort-Object)) {
+        if ($key -notmatch '\A(ide|sata|scsi|nvme)(\d+):(\d+)\.filename\z') { continue }
+        $bus = $Matches[1]
+        $controller = $Matches[1] + $Matches[2]
+        $device = $key.Substring(0, $key.Length - '.filename'.Length)
+        if ("$($Values["$device.present"])" -ne 'TRUE' -or "$($Values["$controller.present"])" -eq 'FALSE') { continue }
+        if ("$($Values["$device.devicetype"])" -match 'cdrom|floppy') { continue }
+        $file = "$($Values[$key])"
+        if (-not $file.EndsWith('.vmdk', [StringComparison]::OrdinalIgnoreCase)) { continue }
+        [pscustomobject]@{
+            Key        = $device
+            Bus        = $bus
+            VirtualDev = "$($Values["$controller.virtualdev"])"
+            File       = $file
+            Path       = Resolve-PvmVmFilePath -Folder (Split-Path $Vmx) -File $file
+        }
+    }
+}
+
+# Return the full path of the file $File that a VM file in the folder $Folder names: relative to
+# that folder, or absolute; either slash is a separator. A path with a drive letter is absolute on
+# every system; outside Windows it names no file there and stays as written. A name that the
+# system cannot make a path of gives ''.
+function Resolve-PvmVmFilePath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$Folder,
+        [Parameter(Mandatory)][string]$File
+    )
+    if ($File -match '\A[A-Za-z]:[\\/]' -and [IO.Path]::DirectorySeparatorChar -ne '\') { return $File }
+    $separator = [IO.Path]::DirectorySeparatorChar
+    $name = $File.Replace('\', $separator).Replace('/', $separator)
+    try {
+        if ([IO.Path]::IsPathRooted($name)) { return [IO.Path]::GetFullPath($name) }
+        [IO.Path]::GetFullPath([IO.Path]::Combine($Folder, $name))
+    } catch {
+        ''
+    }
+}
+
+# Return whether the full path $Path lies below the stick folder $Root: without case on Windows.
+function Test-PvmBelowStick {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Path
+    )
+    if (-not $Path) { return $false }
+    $below = [IO.Path]::GetFullPath($Root).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    $comparison = if (Test-PvmWindowsHost) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    $Path.StartsWith($below, $comparison)
+}
+
+# Return whether the disk file $Path is one the launcher points at the stick: $null when it is
+# missing, else whether one of its FLAT extents names a raw device (Test-PvmRawDeviceTarget). A
+# file of 1 MiB or more, a folder, or one that cannot be read, is none.
+function Test-PvmRawDiskFile {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
+    if (-not $Path) { return $false }
+    if ([IO.Directory]::Exists($Path)) { return $false }
+    try {
+        $file = [IO.FileInfo]::new($Path)
+        if (-not $file.Exists) { return $null }
+        if ($file.Length -ge 1MB) { return $false }
+        $text = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($Path))
+    } catch {
+        return $false
+    }
+    foreach ($match in [regex]::Matches($text, '(?im)^[ \t]*(?:RW|RDONLY|NOACCESS)[ \t]+\d+[ \t]+FLAT[ \t]+"([^"]*)"')) {
+        if (Test-PvmRawDeviceTarget -Target $match.Groups[1].Value) { return $true }
+    }
+    $false
+}
+
+# Return the disk file among $Disks, each with its Path, that the launcher points at the stick,
+# for the VM file $File of the program $Program: the one the setting $SettingName names, as the
+# full path $Setting, when it is set; else the one raw disk (Test-PvmRawDiskFile), or the one that
+# is missing. Returns Path, Disk, Problem, the stop's message, or '', and its Kind, which names no
+# file: Setting, None, Several or Outside. With a problem, Path is $Setting, which a dry run goes
+# on with.
+function Select-PvmVmDisk {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [AllowEmptyCollection()][object[]]$Disks = @(),
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Setting,
+        [Parameter(Mandatory)][string]$SettingName,
+        [Parameter(Mandatory)][string]$Program,
+        [Parameter(Mandatory)][string]$File
+    )
+    $values = @{ Program = $Program; File = $File; Setting = $SettingName; Root = $Context.Root }
+    $attached = if ($Disks.Count) { (@($Disks | ForEach-Object { if ($_.Path) { $_.Path } else { $_.File } }) -join ', ') } else { 'no disk file' }
+    $chosen = $null
+    if ($Setting) {
+        $comparison = if (Test-PvmWindowsHost) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+        $chosen = @($Disks | Where-Object { [string]::Equals($_.Path, $Setting, $comparison) }) | Select-Object -First 1
+        if ($null -eq $chosen) {
+            $values['Path'] = $Setting
+            $values['Attached'] = $attached
+            return [pscustomobject]@{ Path = $Setting; Disk = $null; Kind = 'Setting'; Problem = (Format-PvmMessage -Names $Context.Names -Values $values -Template (
+                        '{Setting} in settings.psd1 names {Path}, but {vm}''s {Program} file {File} does not attach it; it attaches {Attached}. ' +
+                        'Correct {Setting}, or remove it so that the launcher takes the disk file from {File}. Nothing was started.')) }
+        }
+    } else {
+        $raw = @($Disks | Where-Object { $false -ne (Test-PvmRawDiskFile -Path $_.Path) })
+        if ($raw.Count -ne 1) {
+            $values['Attached'] = $attached
+            $template = if ($raw.Count) {
+                '{VM}''s {Program} file {File} attaches more than one raw-disk file ({Attached}). Set {Setting} in settings.psd1 to the one the launcher should point at the stick. Nothing was started.'
+            } else {
+                '{VM}''s {Program} file {File} attaches no raw-disk file, so the launcher cannot tell which file to point at the stick; it attaches {Attached}. Attach the stick''s disk file in {Program}, then start {vm} again. Nothing was started.'
+            }
+            $kind = if ($raw.Count) { 'Several' } else { 'None' }
+            return [pscustomobject]@{ Path = ''; Disk = $null; Kind = $kind; Problem = (Format-PvmMessage -Names $Context.Names -Values $values -Template $template) }
+        }
+        $chosen = $raw[0]
+    }
+    if (-not (Test-PvmBelowStick -Root $Context.Root -Path $chosen.Path)) {
+        $values['Path'] = $chosen.Path
+        return [pscustomobject]@{ Path = $Setting; Disk = $null; Kind = 'Outside'; Problem = (Format-PvmMessage -Names $Context.Names -Values $values -Template (
+                    '{VM}''s {Program} file {File} attaches the disk file {Path}, which is not below the stick folder {Root}, so the launcher does not point it at the stick. ' +
+                    'Attach the stick''s disk file from below the stick folder in {Program}, then start {vm} again. Nothing was started.')) }
+    }
+    [pscustomobject]@{ Path = $chosen.Path; Disk = $chosen; Kind = ''; Problem = '' }
+}
+
+# Return a new record of the VM's own files for $Context.VmFiles, with the paths and the UUID that
+# the settings in $Context name, until Resolve-PvmVMwareFile and Resolve-PvmVirtualBoxFile read
+# them from the VM's files: VMwareDisk, VMwareAdapter, VMwareProblem, VirtualBoxDisk,
+# VirtualBoxVmUuid, VirtualBoxProblem, and the stick disk's Controller, HostIOCache and
+# BandwidthGroup in VirtualBox. VMwareKind and VirtualBoxKind name each problem's kind
+# (Select-PvmVmDisk's, or Uuid, NoMachine or Unlisted); VMwareRead and VirtualBoxRead say whether
+# the file was read. A path that is not set is ''.
+function New-PvmVmFileRecord {
+    [CmdletBinding()]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Builds an object; changes nothing.')]
     [OutputType([pscustomobject])]
     param([Parameter(Mandatory)][pscustomobject]$Context)
     $settings = $Context.Settings
+    $vmwareDisk = if ($settings['VMwareDisk']) { Join-PvmStickPath -Root $Context.Root -Path $settings['VMwareDisk'] } else { '' }
+    $virtualBoxDisk = if ($settings['VirtualBoxDisk']) { Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxDisk'] } else { '' }
+    [pscustomobject]@{
+        VMwareDisk        = $vmwareDisk
+        VMwareAdapter     = 'ide'
+        VMwareProblem     = ''
+        VMwareKind        = ''
+        VMwareRead        = $false
+        VirtualBoxDisk    = $virtualBoxDisk
+        VirtualBoxVmUuid  = "$($settings['VirtualBoxVmUuid'])"
+        VirtualBoxProblem = ''
+        VirtualBoxKind    = ''
+        VirtualBoxRead    = $false
+        Controller        = ''
+        HostIOCache       = ''
+        BandwidthGroup    = ''
+    }
+}
+
+# Read which disk file the .vmx that the settings in $Context name attaches (Get-PvmVmxDisk,
+# Select-PvmVmDisk) into $Context.VmFiles: its path and the adapter type a new descriptor gets
+# from its bus, or VMwareProblem. A .vmx that cannot be read leaves the record as it is, since the
+# start stops at it anyway (Assert-PvmKnownState).
+function Resolve-PvmVMwareFile {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][pscustomobject]$Context)
+    $files = $Context.VmFiles
+    $vmx = Join-PvmStickPath -Root $Context.Root -Path $Context.Settings['VMwareVmx']
+    $state = Get-PvmVMwareState -Path $vmx
+    if ($state.State -eq 'Unknown') { return }
+    $choice = Select-PvmVmDisk -Context $Context -Disks @(Get-PvmVmxDisk -Values $state.Values -Vmx $vmx) -Setting $files.VMwareDisk -SettingName 'VMwareDisk' -Program 'VMware' -File $vmx
+    $files.VMwareRead = $true
+    $files.VMwareDisk = $choice.Path
+    $files.VMwareProblem = $choice.Problem
+    $files.VMwareKind = $choice.Kind
+    if ($choice.Disk) {
+        $files.VMwareAdapter = if ($choice.Disk.Bus -ne 'scsi') { 'ide' } elseif ($choice.Disk.VirtualDev -eq 'buslogic') { 'buslogic' } else { 'lsilogic' }
+    }
+}
+
+# Return the .vbox $Path as an XmlDocument in Document, or a Reason why it cannot be read: it is
+# missing, a folder, unreadable or no XML. DTDs are refused.
+function Read-PvmXmlFile {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param([Parameter(Mandatory)][string]$Path)
+    if (Test-Path -LiteralPath $Path -PathType Container) { return [pscustomobject]@{ Document = $null; Reason = 'the path is a folder, not a file' } }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return [pscustomobject]@{ Document = $null; Reason = (Get-PvmMissingReason) } }
+    try { $text = [IO.File]::ReadAllText($Path) }
+    catch { return [pscustomobject]@{ Document = $null; Reason = "the file cannot be read ($($_.Exception.Message))" } }
+    $readerSettings = New-Object System.Xml.XmlReaderSettings
+    $readerSettings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
+    try {
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($text), $readerSettings)
+        try {
+            $document = New-Object System.Xml.XmlDocument
+            $document.Load($reader)
+        } finally {
+            $reader.Close()
+        }
+    } catch {
+        return [pscustomobject]@{ Document = $null; Reason = "the file is no valid XML ($($_.Exception.Message))" }
+    }
+    [pscustomobject]@{ Document = $document; Reason = '' }
+}
+
+# Return what the .vbox document $Document of the file $Vbox says about its disks: the Machine's
+# Uuid without braces, and Disks, each hard disk that a storage controller attaches outside the
+# snapshots, with its Path (a location relative to the .vbox folder, or with a drive letter, read
+# as on the stick when it names a path below the stick's folder as $Location spells it), the
+# Controller's name, its useHostIOCache and the device's bandwidthGroup as written; or a Reason
+# and its Kind, NoMachine or Unlisted. When the stick folder is a drive root, every lettered path
+# is below it, so such a path counts as on the stick only with the stick's letter now, or when its
+# file is there, as the old letter of another PC leaves it; a path on another drive stays as it is.
+function Get-PvmVboxDisk {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][System.Xml.XmlDocument]$Document,
+        [Parameter(Mandatory)][string]$Vbox,
+        [Parameter(Mandatory)][string]$Root,
+        [AllowNull()]$Location
+    )
+    $machine = $Document.SelectSingleNode("/*[local-name()='VirtualBox']/*[local-name()='Machine']")
+    if ($null -eq $machine) { return [pscustomobject]@{ Uuid = ''; Disks = @(); Reason = 'it has no Machine element'; Kind = 'NoMachine' } }
+    $uuid = $machine.GetAttribute('uuid').Trim('{', '}')
+    $media = @{}
+    foreach ($disk in @($machine.SelectNodes(".//*[local-name()='MediaRegistry']//*[local-name()='HardDisk']"))) {
+        $media[$disk.GetAttribute('uuid').Trim('{', '}').ToLowerInvariant()] = $disk.GetAttribute('location')
+    }
+    $below = if ($null -ne $Location -and $Location.Path -match '\A[A-Za-z]:') { $Location.Path.Substring(2).Replace('/', '\').TrimEnd('\') } else { $null }
+    $unlisted = $false
+    $disks = foreach ($controller in @($machine.SelectNodes(".//*[local-name()='StorageController'][not(ancestor::*[local-name()='Snapshot'])]"))) {
+        foreach ($device in @($controller.SelectNodes("*[local-name()='AttachedDevice']"))) {
+            if ($device.GetAttribute('type') -ne 'HardDisk') { continue }
+            $image = $device.SelectSingleNode("*[local-name()='Image']")
+            $key = if ($null -ne $image) { $image.GetAttribute('uuid').Trim('{', '}').ToLowerInvariant() } else { '' }
+            if (-not $media.ContainsKey($key)) {
+                $unlisted = $true
+                continue
+            }
+            $named = $media[$key]
+            $path = if ($null -ne $below -and $named -match '\A[A-Za-z]:[\\/]') {
+                $rest = $named.Substring(2).Replace('/', '\')
+                $onStick = if ($rest.StartsWith($below + '\', [StringComparison]::OrdinalIgnoreCase)) { Join-PvmStickPath -Root $Root -Path $rest.Substring($below.Length + 1) } else { '' }
+                if ($onStick -and ($below -or [string]::Equals($named.Substring(0, 1), "$($Location.Letter)", [StringComparison]::OrdinalIgnoreCase) -or [IO.File]::Exists($onStick))) { $onStick }
+                else { Resolve-PvmVmFilePath -Folder (Split-Path $Vbox) -File $named }
+            } else {
+                Resolve-PvmVmFilePath -Folder (Split-Path $Vbox) -File $named
+            }
+            [pscustomobject]@{
+                Path           = $path
+                File           = $named
+                Controller     = $controller.GetAttribute('name')
+                HostIOCache    = $controller.GetAttribute('useHostIOCache')
+                BandwidthGroup = $device.GetAttribute('bandwidthGroup')
+            }
+        }
+    }
+    if ($unlisted) { return [pscustomobject]@{ Uuid = $uuid; Disks = @(); Reason = 'it attaches a hard disk that its media registry does not list'; Kind = 'Unlisted' } }
+    [pscustomobject]@{ Uuid = $uuid; Disks = @($disks); Reason = ''; Kind = '' }
+}
+
+# Read the VM's UUID and which disk file the .vbox that the settings in $Context name attaches
+# (Get-PvmVboxDisk, Select-PvmVmDisk), with the storage settings of that disk, into
+# $Context.VmFiles, or VirtualBoxProblem. A VirtualBoxVmUuid in the settings must equal the
+# .vbox's. A .vbox that cannot be read leaves the record as it is, since the start stops at it
+# anyway (Assert-PvmKnownState).
+function Resolve-PvmVirtualBoxFile {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][pscustomobject]$Context)
+    $files = $Context.VmFiles
+    $vbox = Join-PvmStickPath -Root $Context.Root -Path $Context.Settings['VirtualBoxVbox']
+    $xml = Read-PvmXmlFile -Path $vbox
+    if ($null -eq $xml.Document) { return }
+    $read = Get-PvmVboxDisk -Document $xml.Document -Vbox $vbox -Root $Context.Root -Location $Context.Location
+    $values = @{ Vbox = $vbox; Reason = $read.Reason; Setting = $files.VirtualBoxVmUuid; Uuid = $read.Uuid }
+    $files.VirtualBoxRead = $true
+    if ($read.Reason) {
+        $files.VirtualBoxKind = $read.Kind
+        $files.VirtualBoxProblem = Format-PvmMessage -Names $Context.Names -Values $values -Template 'The launcher cannot tell which disk file {vm}''s .vbox file {Vbox} uses, because {Reason}. Nothing was started.'
+        return
+    }
+    if ($files.VirtualBoxVmUuid -and -not [string]::Equals($files.VirtualBoxVmUuid, $read.Uuid, [StringComparison]::OrdinalIgnoreCase)) {
+        $files.VirtualBoxKind = 'Uuid'
+        $files.VirtualBoxProblem = Format-PvmMessage -Names $Context.Names -Values $values -Template (
+            'VirtualBoxVmUuid in settings.psd1 is {Setting}, but {vm}''s .vbox file {Vbox} has the UUID {Uuid}. ' +
+            'Correct VirtualBoxVmUuid, or remove it so that the launcher takes the UUID from the .vbox file. Nothing was started.')
+        return
+    }
+    $files.VirtualBoxVmUuid = $read.Uuid
+    $choice = Select-PvmVmDisk -Context $Context -Disks $read.Disks -Setting $files.VirtualBoxDisk -SettingName 'VirtualBoxDisk' -Program 'VirtualBox' -File $vbox
+    $files.VirtualBoxDisk = $choice.Path
+    $files.VirtualBoxProblem = $choice.Problem
+    $files.VirtualBoxKind = $choice.Kind
+    if ($choice.Disk) {
+        $files.Controller = $choice.Disk.Controller
+        $files.HostIOCache = $choice.Disk.HostIOCache
+        $files.BandwidthGroup = $choice.Disk.BandwidthGroup
+    }
+}
+
+# Return the messages of the stops for VirtualBox's storage settings of the stick's disk in
+# $Context.VmFiles: host I/O cache must be on and no bandwidth group set, or VirtualBox takes the
+# stick's volumes away from Windows, the Data partition with the launcher's own files too. On
+# Windows, no partition of the stick other than Data may be mounted before the Data partition,
+# in the part of the stick the VM uses (Get-PvmMountedVmPartition).
+function Get-PvmVirtualBoxStorageProblem {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)]$Disk
+    )
+    $files = $Context.VmFiles
+    $values = @{ Controller = $files.Controller; Group = $files.BandwidthGroup }
+    if ($files.Controller -and $files.HostIOCache -ne 'true') {
+        Format-PvmMessage -Names $Context.Names -Values $values -Template (
+            'Host I/O cache is off for the storage controller {Controller} in VirtualBox, which holds {vm}''s stick disk. Then VirtualBox takes the stick''s volumes away ' +
+            'from Windows, the launcher''s own folder too. Turn on "Use Host I/O Cache" for that controller in {vm}''s storage settings in VirtualBox, then start {vm} again. Nothing was started.')
+    }
+    if ($files.BandwidthGroup) {
+        Format-PvmMessage -Names $Context.Names -Values $values -Template (
+            '{VM}''s stick disk in VirtualBox has the bandwidth group {Group}, with which VirtualBox takes the stick''s volumes away from Windows. ' +
+            'Set its bandwidth group to none in VirtualBox, then start {vm} again. Nothing was started.')
+    }
+    if (-not (Test-PvmWindowsHost)) { return }
+    $mounted = Get-PvmMountedVmPartition -Disk $Disk -DataPartitionStart $Context.Settings['DataPartitionStart']
+    if ($mounted.Problem) {
+        Format-PvmMessage -Names $Context.Names -Values @{ Cause = $mounted.Problem } -Template 'The launcher cannot tell which partitions of the stick Windows has mounted, because {Cause}. Nothing was started.'
+    } elseif ($mounted.Mounts.Count) {
+        Format-PvmMessage -Names $Context.Names -Values @{ Mounts = ($mounted.Mounts -join ', ') } -Template (
+            'Windows has mounted a partition in the part of the stick that {vm} uses ({Mounts}). VirtualBox would take it away from Windows, or {guest} would write into it ' +
+            'while Windows uses it. Remove its drive letter or folder path in Disk Management, then start {vm} again. Nothing was started.')
+    }
+}
+
+# Return the places, such as E:\, where Windows has mounted a partition of the disk $Disk that
+# starts before the sector $DataPartitionStart, which is the VM's own part of the stick, in Mounts;
+# or Problem, the cause, when the partitions cannot be read. A volume's \\?\Volume{...}\ path is
+# no mount.
+function Get-PvmMountedVmPartition {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)]$Disk,
+        [Parameter(Mandatory)][int64]$DataPartitionStart
+    )
+    try { $partitions = @(Invoke-PvmGetDiskPartition -Number $Disk.Number) }
+    catch { return [pscustomobject]@{ Mounts = @(); Problem = (Format-PvmBecause -Cause (Get-PvmErrorCause -ErrorRecord $_)) } }
+    $mounts = foreach ($partition in $partitions) {
+        if ([int64]($partition.Offset / 512) -ge $DataPartitionStart) { continue }
+        $names = $partition.PSObject.Properties.Name
+        if ($names -contains 'DriveLetter' -and $partition.DriveLetter -and [int][char]$partition.DriveLetter -ne 0) { "$([char]$partition.DriveLetter):\" }
+        if ($names -contains 'AccessPaths') { @($partition.AccessPaths) | Where-Object { $_ -and -not $_.StartsWith('\\?\') -and $_ -notmatch '\A[A-Za-z]:\\?\z' } }
+    }
+    [pscustomobject]@{ Mounts = @($mounts | Select-Object -Unique); Problem = '' }
+}
+
+# Return the files a start may write, each followed by its first copy and the copy of the version
+# before its latest rewrite below the backups folder: the VMware descriptor, the .vbox,
+# VirtualBox.xml and the VirtualBox descriptor, the descriptors as $Context.VmFiles names them, or
+# else as the settings do; one that neither names is left out. Each has its Kind (VMwareDisk,
+# Vbox, VirtualBoxXml, VirtualBoxDisk) and Path; a copy also the file it is Of, whether its copies
+# are disarmed (Disarm), and whether it is the copy of the version before (Previous). With $Kind,
+# only the files of those kinds.
+function Get-PvmWrittenPath {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [string[]]$Kind = @('VMwareDisk', 'Vbox', 'VirtualBoxXml', 'VirtualBoxDisk')
+    )
+    $settings = $Context.Settings
     $backup = @{ Root = $Context.Root; Backups = $Context.Backups }
+    $vmFiles = if ($Context.PSObject.Properties.Name -contains 'VmFiles' -and $null -ne $Context.VmFiles) { $Context.VmFiles } else { New-PvmVmFileRecord -Context $Context }
     $files = @(
-        @{ Path = (Join-PvmStickPath -Root $Context.Root -Path $settings['VMwareDisk']); Suffix = '.orig' }
-        @{ Path = (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxVbox']); Suffix = '.launcher-backup' }
-        @{ Path = (Join-Path (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxHome']) 'VirtualBox.xml'); Suffix = '.launcher-backup' }
-        @{ Path = (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxDisk']); Suffix = '.orig' }
+        @{ Kind = 'VMwareDisk'; Path = $vmFiles.VMwareDisk; Suffix = '.orig' }
+        @{ Kind = 'Vbox'; Path = (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxVbox']); Suffix = '.launcher-backup' }
+        @{ Kind = 'VirtualBoxXml'; Path = (Join-Path (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxHome']) 'VirtualBox.xml'); Suffix = '.launcher-backup' }
+        @{ Kind = 'VirtualBoxDisk'; Path = $vmFiles.VirtualBoxDisk; Suffix = '.orig' }
     )
     foreach ($file in $files) {
+        if ($Kind -notcontains $file.Kind -or -not $file.Path) { continue }
         $disarm = $file.Suffix -eq '.orig'
-        [pscustomobject]@{ Path = $file.Path; Of = ''; Disarm = $disarm; Previous = $false }
-        [pscustomobject]@{ Path = (Get-PvmBackupPath @backup -Path $file.Path -Suffix $file.Suffix); Of = $file.Path; Disarm = $disarm; Previous = $false }
-        [pscustomobject]@{ Path = (Get-PvmBackupPath @backup -Path $file.Path -Suffix ('.previous' + $file.Suffix)); Of = $file.Path; Disarm = $disarm; Previous = $true }
+        [pscustomobject]@{ Kind = $file.Kind; Path = $file.Path; Of = ''; Disarm = $disarm; Previous = $false }
+        [pscustomobject]@{ Kind = $file.Kind; Path = (Get-PvmBackupPath @backup -Path $file.Path -Suffix $file.Suffix); Of = $file.Path; Disarm = $disarm; Previous = $false }
+        [pscustomobject]@{ Kind = $file.Kind; Path = (Get-PvmBackupPath @backup -Path $file.Path -Suffix ('.previous' + $file.Suffix)); Of = $file.Path; Disarm = $disarm; Previous = $true }
     }
 }
 
@@ -2472,10 +2872,13 @@ function Get-PvmWrittenPath {
 # fixed, not at all.
 function Assert-PvmNoWrittenLeftover {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][pscustomobject]$Context)
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [string[]]$Kind = @('VMwareDisk', 'Vbox', 'VirtualBoxXml', 'VirtualBoxDisk')
+    )
     $broken = @{}
     $open = $null
-    foreach ($entry in @(Get-PvmWrittenPath -Context $Context)) {
+    foreach ($entry in @(Get-PvmWrittenPath -Context $Context -Kind $Kind)) {
         if ($entry.Of -and $broken.ContainsKey($entry.Of)) { continue }
         $step = Get-PvmWrittenLeftoverStep -Entry $entry
         if (-not $step) { continue }
@@ -2794,7 +3197,7 @@ function Get-PvmStartSnapshot {
         VirtualBoxSaved     = $Context.VirtualBoxState.State -eq 'Saved'
         VmxExists           = Test-Path -LiteralPath $vmx
         RunningInVMware     = Test-PvmRunningInVMware -Vmx $vmx
-        RunningInVirtualBox = Test-PvmRunningInVirtualBox -VmUuid $settings['VirtualBoxVmUuid']
+        RunningInVirtualBox = Test-PvmRunningInVirtualBox -VmUuid $Context.VmFiles.VirtualBoxVmUuid
     }
 }
 
@@ -2954,16 +3357,21 @@ function Invoke-PvmVMware {
         return 'AlreadyRunning'
     }
     foreach ($kind in $Decision.Stops) { Invoke-PvmStopUnlessDryRun -Context $Context -Message (Get-PvmDecisionMessage -Kind $kind -Context $Context -Snapshot $Snapshot -Use 'VMware') }
+    if ($Context.VmFiles.VMwareProblem) { Invoke-PvmStopUnlessDryRun -Context $Context -Message $Context.VmFiles.VMwareProblem }
     Assert-PvmVMwareReady -Context $Context -Vmx $vmx
 
     Enter-PvmStep -Context $Context -Name 'files'
-    $disk = Join-PvmStickPath -Root $Context.Root -Path $settings['VMwareDisk']
-    if ([IO.File]::Exists($disk)) {
+    # The disk file the .vmx attaches (Resolve-PvmVMwareFile); a dry run that found none has
+    # nothing to point at the stick.
+    $disk = $Context.VmFiles.VMwareDisk
+    if (-not $disk) {
+        Write-PvmLog -Path $log -Message 'DRY RUN - no VMware disk file to point at the stick'
+    } elseif ([IO.File]::Exists($disk)) {
         $copies = @{ Root = $Context.Root; Backups = $Context.Backups; Path = $disk }
         $change = Get-PvmDescriptorChange -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @copies -Suffix '.orig') -PreviousPath (Get-PvmBackupPath @copies -Suffix '.previous.orig') -LogPath $log
         if ($null -ne $change) { Save-PvmFileChange -Change $change -LogPath $log -WhatIf:$Context.DryRun }
     } else {
-        New-PvmVMwareDescriptor -Path $disk -Layout $layout -LogPath $log -WhatIf:$Context.DryRun
+        New-PvmVMwareDescriptor -Path $disk -Layout $layout -LogPath $log -AdapterType $Context.VmFiles.VMwareAdapter -WhatIf:$Context.DryRun
     }
     Enter-PvmStep -Context $Context -Name 'start'
     if ($Context.DryRun) {
@@ -3072,10 +3480,12 @@ function Invoke-PvmVirtualBox {
     $log = $Context.LogPath
     $layout = Get-PvmDiskLayout -Drive $Drive -VmSectors $settings['VmSectors'] -DataPartitionStart $settings['DataPartitionStart'] -HideData $settings['HideDataPartition']
     $vboxManage = Join-Path $VirtualBoxDir 'VBoxManage.exe'
-    $uuid = $settings['VirtualBoxVmUuid']
+    $uuid = $Context.VmFiles.VirtualBoxVmUuid
     Invoke-PvmSetEnvironment -Name 'VBOX_USER_HOME' -Value (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxHome'])
     $names = $Context.Names
     foreach ($kind in $Decision.Stops) { Invoke-PvmStopUnlessDryRun -Context $Context -Message (Get-PvmDecisionMessage -Kind $kind -Context $Context -Snapshot $Snapshot -Use 'VirtualBox') }
+    if ($Context.VmFiles.VirtualBoxProblem) { Invoke-PvmStopUnlessDryRun -Context $Context -Message $Context.VmFiles.VirtualBoxProblem }
+    foreach ($problem in @(Get-PvmVirtualBoxStorageProblem -Context $Context -Disk $Context.StickDisk)) { Invoke-PvmStopUnlessDryRun -Context $Context -Message $problem }
     $open = @(Invoke-PvmGetProcess -Name 'VirtualBox', 'VirtualBoxVM', 'VBoxHeadless')
     if ($open.Count) {
         # VirtualBox hides its VM processes' command lines, so VirtualBox is asked whether this VM is
@@ -3119,16 +3529,19 @@ function Invoke-PvmVirtualBox {
     Enter-PvmStep -Context $Context -Name 'files'
     $vbox = Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxVbox']
     $registry = Join-Path (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxHome']) 'VirtualBox.xml'
-    $disk = Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxDisk']
+    # The disk file the .vbox attaches (Resolve-PvmVirtualBoxFile); a dry run that found none has
+    # nothing to point at the stick.
+    $disk = $Context.VmFiles.VirtualBoxDisk
+    if (-not $disk) { Write-PvmLog -Path $log -Message 'DRY RUN - no VirtualBox disk file to point at the stick' }
     $backup = @{ Root = $Context.Root; Backups = $Context.Backups }
     # At a drive root the paths to the VM's own files show the stick's old letter. The location
     # gives the stick folder as Windows spells it, which on Windows is $Context.Root.
-    $letters = @{ Root = $Context.Location.Path; Letter = $Context.Location.Letter; Known = @($vbox, $disk); LogPath = $log }
+    $letters = @{ Root = $Context.Location.Path; Letter = $Context.Location.Letter; Known = @(@($vbox, $disk) | Where-Object { $_ }); LogPath = $log }
     # Every file is checked first, so that a refusal leaves all of them as they are.
     $changes = @(@(
             Get-PvmDriveLetterChange -Path $vbox -BackupPath (Get-PvmBackupPath @backup -Path $vbox -Suffix '.launcher-backup') -PreviousPath (Get-PvmBackupPath @backup -Path $vbox -Suffix '.previous.launcher-backup') @letters
             Get-PvmDriveLetterChange -Path $registry -BackupPath (Get-PvmBackupPath @backup -Path $registry -Suffix '.launcher-backup') -PreviousPath (Get-PvmBackupPath @backup -Path $registry -Suffix '.previous.launcher-backup') @letters
-            Get-PvmDescriptorChange -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @backup -Path $disk -Suffix '.orig') -PreviousPath (Get-PvmBackupPath @backup -Path $disk -Suffix '.previous.orig') -LogPath $log
+            if ($disk) { Get-PvmDescriptorChange -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @backup -Path $disk -Suffix '.orig') -PreviousPath (Get-PvmBackupPath @backup -Path $disk -Suffix '.previous.orig') -LogPath $log }
         ) | Where-Object { $null -ne $_ })
     foreach ($change in $changes) { Save-PvmFileChange -Change $change -LogPath $log -WhatIf:$Context.DryRun }
     Enter-PvmStep -Context $Context -Name 'start'
@@ -3195,8 +3608,15 @@ function Invoke-PvmLaunch {
     # VMware suspend from the log. A state the launcher cannot tell stops it.
     $vbox = Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxVbox']
     # A write that did not finish, of any file a start may write or of a copy of one, stops a start
-    # in either hypervisor before a file is read, with the step that sets it right.
-    Assert-PvmNoWrittenLeftover -Context $Context
+    # in either hypervisor before a file is read, with the step that sets it right. The .vmx, which
+    # the launcher never writes, says which VMware disk file that is; the .vbox, once it is whole,
+    # which VirtualBox disk file and the VM's UUID.
+    $Context.StickDisk = $disk
+    $Context.VmFiles = New-PvmVmFileRecord -Context $Context
+    Resolve-PvmVMwareFile -Context $Context
+    Assert-PvmNoWrittenLeftover -Context $Context -Kind 'VMwareDisk', 'Vbox', 'VirtualBoxXml'
+    Resolve-PvmVirtualBoxFile -Context $Context
+    Assert-PvmNoWrittenLeftover -Context $Context -Kind 'VirtualBoxDisk'
     $Context.VMwareState = Get-PvmVMwareState -Path $vmx
     if ($Context.VMwareState.State -eq 'Saved') { Write-PvmLog -Path $log -Message 'Saved state found: suspended in VMware' }
     Assert-PvmKnownState -Context $Context -State $Context.VMwareState -What 'whether {vm} is suspended in VMware' -Setting 'VMwareVmx' -Path $vmx
@@ -3275,6 +3695,8 @@ function Invoke-PortableVM {
         Caption         = 'Portable VM'
         VMwareState     = $null
         VirtualBoxState = $null
+        VmFiles         = $null
+        StickDisk       = $null
         Settings        = @{}
         Step            = 'setup'
         Clock           = [Diagnostics.Stopwatch]::StartNew()
