@@ -115,6 +115,15 @@ BeforeAll {
             '# The Disk Data Base', '#DDB', '', 'ddb.adapterType = "lsilogic"', '') -join $Newline
     }
 
+    # Return the VMware descriptor text that already points at the synthetic stick (disk 3, Data
+    # blanked), with $ExtentEnd after its FLAT extent line and $CreateTypeEnd after its createType
+    # line, as VMware leaves a blank there when it writes the file.
+    function Get-TestStickDescriptorText {
+        param([string]$ExtentEnd = '', [string]$CreateTypeEnd = '')
+        (Get-TestDescriptorText).Replace('createType="fullDevice"', "createType=`"fullDevice`"$CreateTypeEnd").
+        Replace('RW 3900000 FLAT "\\.\PhysicalDrive1" 0', "RW 2500000 FLAT `"\\.\PhysicalDrive3`" 0$ExtentEnd`r`nRW 1400000 ZERO")
+    }
+
     # Return the text of the synthetic .vmx with CRLF line endings: complete, with uuid.action =
     # "keep" and suspend.disabled = "TRUE" unless $Without names their keys, and the lines in $Add.
     function Get-TestVmxText {
@@ -922,6 +931,82 @@ Describe 'Raw-disk descriptors' {
         }
     }
 
+    It 'name why a rewrite is needed: <Case>' -ForEach @(
+        @{ Case = 'a disarmed device'; Kinds = @('the disk device')
+            Old = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PortableVM-disarmed`" 0`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+        }
+        @{ Case = 'another disk number'; Kinds = @('the disk device')
+            Old = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+        }
+        @{ Case = 'a size'; Kinds = @('a size')
+            Old = "createType=`"fullDevice`"`r`nRW 10 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+        }
+        @{ Case = 'an offset'; Kinds = @('a start offset')
+            Old = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 7`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+        }
+        @{ Case = 'RW to RDONLY'; Kinds = @('the access mode')
+            Old = "createType=`"fullDevice`"`r`nRDONLY 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+        }
+        @{ Case = 'FLAT to ZERO'; Kinds = @('the extent type')
+            Old = "createType=`"partitionedDevice`"`r`nRW 2 FLAT `"\\.\PhysicalDrive3`" 0`r`nRW 7 FLAT `"\\.\PhysicalDrive3`" 2`r`n"
+            New = "createType=`"partitionedDevice`"`r`nRW 2 FLAT `"\\.\PhysicalDrive3`" 0`r`nRW 7 ZERO`r`n"
+        }
+        @{ Case = 'one extent more'; Kinds = @('the number of extents')
+            Old = "createType=`"fullDevice`"`r`nRW 2 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 2 FLAT `"\\.\PhysicalDrive3`" 0`r`nRW 7 ZERO`r`n"
+        }
+        @{ Case = 'one extent fewer'; Kinds = @('the number of extents')
+            Old = "createType=`"fullDevice`"`r`nRW 2 FLAT `"\\.\PhysicalDrive3`" 0`r`nRW 7 ZERO`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 2 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+        }
+        @{ Case = 'a missing createType'; Kinds = @('no createType line')
+            Old = "version=1`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+            New = "version=1`r`ncreateType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+        }
+        @{ Case = 'another createType'; Kinds = @('the createType line')
+            Old = "createType=`"partitionedDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+        }
+        @{ Case = 'a size and an offset written with leading zeros'; Kinds = @('other line content')
+            Old = "createType=`"fullDevice`"`r`nRW 09 FLAT `"\\.\PhysicalDrive3`" 00`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+        }
+        @{ Case = 'blanks inside an extent line'; Kinds = @('other line content')
+            Old = "createType=`"fullDevice`"`r`nRW  9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+        }
+        @{ Case = 'two kinds at once, in a fixed order'; Kinds = @('the disk device', 'the createType line')
+            Old = "createType=`"partitionedDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive1`" 0`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n"
+        }
+        @{ Case = "the synthetic stick's VMware descriptor"; Kinds = @('the disk device', 'a size', 'the number of extents')
+            Old = "createType=`"fullDevice`"`r`nRW 3900000 FLAT `"\\.\PhysicalDrive1`" 0`r`n"
+            New = "createType=`"fullDevice`"`r`nRW 2500000 FLAT `"\\.\PhysicalDrive3`" 0`r`nRW 1400000 ZERO`r`n"
+        }
+    ) {
+        @(Get-PvmDescriptorDifference -Old $Old -New $New) | Should -BeExactly $Kinds
+    }
+
+    It 'name no difference when the descriptors count as the same' {
+        @(Get-PvmDescriptorDifference -Old "createType=`"fullDevice`" `r`nrw 9 flat `"\\.\physicaldrive3`" 0 `r`n" -New "createType=`"fullDevice`"`r`nRW 9 FLAT `"\\.\PhysicalDrive3`" 0`r`n") |
+            Should -BeNullOrEmpty
+    }
+
+    It 'word the reason as one sentence: <Kinds>' -ForEach @(
+        @{ Kinds = @('the disk device'); Text = 'the disk device differs' }
+        @{ Kinds = @('the disk device', 'the createType line'); Text = 'the disk device and the createType line differ' }
+        @{ Kinds = @('the disk device', 'a size', 'the number of extents', 'the createType line'); Text = 'the disk device, a size, the number of extents and the createType line differ' }
+        @{ Kinds = @('no createType line'); Text = 'the createType line is missing' }
+        @{ Kinds = @('a size', 'no createType line'); Text = 'a size differs, and the createType line is missing' }
+    ) {
+        Format-PvmDescriptorReason -Kinds $Kinds | Should -BeExactly $Text
+    }
+
     Context 'on disk' -Tag 'WindowsOnly' {
         BeforeEach {
             Mock -ModuleName PortableVM Write-Host {}
@@ -944,7 +1029,7 @@ Describe 'Raw-disk descriptors' {
             $disarmed = (Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', '\\.\PortableVM-disarmed')
             [IO.File]::ReadAllText($script:backup) | Should -BeExactly $disarmed
             [IO.File]::ReadAllText($script:previous) | Should -BeExactly $disarmed
-            Get-TestLog -Path $script:log | Should -BeExactly @('stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0')
+            Get-TestLog -Path $script:log | Should -BeExactly @('stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0', 'stick.vmdk: rewritten because the disk device differs')
 
             # A change made between two rewrites is in the version before the latest one, not in the first.
             [IO.File]::AppendAllText($script:descriptor, "ddb.comment = `"edited`"`r`n")
@@ -999,7 +1084,18 @@ Describe 'Raw-disk descriptors' {
             $disarmed = $script:latin1.GetBytes($old.Replace('\\.\PhysicalDrive1', '\\.\PortableVM-disarmed'))
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:backup)) | Should -BeExactly ([Convert]::ToBase64String($disarmed))
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:previous)) | Should -BeExactly ([Convert]::ToBase64String($disarmed))
-            Get-TestLog -Path $script:log | Should -BeExactly @('stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0')
+            Get-TestLog -Path $script:log | Should -BeExactly @('stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0', 'stick.vmdk: rewritten because the disk device differs')
+        }
+
+        It 'say why they are rewritten, right after the new layout, naming no device, number or path' {
+            Write-TestFile -Path $script:descriptor -Text (Get-TestDescriptorText).Replace('\\.\PhysicalDrive1', '\\.\PortableVM-disarmed')
+            $layout = @{ CreateType = 'partitionedDevice'; Extents = @('RW 2500000 FLAT "\\.\PhysicalDrive3" 0', 'RW 1400000 ZERO') }
+            Set-PvmDiskDescriptor -Path $script:descriptor -Layout $layout @script:copies
+            $log = @(Get-TestLog -Path $script:log)
+            $log[0] | Should -BeLike 'stick.vmdk -> *'
+            $log[1] | Should -BeExactly 'stick.vmdk: rewritten because the disk device, a size, the number of extents and the createType line differ'
+            $log.Count | Should -Be 2
+            $log[1].Substring('stick.vmdk'.Length) | Should -Not -Match '\d|PhysicalDrive|disarmed|"'
         }
 
         It 'are only logged under -WhatIf' {
@@ -1007,7 +1103,7 @@ Describe 'Raw-disk descriptors' {
             [IO.File]::ReadAllText($script:descriptor) | Should -BeExactly (Get-TestDescriptorText)
             $script:backup | Should -Not -Exist
             $script:previous | Should -Not -Exist
-            Get-TestLog -Path $script:log | Should -BeExactly @('stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0')
+            Get-TestLog -Path $script:log | Should -BeExactly @('stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0', 'stick.vmdk: rewritten because the disk device differs')
         }
 
         It 'stop the launcher when they hold no extent' {
@@ -1558,6 +1654,7 @@ Describe 'A start' {
                 "Stick found: disk 3 (\\.\PhysicalDrive3), drive $($script:stick.Letter):, ID 5CA1AB1E"
                 'Using VMware'
                 'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'
+                'stick.vmdk: rewritten because the disk device, a size and the number of extents differ'
                 "Started with VMware Workstation ($($script:stick.VMwareDir))"
                 '----- End: exit code 0 -----'
             )
@@ -1577,9 +1674,32 @@ Describe 'A start' {
                 "Stick found: disk 3 (\\.\PhysicalDrive3), drive $($script:stick.Letter):, ID 5CA1AB1E"
                 'Using VMware'
                 'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'
+                'stick.vmdk: rewritten because the disk device, a size and the number of extents differ'
                 "DRY RUN - would start $($script:stick.Vmx) with VMware Workstation ($($script:stick.VMwareDir))"
                 '----- End (dry run): exit code 0 -----'
             )
+        }
+
+        # A start path that compared the descriptor another way would rewrite it, and replace the
+        # copy of the version before it, at every VMware start.
+        It 'leaves a descriptor that points at the stick and ends a line with <Case> alone, byte for byte, through a whole start' -ForEach @(
+            @{ Case = "VMware's blank on the extent line"; ExtentEnd = ' '; CreateTypeEnd = '' }
+            @{ Case = 'a tab on the createType line'; ExtentEnd = ''; CreateTypeEnd = "`t" }
+        ) {
+            # Without the blank the file is left alone too, so the fixture points at the stick.
+            foreach ($text in (Get-TestStickDescriptorText), (Get-TestStickDescriptorText -ExtentEnd $ExtentEnd -CreateTypeEnd $CreateTypeEnd)) {
+                Write-TestFile -Path $script:stick.VMwareDisk -Text $text
+                $written = [IO.File]::GetLastWriteTimeUtc($script:stick.VMwareDisk)
+                $before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:stick.VMwareDisk))
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+                $result.ExitCode | Should -Be 0
+                [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:stick.VMwareDisk)) | Should -BeExactly $before
+                [IO.File]::GetLastWriteTimeUtc($script:stick.VMwareDisk) | Should -Be $written
+                Join-Path $script:stick.Backups 'VMware\stick.vmdk.orig' | Should -Not -Exist
+                Join-Path $script:stick.Backups 'VMware\stick.vmdk.previous.orig' | Should -Not -Exist
+                @(Get-TestLog -Path $script:stick.Log | Select-Object -Last 5) | Should -Contain 'stick.vmdk already points at the stick'
+                Get-TestLog -Path $script:stick.Log | Where-Object { $_ -like 'stick.vmdk*rewritten*' -or $_ -like 'stick.vmdk ->*' } | Should -BeNullOrEmpty
+            }
         }
 
         It 'creates no missing descriptor in a dry run' {
@@ -1881,6 +2001,7 @@ Describe 'A start' {
                 "Test VM.vbox: paths moved to drive $($script:stick.Letter):"
                 "VirtualBox.xml: paths moved to drive $($script:stick.Letter):"
                 'stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0'
+                'stick.vmdk: rewritten because the disk device differs'
                 'VirtualBox VM state: "poweroff"'
                 'Started with VirtualBox 7.1.4r165100'
                 '----- End: exit code 0 -----'
@@ -1909,6 +2030,7 @@ Describe 'A start' {
                 "Test VM.vbox: paths moved to drive $($script:stick.Letter):"
                 "VirtualBox.xml: paths moved to drive $($script:stick.Letter):"
                 'stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0'
+                'stick.vmdk: rewritten because the disk device differs'
                 "DRY RUN - would start VM {$script:uuid} with VirtualBox ($($script:stick.VirtualBoxDir))"
                 '----- End (dry run): exit code 0 -----'
             )
@@ -3071,7 +3193,15 @@ Describe 'Timings' {
 
 Describe 'Dry-run parity' {
     It 'takes the decisions of a real start: <Case>' -ForEach @(
-        @{ Case = 'VMware, nothing in the way'; Installed = @('VMware'); Change = @{}; Setup = {} }
+        @{ Case = 'VMware, nothing in the way'; Installed = @('VMware'); Change = @{}; Setup = {}; Expect = 'stick.vmdk: rewritten because the disk device, a size and the number of extents differ' }
+        @{ Case = "VMware with VMware's blank at the end of the extent line"; Installed = @('VMware'); Change = @{}; Expect = 'stick.vmdk already points at the stick'; Setup = {
+                Write-TestFile -Path $script:stick.VMwareDisk -Text (Get-TestStickDescriptorText -ExtentEnd ' ')
+            }
+        }
+        @{ Case = 'VMware with a tab at the end of the createType line'; Installed = @('VMware'); Change = @{}; Expect = 'stick.vmdk already points at the stick'; Setup = {
+                Write-TestFile -Path $script:stick.VMwareDisk -Text (Get-TestStickDescriptorText -CreateTypeEnd "`t")
+            }
+        }
         @{ Case = 'VirtualBox, nothing in the way'; Installed = @('VirtualBox'); Change = @{}; Setup = {} }
         @{ Case = 'VirtualBox with HideDataPartition'; Installed = @('VirtualBox'); Change = @{ HideDataPartition = $true }; Setup = {} }
         @{ Case = 'VMware without its descriptor'; Installed = @('VMware'); Change = @{}; Setup = { Remove-Item -LiteralPath $script:stick.VMwareDisk } }
@@ -3163,6 +3293,7 @@ Describe 'Dry-run parity' {
             Remove-Item -LiteralPath $script:stick.Root -Recurse -Force
         }
         $real, $dryRun = $runs
+        if ($Expect) { $real.Decisions | Should -Contain $Expect }
         $dryRun.Result.ExitCode | Should -Be $real.Result.ExitCode
         $dryRun.Result.Message | Should -BeExactly $real.Result.Message
         $dryRun.Result.Icon | Should -BeExactly $real.Result.Icon

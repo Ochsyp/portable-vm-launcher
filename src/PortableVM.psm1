@@ -1405,7 +1405,8 @@ function ConvertFrom-PvmDescriptorData {
 }
 
 # Return the lines of the descriptor text $Text, each with Text, Ending (CR LF, LF or none at the
-# end), Number and Kind: Blank, Comment, Key (with Key) or Extent (with Type, Target and Offset).
+# end), Number and Kind: Blank, Comment, Key (with Key) or Extent (with Access, Sectors, Type,
+# Target and Offset).
 # A UTF-8 byte order mark before the first line stays in its Text. Throws a FormatException with
 # the reason, which names the line, when the launcher does not understand the descriptor: a line
 # of no known kind, an extent other than '<access> <sectors> FLAT "<raw disk>" <offset>' or
@@ -1426,7 +1427,7 @@ function ConvertFrom-PvmDescriptorText {
             if ($line.EndsWith("`r")) { $line = $line.Substring(0, $line.Length - 1); $ending = "`r`n" }
             $position = $next + 1
         }
-        $lines.Add([pscustomobject]@{ Text = $line; Ending = $ending; Number = $lines.Count + 1; Kind = ''; Key = ''; Type = ''; Target = ''; Offset = '' })
+        $lines.Add([pscustomobject]@{ Text = $line; Ending = $ending; Number = $lines.Count + 1; Kind = ''; Key = ''; Access = ''; Sectors = ''; Type = ''; Target = ''; Offset = '' })
     }
     $bom = [string]::new([char[]](0xEF, 0xBB, 0xBF))
     $extentPattern = '^[ \t]*(?<access>RW|RDONLY|NOACCESS)[ \t]+(?<sectors>\d+)[ \t]+(?<type>[A-Za-z]+)(?:[ \t]+"(?<target>[^"]*)"(?:[ \t]+(?<offset>\d+))?)?[ \t]*$'
@@ -1454,6 +1455,8 @@ function ConvertFrom-PvmDescriptorText {
             if ($extentEnded) { throw [FormatException]::new("$where is an extent apart from the others") }
             $sawExtent = $true
             $entry.Kind = 'Extent'
+            $entry.Access = $match.Groups['access'].Value.ToUpperInvariant()
+            $entry.Sectors = $match.Groups['sectors'].Value
             $entry.Type = $type
             $entry.Target = $target.Value
             $entry.Offset = $match.Groups['offset'].Value
@@ -1546,6 +1549,64 @@ function Test-PvmSameDescriptorText {
         $builder.ToString()
     }
     $texts[0] -eq $texts[1]
+}
+
+# Return why the descriptor text $New differs from $Old, as kinds that name no value, in this
+# order: the disk device, a size, a start offset, the access mode, the extent type (for an extent
+# whose type changes, its device and offset are not compared), the number of extents, no createType
+# line, the createType line, and other line content when none of these explains the difference.
+# Returns nothing when the two count as the same (Test-PvmSameDescriptorText). Throws a
+# FormatException when the launcher does not understand either text.
+function Get-PvmDescriptorDifference {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Old,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$New
+    )
+    if (Test-PvmSameDescriptorText -Old $Old -New $New) { return }
+    $oldLines = @(ConvertFrom-PvmDescriptorText -Text $Old)
+    $newLines = @(ConvertFrom-PvmDescriptorText -Text $New)
+    $oldExtents = @($oldLines | Where-Object { $_.Kind -eq 'Extent' })
+    $newExtents = @($newLines | Where-Object { $_.Kind -eq 'Extent' })
+    $found = @{}
+    for ($index = 0; $index -lt [Math]::Min($oldExtents.Count, $newExtents.Count); $index++) {
+        $before = $oldExtents[$index]
+        $after = $newExtents[$index]
+        # Numbers compare by value, so leading zeros alone are other line content.
+        if ([int64]$before.Sectors -ne [int64]$after.Sectors) { $found['a size'] = $true }
+        if ($before.Access -ne $after.Access) { $found['the access mode'] = $true }
+        if ($before.Type -ne $after.Type) { $found['the extent type'] = $true; continue }
+        if ($before.Target -ne $after.Target) { $found['the disk device'] = $true }
+        if ($before.Offset -ne $after.Offset -and -not ($before.Offset -and $after.Offset -and [int64]$before.Offset -eq [int64]$after.Offset)) { $found['a start offset'] = $true }
+    }
+    if ($oldExtents.Count -ne $newExtents.Count) { $found['the number of extents'] = $true }
+    $blanks = [char[]]@(' ', "`t")
+    $oldType = @($oldLines | Where-Object { $_.Kind -eq 'Key' -and $_.Key -eq 'createType' })
+    $newType = @($newLines | Where-Object { $_.Kind -eq 'Key' -and $_.Key -eq 'createType' })
+    if ($oldType.Count -eq 0 -and $newType.Count -gt 0) { $found['no createType line'] = $true }
+    elseif ($oldType.Count -gt 0 -and $newType.Count -gt 0 -and $oldType[0].Text.Trim($blanks) -ne $newType[0].Text.Trim($blanks)) { $found['the createType line'] = $true }
+    $order = @('the disk device', 'a size', 'a start offset', 'the access mode', 'the extent type', 'the number of extents', 'no createType line', 'the createType line')
+    $kinds = @($order | Where-Object { $found.ContainsKey($_) })
+    if ($kinds.Count -eq 0) { return 'other line content' }
+    $kinds
+}
+
+# Return the kinds $Kinds (Get-PvmDescriptorDifference) as the end of a sentence after "because":
+# "the disk device and the createType line differ", or "the createType line is missing".
+function Format-PvmDescriptorReason {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string[]]$Kinds)
+    $subjects = @($Kinds | Where-Object { $_ -ne 'no createType line' })
+    $differ = switch ($subjects.Count) {
+        0 { '' }
+        1 { "$($subjects[0]) differs" }
+        default { "$(($subjects[0..($subjects.Count - 2)]) -join ', ') and $($subjects[-1]) differ" }
+    }
+    if ($Kinds -notcontains 'no createType line') { return $differ }
+    if ($differ) { return "$differ, and the createType line is missing" }
+    'the createType line is missing'
 }
 
 # Return the text of a new VMware descriptor for $Layout: a header, the Extents of $Layout and a
@@ -1855,6 +1916,8 @@ function Get-PvmDescriptorChange {
         return $null
     }
     Write-PvmLog -Path $LogPath -Message "$name -> $($Layout.Extents -join ' | ')"
+    # The reason names kinds only, so the log holds no more of the stick than the line above.
+    Write-PvmLog -Path $LogPath -Message "${name}: rewritten because $(Format-PvmDescriptorReason -Kinds @(Get-PvmDescriptorDifference -Old $text -New $new))"
     Assert-PvmRewritable -Path $Path
     if ([IO.File]::Exists($PreviousPath)) { Assert-PvmRewritable -Path $PreviousPath }
     [pscustomobject]@{
