@@ -296,6 +296,19 @@ It ends with `RESULT: OK - nothing needs attention`, `RESULT: ATTENTION - <what 
 code 1) or `RESULT: FAILED - <reason>` (exit code 2). A disk file that does not point at the stick
 needs no attention, since the next start points it there.
 
+## Phase 6 checks
+
+Phase 6 reads the PC and the VM once before a start and lets one rule decide. On a stick where
+nothing is in the way, no decision changes, and a program signed by its maker logs no line. So:
+
+1. Run the dry-run check with `-AlsoVirtualBox`, deploying the branch. Both pairs of dry runs
+   must show no difference.
+2. Run the read-only check; it must end with `RESULT: OK`.
+
+No VM start is needed. The cases that do change (saved states in both programs, a program not
+signed by its maker, a VM VirtualBox is busy with) are covered by the tests on a synthetic stick,
+never made on the real one.
+
 ## Rules for the real stick
 
 - Never switch VirtualBox's host I/O cache off for the stick's controller.

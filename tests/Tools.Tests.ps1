@@ -2243,6 +2243,7 @@ $module = Import-Module (Join-Path $Root 'Launcher\PortableVM.psm1') -PassThru -
     function script:Invoke-PvmStartProcess { param($FilePath, $ArgumentList) throw 'A dry run must start nothing.' }
     function script:Invoke-PvmSetEnvironment { param($Name, $Value) }
     function script:Invoke-PvmSleep { param($Seconds) }
+    function script:Invoke-PvmGetSignature { param($Path) [pscustomobject]@{ Status = 'Valid'; Signer = $(if ($Path -like '*vmware.exe') { 'Broadcom Inc' } else { 'Oracle America, Inc.' }) } }
 } $Programs
 $result = Invoke-PortableVM -LauncherPath (Join-Path $Root 'Launcher') -DryRun
 exit $result.ExitCode

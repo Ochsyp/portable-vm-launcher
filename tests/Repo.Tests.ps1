@@ -274,9 +274,9 @@ Describe 'Static guards' {
     It 'let only the adapters in the module read the PC or run programs' {
         $adapters = 'Invoke-PvmGetPartition', 'Invoke-PvmGetDisk', 'Invoke-PvmGetProcess', 'Invoke-PvmTestProcess', 'Invoke-PvmGetDeviceGuard',
         'Invoke-PvmGetRegistryValue', 'Invoke-PvmNative', 'Invoke-PvmStartProcess', 'Invoke-PvmSetEnvironment', 'Invoke-PvmSleep',
-        'Invoke-PvmTestAdministrator', 'Invoke-PvmEnterLock', 'Invoke-PvmExitLock'
+        'Invoke-PvmTestAdministrator', 'Invoke-PvmEnterLock', 'Invoke-PvmExitLock', 'Invoke-PvmGetSignature'
         $reads = 'Get-Partition', 'Get-Disk', 'Get-Volume', 'Get-PhysicalDisk', 'Get-CimInstance', 'Get-WmiObject', 'Get-Process',
-        'Get-ItemProperty', 'Get-ItemPropertyValue', 'Start-Process', 'Start-Sleep', 'Invoke-CimMethod', 'Invoke-WmiMethod'
+        'Get-ItemProperty', 'Get-ItemPropertyValue', 'Start-Process', 'Start-Sleep', 'Invoke-CimMethod', 'Invoke-WmiMethod', 'Get-AuthenticodeSignature'
         $ast = Get-SourceAst -Path $script:module
         $outside = Get-SourceCommand -Ast $ast | Where-Object {
             (($reads -contains $_.Name) -and $adapters -notcontains $_.Function) -or
