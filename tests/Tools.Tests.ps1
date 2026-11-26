@@ -2442,6 +2442,43 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
         $result.Lines[-1] | Should -BeExactly 'RESULT: ATTENTION - a disk file the launcher cannot read'
     }
 
+    It 'reports a disk file it cannot read now, as while a program holds it, and goes on' {
+        $held = [IO.File]::Open((Join-Path $script:stateStick 'VMware\stick.vmdk'), 'Open', 'Read', 'None')
+        try { $result = Invoke-StateCheck }
+        finally { $held.Dispose() }
+        $result.Lines | Should -Contain '  VMware disk file points at the stick: unknown, since it cannot be read now'
+        $result.Lines | Should -Contain '  VirtualBox disk file points at the stick: yes'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: OK - nothing needs attention'
+    }
+
+    It 'answers unknown when it cannot tell whether the next start would stop, and goes on' {
+        Mock Get-PvmLeftoverProblem { throw [IO.IOException]::new('The process cannot access the file.') }
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  the next start would stop at a write that did not finish: unknown, since a file cannot be read now'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: OK - nothing needs attention'
+    }
+
+    It 'says when it could not read every folder for the count of writes that did not finish' {
+        $locked = Join-Path $script:stateStick 'Locked'
+        $null = New-Item -ItemType Directory -Path $locked
+        $null = & icacls.exe $locked /deny "$($env:USERNAME):(OI)(CI)(RD)"
+        try { $result = Invoke-StateCheck }
+        finally { $null = & icacls.exe $locked /remove:d "$($env:USERNAME)" }
+        $result.Lines | Should -Contain '  writes that did not finish (.pvm-tmp or .pvm-old files): 0, but some folders could not be read'
+    }
+
+    It 'says when a request or a stop without a run follows the last run' {
+        $log = @(
+            (Get-StateLogLine -Message '----- Start VM -----' -Time '2026-11-20T09:00:00.000+01:00' -ProcessId 10)
+            (Get-StateLogLine -Message '----- End: exit code 0 -----' -Time '2026-11-20T09:00:05.000+01:00' -ProcessId 10)
+            (Get-StateLogLine -Message 'Asking for administrator rights' -Time '2026-11-22T10:00:00.000+01:00' -ProcessId 11)
+            (Get-StateLogLine -Message 'STOPPED: The request for administrator rights was declined.' -Time '2026-11-22T10:00:01.000+01:00' -ProcessId 11)
+        )
+        Write-TestFile -Path (Join-Path $script:stateStick 'LauncherData\logs\launcher.log') -Text (($log -join "`r`n") + "`r`n")
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  after the last run, the log holds a request or a stop of no run: yes'
+    }
+
     It 'reports the copies, and whether a disk file''s copies name no raw disk' {
         $copy = Join-Path $script:stateStick 'LauncherData\backups\VMware\stick.vmdk.orig'
         Write-TestFile -Path $copy -Text (Get-StateDescriptorText -Extents 'RW 2500000 FLAT "\\.\PortableVM-disarmed" 0', 'RW 1400000 ZERO')

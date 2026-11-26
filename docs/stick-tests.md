@@ -286,7 +286,11 @@ kind, a yes or no, or a count:
   same words as the log;
 - saved states in VMware and VirtualBox;
 - the last run in the log: a start or a dry run, how many days ago, the program it used, its end,
-  whether it stopped, and the kinds of its lines.
+  whether it stopped, the kinds of its lines, and whether a declined request for administrator
+  rights or a stop without a run came after it.
+
+An answer the check cannot give at the moment, such as a disk file a running VM holds, is
+`unknown`, and the rest of the report still shows.
 
 It ends with `RESULT: OK - nothing needs attention`, `RESULT: ATTENTION - <what needs it>` (exit
 code 1) or `RESULT: FAILED - <reason>` (exit code 2). A disk file that does not point at the stick

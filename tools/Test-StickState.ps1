@@ -70,6 +70,10 @@ function Get-StateLastRun {
     else { '  last run ended: no; its End line is missing, as when it was cut off' }
     $stopped = @($messages | Where-Object { $_ -match '^STOPPED: |^DRY RUN - a real start would stop here: ' }).Count -gt 0
     "  last run stopped, or a real start would have: $(if ($stopped) { 'yes' } else { 'no' })"
+    # A request for administrator rights that was declined, or a stop before a run, logs no start.
+    $later = @($all[$start..($all.Count - 1)] | Where-Object { $process -and $_ -notmatch ('^\S+ \[' + $process + '\]  ') } |
+            ForEach-Object { Get-CompareLogMessage -Line $_ } | Where-Object { $_ -match '^Asking for administrator rights$|^STOPPED: ' })
+    if ($later.Count) { '  after the last run, the log holds a request or a stop of no run: yes' }
     '  last run''s lines, by kind:'
     foreach ($message in $messages) { "    $((Get-CompareKind -Message $message) -replace '^version line: another version$', 'version line')" }
 }
@@ -147,18 +151,26 @@ function Invoke-StickState {
         }
 
         # What a write or a deploy that did not finish left.
-        $pending = @(Get-ChildItem -LiteralPath $Target -Force -ErrorAction SilentlyContinue | Where-Object { $CompareSkippedNames -notcontains $_.Name } | ForEach-Object {
-                if ($_.PSIsContainer) { Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue } else { $_ }
+        # A folder that cannot be read is passed over, and the count says so.
+        $unread = @()
+        $pending = @(Get-ChildItem -LiteralPath $Target -Force -ErrorAction SilentlyContinue -ErrorVariable +unread | Where-Object { $CompareSkippedNames -notcontains $_.Name } | ForEach-Object {
+                if ($_.PSIsContainer) { Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Force -ErrorAction SilentlyContinue -ErrorVariable +unread } else { $_ }
             } | Where-Object { $_.Name -like '*.pvm-tmp' -or $_.Name -like '*.pvm-old' })
-        Add-StateLine "  writes that did not finish (.pvm-tmp or .pvm-old files): $($pending.Count)"
+        Add-StateLine "  writes that did not finish (.pvm-tmp or .pvm-old files): $($pending.Count)$(if ($unread.Count) { ', but some folders could not be read' })"
         $stops = $false
         if ($settings) {
             $context = [pscustomobject]@{ Settings = $settings; Root = $Target; Backups = $paths.Backups }
-            foreach ($entry in @(Get-PvmWrittenPath -Context $context)) {
-                $problem = if ($entry.Previous) { Get-PvmCopyLeftoverProblem -Path $entry.Path -Of $entry.Of -Disarm:$entry.Disarm } else { Get-PvmLeftoverProblem -Path $entry.Path }
-                if ($problem) { $stops = $true }
+            $answer = 'no'
+            try {
+                foreach ($entry in @(Get-PvmWrittenPath -Context $context)) {
+                    $problem = if ($entry.Previous) { Get-PvmCopyLeftoverProblem -Path $entry.Path -Of $entry.Of -Disarm:$entry.Disarm } else { Get-PvmLeftoverProblem -Path $entry.Path }
+                    if ($problem) { $stops = $true }
+                }
+                if ($stops) { $answer = 'yes' }
+            } catch {
+                $answer = 'unknown, since a file cannot be read now'
             }
-            Add-StateLine "  the next start would stop at a write that did not finish: $(if ($stops) { 'yes' } else { 'no' })"
+            Add-StateLine "  the next start would stop at a write that did not finish: $answer"
         }
         if ($pending.Count -or $stops) { $attention.Add('writes that did not finish') }
         $deployLeft = @($CompareLeftoverNames | Where-Object { Test-Path -LiteralPath (Join-Path $Target $_) })
@@ -182,7 +194,10 @@ function Invoke-StickState {
                 if ($file.Suffix -eq '.orig') {
                     $points = if (-not $found) { 'unknown, since the file is missing' } else {
                         try {
-                            $text = ConvertFrom-PvmDescriptorData -Bytes ([IO.File]::ReadAllBytes($file.Path))
+                            # A program, such as a hypervisor, can hold the file; the rest of the report still shows.
+                            try { $bytes = [IO.File]::ReadAllBytes($file.Path) }
+                            catch { throw [IO.IOException]::new('unreadable now') }
+                            $text = ConvertFrom-PvmDescriptorData -Bytes $bytes
                             $null = ConvertFrom-PvmDescriptorText -Text $text
                             if (-not $device) { "unknown, $noDevice" } else {
                                 $layout = Get-PvmDiskLayout -Drive $device -VmSectors $settings['VmSectors'] -DataPartitionStart $settings['DataPartitionStart'] -HideData $file.HideData
@@ -192,6 +207,8 @@ function Invoke-StickState {
                                 if (Test-PvmSameDescriptorText -Old $text -New $new) { 'yes' }
                                 else { "no; the next start rewrites it because $(Format-PvmDescriptorReason -Kinds @(Get-PvmDescriptorDifference -Old $text -New $new))" }
                             }
+                        } catch [IO.IOException] {
+                            'unknown, since it cannot be read now'
                         } catch [FormatException] {
                             $attention.Add('a disk file the launcher cannot read')
                             "unknown; the launcher cannot read it, so the next start with $($file.Program) stops"
