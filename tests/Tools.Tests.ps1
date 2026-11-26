@@ -1620,6 +1620,7 @@ Describe 'Compare-StickDryRun: kinds of log lines' {
         @{ Message = 'stick.vmdk already points at the stick'; Kind = 'descriptor already points at the stick' }
         @{ Message = 'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'; Kind = 'descriptor would be pointed at the stick' }
         @{ Message = 'Creating stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0'; Kind = 'descriptor would be created' }
+        @{ Message = 'stick.vmdk: rewritten because the disk device and the createType line differ'; Kind = 'reason for the descriptor rewrite' }
         @{ Message = 'Test VM.vbox: drive letter OK'; Kind = 'the .vbox file: drive letter OK' }
         @{ Message = 'VirtualBox.xml: paths moved to drive Q:'; Kind = 'VirtualBox.xml: paths would move to the drive letter' }
         @{ Message = 'DRY RUN - would start Q:\VMware\Test VM.vmx with VMware Workstation (Q:\Programs\VMware)'; Kind = 'would start with VMware Workstation' }
