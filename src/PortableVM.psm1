@@ -3218,9 +3218,22 @@ function Get-PvmVmSizeTarget {
     $size = Get-PvmVmSize -Cores $pc.Cores -Threads $pc.Threads -MemoryMB $pc.MemoryMB -MaxCpus $settings['VmMaxCpus'] -MaxMemoryGB $settings['VmMaxMemoryGB']
     $notes = @(
         if ($size.Small) { 'Note: this PC is small for the VM; with it running, the PC keeps less than 6 GB of memory or no core of its own.' }
-        if ($pc.FreeMB -and $pc.FreeMB -lt $size.MemoryMB + 2048) { 'Note: this PC has less free memory than the VM''s size and 2 GB more; close other programs if the VM is slow.' }
+        if ($null -ne $pc.FreeMB -and $pc.FreeMB -lt $size.MemoryMB + 2048) { 'Note: this PC has less free memory than the VM''s size and 2 GB more; close other programs if the VM is slow.' }
     )
     [pscustomobject]@{ Why = ''; Cpus = $size.Cpus; MemoryMB = $size.MemoryMB; Detail = "(this PC: $($pc.Cores) cores, $($pc.Threads) threads, $($pc.MemoryMB) MB)"; Notes = $notes }
+}
+
+# Return whether each of the files $Path that exists may be rewritten (Assert-PvmRewritable): not
+# read-only and no link. The VM's size, which can wait, leaves such a file as it is.
+function Test-PvmRewritable {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)][string[]]$Path)
+    foreach ($file in $Path) {
+        if (-not [IO.File]::Exists($file)) { continue }
+        try { Assert-PvmRewritable -Path $file } catch { return $false }
+    }
+    $true
 }
 
 # Return the size $Cpus and $Memory, as the VM's file holds them, as the log shows it.
@@ -3357,11 +3370,10 @@ function Get-PvmVMwareSizeChange {
         if ($null -eq $free) { $null = Write-PvmVmSizeLine @line -Why 'the free space on the stick cannot be read'; return $null }
         if ($free -lt $target.MemoryMB * 1MB) { $null = Write-PvmVmSizeLine @line -Why 'the stick has too little free space for VMware''s memory file of the larger size'; return $null }
     }
-    $null = Write-PvmVmSizeLine @line -Target $target -Old $old
     $copies = @{ Root = $Context.Root; Backups = $Context.Backups; Path = $Vmx }
     $previous = Get-PvmBackupPath @copies -Suffix '.previous.launcher-backup'
-    Assert-PvmRewritable -Path $Vmx
-    if ([IO.File]::Exists($previous)) { Assert-PvmRewritable -Path $previous }
+    if (-not (Test-PvmRewritable -Path $Vmx, $previous)) { $null = Write-PvmVmSizeLine @line -Why 'the .vmx, or its copy below LauncherData\backups, is read-only or a link, which the launcher does not rewrite'; return $null }
+    $null = Write-PvmVmSizeLine @line -Target $target -Old $old
     [pscustomobject]@{
         Path = $Vmx; Old = $bytes; New = $latin1.GetBytes($converted.Text); FirstBackup = (Get-PvmBackupPath @copies -Suffix '.launcher-backup'); PreviousBackup = $previous
         Disarm = $false; Action = 'Set the VM''s CPUs and memory'
@@ -3400,14 +3412,17 @@ function Add-PvmVirtualBoxSizeChange {
     if ($cpus -eq "$($target.Cpus)" -and $memory -eq "$($target.MemoryMB)") { $null = Write-PvmVmSizeLine @line -Target $target -Same; return $Change }
     $converted = ConvertTo-PvmVboxSizeText -Text $text -Cpus $target.Cpus -MemoryMB $target.MemoryMB
     if ($converted.Problem) { $null = Write-PvmVmSizeLine @line -Why $converted.Problem; return $Change }
+    # A drive-letter change has checked that both files may be rewritten.
+    if ($null -eq $Change -and -not (Test-PvmRewritable -Path $Vbox, $PreviousPath)) {
+        $null = Write-PvmVmSizeLine @line -Why 'the .vbox, or its copy below LauncherData\backups, is read-only or a link, which the launcher does not rewrite'
+        return $Change
+    }
     $null = Write-PvmVmSizeLine @line -Target $target -Old (Format-PvmVmSize -Cpus $cpus -Memory $memory)
     if ($null -ne $Change) {
         $Change.New = $strict.GetBytes($converted.Text)
         $Change.Action = "$($Change.Action), and set the VM's CPUs and memory"
         return $Change
     }
-    Assert-PvmRewritable -Path $Vbox
-    if ([IO.File]::Exists($PreviousPath)) { Assert-PvmRewritable -Path $PreviousPath }
     [pscustomobject]@{
         Path = $Vbox; Old = $bytes; New = $strict.GetBytes($converted.Text); FirstBackup = $BackupPath; PreviousBackup = $PreviousPath
         Disarm = $false; Action = 'Set the VM''s CPUs and memory'

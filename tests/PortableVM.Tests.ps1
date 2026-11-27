@@ -4057,10 +4057,11 @@ Describe 'The VM''s size' {
             $log | Should -Contain 'Note: this PC is small for the VM; with it running, the PC keeps less than 6 GB of memory or no core of its own.'
         }
 
-        It 'notes little free memory' {
+        It 'notes little free memory, <Free> MB' -ForEach @(@{ Free = 10000 }, @{ Free = 0 }) {
             $script:stick = Initialize-TestStick -Name 'size-stick'
             Set-TestPc -Stick $script:stick -Installed 'VMware'
-            Mock -ModuleName PortableVM Invoke-PvmGetHostSize { [pscustomobject]@{ Cores = 8; Threads = 16; MemoryMB = 32768; FreeMB = 10000 } }
+            $script:free = $Free
+            Mock -ModuleName PortableVM Invoke-PvmGetHostSize { [pscustomobject]@{ Cores = 8; Threads = 16; MemoryMB = 32768; FreeMB = $script:free } }
             $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher
             Get-TestLog -Path $script:stick.Log | Should -Contain 'Note: this PC has less free memory than the VM''s size and 2 GB more; close other programs if the VM is slow.'
         }
@@ -4075,6 +4076,12 @@ Describe 'The VM''s size' {
             }
             @{ Case = 'the VM has a saved state, resumed'; Change = @{}; Setup = { Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without 'numvcpus' -Add 'numvcpus = "6"', 'checkpoint.vmState = "Test VM.vmss"') }
                 Reason = 'the VM has a saved state, which needs the same hardware to resume'
+            }
+            @{ Case = 'the .vmx is read-only'; Change = @{}; Setup = {
+                    Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without 'numvcpus' -Add 'numvcpus = "6"')
+                    Set-ItemProperty -LiteralPath $script:stick.Vmx -Name IsReadOnly -Value $true
+                }
+                Reason = 'the .vmx, or its copy below LauncherData\backups, is read-only or a link, which the launcher does not rewrite'
             }
             @{ Case = 'the .vmx sets a size key twice'; Change = @{}; Setup = { Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without 'numvcpus' -Add 'numvcpus = "6"', 'numvcpus = "5"') }
                 Reason = 'the .vmx sets numvcpus more than once'
@@ -4095,6 +4102,7 @@ Describe 'The VM''s size' {
             [IO.File]::ReadAllText($script:stick.Vmx) | Should -BeExactly $before
             Get-TestLog -Path $script:stick.Log | Should -Contain "VM size left as it is, because $Reason."
             Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
+            Set-ItemProperty -LiteralPath $script:stick.Vmx -Name IsReadOnly -Value $false
         }
 
         It 'sets a VirtualBox VM''s size in the same write as the drive letters, with one copy of the .vbox as it was' {
