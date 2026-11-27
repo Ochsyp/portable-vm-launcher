@@ -3846,6 +3846,19 @@ Describe 'The VM''s own files' {
                 }
                 Message = 'Windows has mounted a partition in the part of the stick that the VM uses (K:\). VirtualBox would take it away from Windows, or the guest would write into it while Windows uses it. Remove its drive letter or folder path in Disk Management, then start the VM again. Nothing was started.'
             }
+            @{ Case = 'Windows has mounted a partition in the VM''s part of the stick, in a VMware start'; Installed = 'VMware'; Change = @{}; Setup = {
+                    Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition {
+                        Get-TestPartition -Change @{ Offset = [uint64]2048 * 512; Size = [uint64]100000 * 512; DriveLetter = [char]'K'; AccessPaths = @('K:\', '\\?\Volume{5ca1ab1e-0000-4000-8000-000000000008}\') }
+                        Get-TestPartition -Change @{ DriveLetter = [char]$script:testStick.Letter; AccessPaths = @("$($script:testStick.Letter):\") }
+                    } -ParameterFilter { $Number -eq 3 }
+                }
+                Message = 'Windows has mounted a partition in the part of the stick that the VM uses (K:\), and the guest could not write to it while Windows uses it. Remove its drive letter or folder path in Disk Management, then start the VM again. Nothing was started.'
+            }
+            @{ Case = 'the stick''s partitions cannot be read, in a VMware start'; Installed = 'VMware'; Change = @{}; Setup = {
+                    Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { throw [UnauthorizedAccessException]::new('Access denied.') } -ParameterFilter { $Number -eq 3 }
+                }
+                Message = 'The launcher cannot tell which partitions of the stick Windows has mounted, because access is denied. Nothing was started.'
+            }
             @{ Case = 'the stick''s partitions cannot be read'; Installed = 'VirtualBox'; Change = @{}; Setup = {
                     Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { throw [UnauthorizedAccessException]::new('Access denied.') } -ParameterFilter { $Number -eq 3 }
                 }
@@ -3995,6 +4008,10 @@ Describe 'Dry-run parity' {
         @{ Case = 'VirtualBoxVmUuid other than the .vbox''s'; Installed = @('VirtualBox'); Change = @{ VirtualBoxVmUuid = '5ca1ab1e-0000-4000-8000-0000000000ff' }; Setup = {} }
         @{ Case = 'VirtualBox host I/O cache off'; Installed = @('VirtualBox'); Change = @{}; Setup = {
                 [IO.File]::WriteAllText($script:stick.Vbox, [IO.File]::ReadAllText($script:stick.Vbox).Replace('useHostIOCache="true"', 'useHostIOCache="false"'))
+            }
+        }
+        @{ Case = 'a stick partition mounted in the VM''s part, in VMware'; Installed = @('VMware'); Change = @{}; Setup = {
+                Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { Get-TestPartition -Change @{ Offset = [uint64]2048 * 512; DriveLetter = [char]'K'; AccessPaths = @('K:\') } } -ParameterFilter { $Number -eq 3 }
             }
         }
         @{ Case = 'a stick partition mounted in the VM''s part'; Installed = @('VirtualBox'); Change = @{}; Setup = {

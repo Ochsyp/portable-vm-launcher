@@ -2442,7 +2442,7 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
                 '  VirtualBox bandwidth group on the stick disk: unknown'
                 '  partitions mounted in the VM''s part of the stick: 1'
             )) { $result.Lines | Should -Contain $line }
-        $result.Lines[-1] | Should -BeLike 'RESULT: ATTENTION - *VM files that disagree with the settings*VirtualBox storage settings*'
+        $result.Lines[-1] | Should -BeLike 'RESULT: ATTENTION - *VM files that disagree with the settings*a stick partition mounted in the VM''s part*'
         ($result.Lines -join "`n") | Should -Not -Match 'Kelda|5ca1ab1e|other\.vmdk'
     }
 
@@ -2831,6 +2831,69 @@ Describe 'New-StickSettings' -Tag 'WindowsOnly' {
         $result = Invoke-SetupCheck
         $result.ExitCode | Should -Be 1
         $result.Lines[-1] | Should -BeExactly 'RESULT: NOT WRITTEN - LauncherData\settings.psd1 is there already, and the tool never replaces it; compare them with -Compare'
+    }
+
+    It 'reports host I/O cache off for the stick disk and says how to switch it on, changing nothing in the .vbox' {
+        $vbox = Join-Path $script:setupStick 'VirtualBox\Test VM\Test VM.vbox'
+        [IO.File]::WriteAllText($vbox, [IO.File]::ReadAllText($vbox).Replace('useHostIOCache="true"', 'useHostIOCache="false"'))
+        $before = [IO.File]::ReadAllText($vbox)
+        $result = Invoke-SetupCheck
+        $result.ExitCode | Should -Be 0 -Because ($result.Lines -join "`n")
+        $result.Lines | Should -Contain '  VirtualBox host I/O cache on for the stick disk: no'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: WRITTEN - LauncherData\settings.psd1; host I/O cache is off for the stick disk, which -TurnOnHostIOCache switches on'
+        [IO.File]::ReadAllText($vbox) | Should -BeExactly $before
+    }
+
+    It 'switches host I/O cache on with -TurnOnHostIOCache: that one setting, with the launcher''s copies, and once' {
+        $vbox = Join-Path $script:setupStick 'VirtualBox\Test VM\Test VM.vbox'
+        $on = [IO.File]::ReadAllText($vbox).Replace('<StorageController name="SATA"', '<StorageController name="IDE" type="PIIX4" useHostIOCache="false"/><StorageController name="SATA"')
+        $off = $on.Replace('name="SATA" type="AHCI" useHostIOCache="true"', 'name="SATA" type="AHCI" useHostIOCache="false"')
+        [IO.File]::WriteAllText($vbox, $off)
+        Write-TestFile -Path $script:settingsPath -Text $script:setupText
+        Mock -ModuleName PortableVM Invoke-PvmGetProcess { @() }
+        Mock -ModuleName PortableVM Invoke-PvmTestProcess { $false }
+        $result = Invoke-SetupCheck -Compare -More @{ TurnOnHostIOCache = $true }
+        $result.ExitCode | Should -Be 0 -Because ($result.Lines -join "`n")
+        $result.Lines | Should -Contain '  VirtualBox host I/O cache on for the stick disk: yes, switched on now'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: SAME - every key the tool would write equals the stick''s settings'
+        [IO.File]::ReadAllText($vbox) | Should -BeExactly $on
+        [IO.File]::ReadAllText((Join-Path $script:setupStick 'LauncherData\backups\VirtualBox\Test VM\Test VM.vbox.launcher-backup')) | Should -BeExactly $off
+        Join-Path $script:setupStick 'LauncherData\backups\VirtualBox\Test VM\Test VM.vbox.previous.launcher-backup' | Should -Exist
+        $again = Invoke-SetupCheck -Compare -More @{ TurnOnHostIOCache = $true }
+        $again.Lines | Should -Contain '  VirtualBox host I/O cache on for the stick disk: yes'
+        [IO.File]::ReadAllText($vbox) | Should -BeExactly $on
+    }
+
+    It 'does not switch host I/O cache on, and writes nothing, while <Case>' -ForEach @(
+        @{ Case = 'VirtualBox runs'; Setup = { Mock -ModuleName PortableVM Invoke-PvmGetProcess { [pscustomobject]@{ Name = 'VirtualBox.exe'; CommandLine = $null } } -ParameterFilter { $Name -contains 'VirtualBox' } }
+            Reason = 'host I/O cache: VirtualBox or its background service is running; close every VirtualBox window, wait a minute, then run the tool again'
+        }
+        @{ Case = 'VirtualBox''s background service runs'; Setup = { Mock -ModuleName PortableVM Invoke-PvmTestProcess { $true } -ParameterFilter { $Name -eq 'VBoxSVC' } }
+            Reason = 'host I/O cache: VirtualBox or its background service is running; close every VirtualBox window, wait a minute, then run the tool again'
+        }
+        @{ Case = 'the VM has a saved state'; Setup = {
+                $vbox = Join-Path $script:setupStick 'VirtualBox\Test VM\Test VM.vbox'
+                [IO.File]::WriteAllText($vbox, [IO.File]::ReadAllText($vbox).Replace('OSType="Debian_64"', 'OSType="Debian_64" stateFile="Snapshots\x.sav"'))
+            }
+            Reason = 'host I/O cache: the VM has a saved state in VirtualBox, which needs the same hardware to resume'
+        }
+        @{ Case = 'the VM has snapshots'; Setup = {
+                $vbox = Join-Path $script:setupStick 'VirtualBox\Test VM\Test VM.vbox'
+                [IO.File]::WriteAllText($vbox, [IO.File]::ReadAllText($vbox).Replace('  </Machine>', '    <Snapshot uuid="{5ca1ab1e-0000-4000-8000-000000000005}" name="s"/>' + "`n" + '  </Machine>'))
+            }
+            Reason = 'host I/O cache: the VM has snapshots, which hold copies of the controller; switch it on in VirtualBox instead'
+        }
+    ) {
+        $vbox = Join-Path $script:setupStick 'VirtualBox\Test VM\Test VM.vbox'
+        [IO.File]::WriteAllText($vbox, [IO.File]::ReadAllText($vbox).Replace('useHostIOCache="true"', 'useHostIOCache="false"'))
+        Mock -ModuleName PortableVM Invoke-PvmGetProcess { @() }
+        Mock -ModuleName PortableVM Invoke-PvmTestProcess { $false }
+        & $Setup
+        $before = Get-SetupTree -Root $script:setupStick
+        $result = Invoke-SetupCheck -More @{ TurnOnHostIOCache = $true }
+        $result.ExitCode | Should -Be 1 -Because ($result.Lines -join "`n")
+        $result.Lines[-1] | Should -BeExactly "RESULT: NOT WRITTEN - $Reason"
+        Get-SetupTree -Root $script:setupStick | Should -BeExactly $before
     }
 
     It 'takes the .vmx and the .vbox it is given when there are more' {
