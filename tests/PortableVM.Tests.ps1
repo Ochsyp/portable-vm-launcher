@@ -2293,6 +2293,7 @@ Describe 'A start' {
             $log | Should -Contain 'DRY RUN - no disk file is pointed at the stick, since the stick''s boot area is unknown'
             @($log | Where-Object { $_ -like 'stick.vmdk*' }) | Should -BeNullOrEmpty
             $after = Get-TestTreeHash -Root $script:stick.Root
+            @($after.Keys | Sort-Object) | Should -BeExactly @($before.Keys | Sort-Object)
             foreach ($path in $before.Keys) { $after[$path] | Should -BeExactly $before[$path] }
         }
 
