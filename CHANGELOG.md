@@ -159,6 +159,22 @@ All notable changes to this project are listed here. The format follows
 - Tests of whole VMware starts and dry runs with VMware's blank at the end of the extent line and
   a tab at the end of the `createType` line: the disk file and its copies stay byte for byte as
   they were, so a later start path that compares the file another way fails a test.
+- One disk layout for both programs, with the boot area read-only (phase 8, d228). A VirtualBox
+  start now gives the guest the stick as a VMware start does: the Data partition reads as zeros
+  and the guest's writes there are dropped, so the guest never sees the partition that Windows
+  uses at the same time. Both disk files get the same extents and `createType="fullDevice"`. The
+  guest may read but not write the stick's boot area, sector 0 up to the sector before the
+  partition that starts first: the MBR with its boot code, the disk signature the launcher checks
+  and the partition table, and the gap before that partition, where a boot loader keeps more of
+  its code. The first partition, from its boot sector on, stays writable. The launcher reads
+  where it starts at each start, from Windows' list of the stick's partitions, and stops, a dry
+  run as it stops, when it cannot tell. New optional setting `ProtectBootArea`, on unless set to
+  `$false` for a job in the guest that writes the boot area, such as a boot-loader install or a
+  partition editor; the log notes while it is off. `HideDataPartition` is no longer used; a file
+  may keep it, and the log notes it. At the next start in each program, the launcher rewrites
+  that program's disk file with copies. The read-only check says whether the boot area is
+  protected and compares each disk file with the new layout; the stick-check tool knows the new
+  lines.
 - The VM's size at each start (request r9). The launcher reads the PC's cores, threads and memory
   and sizes the VM in the program it starts: all but one core or two threads, 2 to 8 CPUs, and
   half the PC's memory while leaving the PC at least 6 GB, 4 to 16 GB. It writes the `.vmx`

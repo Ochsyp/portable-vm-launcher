@@ -237,9 +237,24 @@ function Invoke-StickState {
         if (-not $settings) {
             Add-StateLine '  the VM files: not checked, since the settings do not pass'
         } else {
+            # The boot area, which a start keeps read-only for the guest (Get-PvmStartLayout).
+            $bootSectors = $null
+            $boot = if (-not $settings['ProtectBootArea']) { $bootSectors = [int64]0; 'no, since ProtectBootArea is off' }
+            elseif (-not $stickDisk) { "unknown, $noDevice" }
+            else {
+                $area = Get-PvmBootArea -Disk $stickDisk -DataPartitionStart $settings['DataPartitionStart']
+                if ($area.Problem) {
+                    $attention.Add('the stick''s boot area')
+                    'unknown, so the next start stops'
+                } else {
+                    $bootSectors = $area.Sectors
+                    'yes'
+                }
+            }
+            Add-StateLine "  the stick's boot area read-only for the guest: $boot"
             $files = @(
-                @{ Label = 'VMware disk file'; Path = $context.VmFiles.VMwareDisk; Suffix = '.orig'; Program = 'VMware'; HideData = $true }
-                @{ Label = 'VirtualBox disk file'; Path = $context.VmFiles.VirtualBoxDisk; Suffix = '.orig'; Program = 'VirtualBox'; HideData = [bool]$settings['HideDataPartition'] }
+                @{ Label = 'VMware disk file'; Path = $context.VmFiles.VMwareDisk; Suffix = '.orig'; Program = 'VMware' }
+                @{ Label = 'VirtualBox disk file'; Path = $context.VmFiles.VirtualBoxDisk; Suffix = '.orig'; Program = 'VirtualBox' }
                 @{ Label = 'VirtualBox .vbox file'; Path = (Join-PvmStickPath -Root $Target -Path $settings['VirtualBoxVbox']); Suffix = '.launcher-backup' }
                 @{ Label = 'VirtualBox.xml'; Path = (Join-Path (Join-PvmStickPath -Root $Target -Path $settings['VirtualBoxHome']) 'VirtualBox.xml'); Suffix = '.launcher-backup' }
             )
@@ -259,10 +274,11 @@ function Invoke-StickState {
                             catch { throw [IO.IOException]::new('unreadable now') }
                             $text = ConvertFrom-PvmDescriptorData -Bytes $bytes
                             $null = ConvertFrom-PvmDescriptorText -Text $text
-                            if (-not $device) { "unknown, $noDevice" } else {
-                                $layout = Get-PvmDiskLayout -Drive $device -VmSectors $settings['VmSectors'] -DataPartitionStart $settings['DataPartitionStart'] -HideData $file.HideData
-                                # A VMware start keeps fullDevice with the Data partition blanked (Invoke-PvmVMware).
-                                if ($file.Program -eq 'VMware') { $layout.CreateType = 'fullDevice' }
+                            if (-not $device) { "unknown, $noDevice" }
+                            elseif ($null -eq $bootSectors) { "unknown, since the stick's boot area is unknown" }
+                            else {
+                                # A start in either program writes the same layout (Get-PvmStartLayout).
+                                $layout = Get-PvmDiskLayout -Drive $device -VmSectors $settings['VmSectors'] -DataPartitionStart $settings['DataPartitionStart'] -BootSectors $bootSectors
                                 $new = ConvertTo-PvmDescriptorText -Text $text -Layout $layout
                                 if (Test-PvmSameDescriptorText -Old $text -New $new) { 'yes' }
                                 else { "no; the next start rewrites it because $(Format-PvmDescriptorReason -Kinds @(Get-PvmDescriptorDifference -Old $text -New $new))" }

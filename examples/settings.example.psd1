@@ -34,11 +34,12 @@
     # with No as the default answer; 'Refuse' stops the launcher instead. Without this line: 'Ask'.
     SavedStatePolicy = 'Ask'
 
-    # VirtualBox only: $true = inside the VM, the stick's Data partition (the NTFS one Windows uses)
-    # shows up empty. VMware always works this way, because it has to take the VM's partitions away
-    # from Windows and can't take the Data partition, which holds the VM's own files. Without this
-    # line: $false.
-    HideDataPartition = $false
+    # $true = in VMware and in VirtualBox, the guest may read but not write the stick's boot area:
+    # sector 0 up to where its first partition starts, with the boot code, the disk signature and
+    # the partition table. Set $false only for a job in the guest that writes there, such as a
+    # boot-loader install or a partition editor, and set it back afterwards ("Boot area" in
+    # README.md). Without this line: $true.
+    ProtectBootArea = $true
 
     # Identity of the stick. The launcher refuses to start the VM on any disk that does not match.
     # Read the values in PowerShell, with N = the stick's disk number from Get-Disk and P = the

@@ -617,11 +617,14 @@ Describe 'Example settings' {
         Remove-Module PortableVM
     }
 
-    It 'has exactly the keys of settings schema 2, those the VM''s files give and the fixed VM size as comments' {
+    It 'has exactly the keys of settings schema 2, those the VM''s files give and the fixed VM size as comments, and not HideDataPartition' {
         $fromVm = 'VirtualBoxVmUuid', 'VirtualBoxDisk', 'VMwareDisk', 'VmCpus', 'VmMemoryGB'
-        (@($script:settings.Keys | Sort-Object) -join ', ') | Should -BeExactly (@($script:schema | Where-Object { $fromVm -notcontains $_ } | Sort-Object) -join ', ')
+        # HideDataPartition is no longer used; the schema keeps it so that older files still pass.
+        $unused = @('HideDataPartition')
+        (@($script:settings.Keys | Sort-Object) -join ', ') | Should -BeExactly (@($script:schema | Where-Object { $fromVm -notcontains $_ -and $unused -notcontains $_ } | Sort-Object) -join ', ')
         $text = [IO.File]::ReadAllText($script:example)
         foreach ($key in $fromVm) { $text | Should -Match ('(?m)^    #' + $key + ' +=') }
+        $text | Should -Not -Match 'HideDataPartition'
     }
 
     It 'names only keys of the schema where the module reads a setting' {

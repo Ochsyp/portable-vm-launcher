@@ -37,6 +37,9 @@ Before every start the launcher:
   controller and no bandwidth group, or VirtualBox takes the stick's volumes away from Windows;
 - before a start in either program, checks that Windows has mounted no partition in the VM's part
   of the stick, before Data, since the guest could not write to it while Windows uses it;
+- gives the guest the same view of the stick in VMware and in VirtualBox: the Data partition
+  reads as zeros and the guest's writes there are dropped, and the stick's boot area is read-only
+  (see [Boot area](#boot-area));
 - sizes the VM to the PC in the program it starts (`VmSizing = 'Auto'`, the default): all but one
   core or two threads, 2 to `VmMaxCpus` (8) CPUs, and half the PC's memory while leaving the PC at
   least 6 GB, 4 to `VmMaxMemoryGB` (16) GB. It writes the `.vmx` or the `.vbox` only when the size
@@ -73,8 +76,10 @@ Before every start the launcher:
 - logs every run, from the request for administrator rights to its exit code, with the time each
   step took (see [Log](#log)).
 
-VMware always gets the stick with the Data partition blanked, because Windows keeps using that
-partition while the VM runs. For VirtualBox, the `HideDataPartition` setting decides.
+Both programs get the stick with the Data partition blanked, because Windows keeps using that
+partition while the VM runs, and VMware takes every volume it gives the guest away from Windows.
+The `HideDataPartition` setting is no longer used; a settings file may keep it, and the log notes
+it.
 
 Messages and the dialog title name the VM and the guest system as `VmDisplayName` and
 `GuestName` in the settings say; without them they say "the VM" and "the guest". Before the
@@ -149,6 +154,35 @@ and the VM files:
 
 The table's paths can also lie in a folder below the drive's root; `Launcher` and
 `LauncherData` sit side by side in it, and the path settings start from it.
+
+## Boot area
+
+The guest may read the stick's boot area but not write it, in VMware and in VirtualBox, unless
+the settings say `ProtectBootArea = $false`. The boot area is sector 0 up to the sector before the
+partition that starts first on the stick, whatever its number. At each start the launcher reads
+where that partition starts from the list of the stick's partitions that Windows gives, and stops
+when it cannot. With a first partition at sector 2048, the boot area is sectors 0 to 2047:
+
+- sector 0, the MBR: the native boot code (bytes 0 to 439), the disk signature by which the
+  launcher finds the stick (bytes 440 to 443) and the partition table (bytes 446 to 509);
+- sectors 1 to 2047, the gap before the first partition, where a boot loader such as GRUB keeps
+  the rest of its code.
+
+Right behind the boot area lies the first partition, from its own boot sector on. The guest reads
+and writes it, boot sector and file system, as before, and a tool that only reads the MBR or
+that boot sector works as before. The partition tables of logical partitions (EBRs) lie inside
+the extended partition, outside the boot area, so they are not protected.
+
+What fails in the guest from now on is a write into the boot area: a boot-loader install to the
+whole disk, such as `grub-install` on the stick's device; a partition editor, such as fdisk,
+parted or GParted, when it writes a changed partition table; a tool that writes a new disk
+signature. The write fails, and the tool reports an error. For such a job, set
+`ProtectBootArea = $false` in `LauncherData\settings.psd1` and start the VM through the
+launcher, which points the disk file at the stick without the protection and notes it in the
+log. Do the job, shut the guest down, then delete the line or set it back to `$true`; the next
+start protects the boot area again. Or boot the stick natively for the job. Either way, a
+partition editor must leave the Data partition where it is: the launcher checks where it starts
+and ends, and refuses to start otherwise.
 
 ## Log
 
@@ -238,6 +272,9 @@ value of the wrong type or an unknown word is refused rather than guessed. The p
 relative to the folder that holds `Launcher` and `LauncherData`, without a drive, `.` or `..`.
 The VM's size settings, `VmSizing`, `VmCpus`, `VmMemoryGB`, `VmMaxCpus` and `VmMaxMemoryGB`, are
 optional; a launcher from before request r9 refuses them, so remove them before going back to one.
+`ProtectBootArea` is optional and on by default (see [Boot area](#boot-area)); a launcher from
+before phase 8 refuses it, so remove it before going back to one. `HideDataPartition` is no
+longer used: a file may keep it, and the log notes it.
 `VMwareDisk`, `VirtualBoxDisk` and `VirtualBoxVmUuid` are optional: the launcher reads them from
 the `.vmx` and the `.vbox`. Set one only to have the launcher check it; a value that differs
 from the VM's file stops the start and names both. A launcher from before phase 7 still needs all
@@ -344,8 +381,6 @@ The redesign removes these. Until then:
 - **VirtualBox: keep "Use Host I/O Cache" on** for the controller that holds the raw disk. With
   it off, VirtualBox takes every volume of the stick offline, the Data partition included. A
   VirtualBox start stops when it is off.
-- `HideDataPartition = $false` shows the Data partition to a VirtualBox guest. Never mount it
-  inside the guest: Windows writes to it at the same time, and it holds the VM's own files.
 - A second double-click while Windows still asks for administrator rights for the first one, or
   in the second after that, asks again. That second run then stops, saying that another run is in
   progress, or says that the VM is already running. Right after a start in VMware, before

@@ -142,7 +142,7 @@ Describe 'Reading a settings file' {
 Describe 'Checking settings against schema 2' {
     It 'finds nothing wrong with good settings, with or without the optional keys' {
         @(Test-PvmSetting -Settings (Get-GoodSetting)) | Should -BeNullOrEmpty
-        $all = @{ IsExample = $false; VmDisplayName = 'Test VM'; GuestName = 'Test OS'; Hypervisor = 'virtualbox'; VMwareView = 'fullscreen'; SavedStatePolicy = 'REFUSE'; HideDataPartition = $true }
+        $all = @{ IsExample = $false; VmDisplayName = 'Test VM'; GuestName = 'Test OS'; Hypervisor = 'virtualbox'; VMwareView = 'fullscreen'; SavedStatePolicy = 'REFUSE'; HideDataPartition = $true; ProtectBootArea = $false }
         @(Test-PvmSetting -Settings (Get-GoodSetting -Change $all)) | Should -BeNullOrEmpty
     }
 
@@ -171,6 +171,8 @@ Describe 'Checking settings against schema 2' {
         @{ Key = 'SavedStatePolicy'; Case = 'an unknown word'; Value = 'Never' }
         @{ Key = 'HideDataPartition'; Case = 'text'; Value = 'false' }
         @{ Key = 'HideDataPartition'; Case = 'a number'; Value = 0 }
+        @{ Key = 'ProtectBootArea'; Case = 'text'; Value = 'false' }
+        @{ Key = 'ProtectBootArea'; Case = 'a number'; Value = 0 }
         @{ Key = 'StickMbrSignature'; Case = '7 digits'; Value = '5CA1AB1' }
         @{ Key = 'StickMbrSignature'; Case = '9 digits'; Value = '5CA1AB1EF' }
         @{ Key = 'StickMbrSignature'; Case = 'none'; Value = 'none' }
@@ -321,7 +323,9 @@ Describe 'Filling in the defaults' {
         $merged['Hypervisor'] | Should -BeExactly 'Auto'
         $merged['VMwareView'] | Should -BeExactly 'Window'
         $merged['SavedStatePolicy'] | Should -BeExactly 'Ask'
-        $merged['HideDataPartition'] | Should -BeFalse
+        # HideDataPartition is no longer used; only a file that sets it has a value.
+        $merged['HideDataPartition'] | Should -BeNullOrEmpty
+        $merged['ProtectBootArea'] | Should -BeTrue
         $merged['IsExample'] | Should -BeFalse
         $merged['VmDisplayName'] | Should -BeExactly 'the VM'
         $merged['GuestName'] | Should -BeExactly 'the guest'

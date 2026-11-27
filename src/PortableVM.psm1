@@ -820,7 +820,8 @@ function Get-PvmSettingSchema {
     [pscustomobject]@{ Name = 'Hypervisor'; Required = $false; Default = 'Auto'; Kind = 'Choice'; Values = @('Auto', 'VMware', 'VirtualBox') }
     [pscustomobject]@{ Name = 'VMwareView'; Required = $false; Default = 'Window'; Kind = 'Choice'; Values = @('Window', 'FullScreen') }
     [pscustomobject]@{ Name = 'SavedStatePolicy'; Required = $false; Default = 'Ask'; Kind = 'Choice'; Values = @('Ask', 'Refuse') }
-    [pscustomobject]@{ Name = 'HideDataPartition'; Required = $false; Default = $false; Kind = 'Bool'; Values = @() }
+    [pscustomobject]@{ Name = 'HideDataPartition'; Required = $false; Default = $null; Kind = 'Bool'; Values = @() }
+    [pscustomobject]@{ Name = 'ProtectBootArea'; Required = $false; Default = $true; Kind = 'Bool'; Values = @() }
     [pscustomobject]@{ Name = 'StickMbrSignature'; Required = $true; Default = $null; Kind = 'Signature'; Values = @() }
     [pscustomobject]@{ Name = 'StickSectors'; Required = $true; Default = $null; Kind = 'Count'; Values = @() }
     [pscustomobject]@{ Name = 'VmSectors'; Required = $true; Default = $null; Kind = 'Count'; Values = @() }
@@ -1484,8 +1485,15 @@ function Write-PvmFile {
 # --- Raw-disk descriptors --------------------------------------------------------------------
 
 # Return what the VM gets of the raw disk $Drive, as the CreateType and the Extents lines of a
-# descriptor: sectors 0 to VmSectors-1 of the stick, with the Data partition, from sector
-# DataPartitionStart on, blanked when $HideData is set.
+# descriptor, the same in VMware and VirtualBox: sectors 0 to VmSectors-1 of the stick, with the
+# Data partition, from sector DataPartitionStart on, blanked: the guest reads zeros there, and its
+# writes there are dropped. With $BootSectors above 0, sectors 0 to $BootSectors-1, the boot area
+# (Get-PvmBootArea), are read-only for the guest, and a write there fails: the MBR, which holds
+# the native boot code, the disk signature the launcher checks and the partition table, and the
+# sectors after it up to the first partition, where a boot loader such as GRUB keeps more of its
+# code. The boot area never reaches into the Data partition. The createType is 'fullDevice', which
+# VMware needs for this layout: in 'partitionedDevice' mode it insists on its own partition-table
+# copy and refuses the descriptor.
 function Get-PvmDiskLayout {
     [CmdletBinding()]
     [OutputType([hashtable])]
@@ -1493,19 +1501,73 @@ function Get-PvmDiskLayout {
         [Parameter(Mandatory)][string]$Drive,
         [int64]$VmSectors,
         [int64]$DataPartitionStart,
-        [bool]$HideData
+        [int64]$BootSectors = 0
     )
-    if ($HideData) {
-        @{
-            CreateType = 'partitionedDevice'
-            Extents    = @(('RW {0} FLAT "{1}" 0' -f $DataPartitionStart, $Drive), ('RW {0} ZERO' -f ($VmSectors - $DataPartitionStart)))
-        }
-    } else {
-        @{
-            CreateType = 'fullDevice'
-            Extents    = @(('RW {0} FLAT "{1}" 0' -f $VmSectors, $Drive))
-        }
+    $boot = [Math]::Max([int64]0, [Math]::Min($BootSectors, $DataPartitionStart))
+    $extents = @(
+        if ($boot -gt 0) { 'RDONLY {0} FLAT "{1}" 0' -f $boot, $Drive }
+        if ($DataPartitionStart -gt $boot) { 'RW {0} FLAT "{1}" {2}' -f ($DataPartitionStart - $boot), $Drive, $boot }
+        'RW {0} ZERO' -f ($VmSectors - $DataPartitionStart)
+    )
+    @{ CreateType = 'fullDevice'; Extents = $extents }
+}
+
+# Return the boot area of the stick, the disk $Disk, which the guest may only read
+# (Get-PvmDiskLayout): Sectors, the sectors from 0 up to the start of the partition that starts
+# first, whatever its number, or up to $DataPartitionStart when that comes first; or Problem, the
+# cause, with Sectors 0, when Windows cannot list the stick's partitions, lists none, or lists one
+# that starts at sector 0. On an MBR stick with logical partitions, their own partition tables
+# (EBRs) lie inside the extended partition, outside the boot area. A start that does not fall on a
+# sector boundary counts from the sector it lies in.
+function Get-PvmBootArea {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)]$Disk,
+        [Parameter(Mandatory)][int64]$DataPartitionStart
+    )
+    try { $partitions = @(Invoke-PvmGetDiskPartition -Number $Disk.Number | Where-Object { $null -ne $_ }) }
+    catch { return [pscustomobject]@{ Sectors = [int64]0; Problem = (Format-PvmBecause -Cause (Get-PvmErrorCause -ErrorRecord $_)) } }
+    if ($partitions.Count -eq 0) { return [pscustomobject]@{ Sectors = [int64]0; Problem = 'Windows lists no partition on the stick' } }
+    $first = $DataPartitionStart
+    foreach ($partition in $partitions) {
+        $offset = [uint64]$partition.Offset
+        $start = [int64](($offset - ($offset % 512)) / 512)
+        if ($start -lt 1) { return [pscustomobject]@{ Sectors = [int64]0; Problem = 'a partition of the stick starts at sector 0' } }
+        if ($start -lt $first) { $first = $start }
     }
+    [pscustomobject]@{ Sectors = [int64]$first; Problem = '' }
+}
+
+# Return the raw-disk layout (Get-PvmDiskLayout) for a start in either program on the raw disk
+# $Drive, as $Context and its Settings describe. With ProtectBootArea on, the default, the stick's
+# boot area (Get-PvmBootArea) is read-only for the guest; where it is unknown, a real start stops,
+# and a dry run returns nothing. With it off, the log notes that the guest can write there. A
+# HideDataPartition setting, which is no longer used, gets a note in the log too.
+function Get-PvmStartLayout {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][string]$Drive
+    )
+    $settings = $Context.Settings
+    if ($null -ne $settings['HideDataPartition']) {
+        Write-PvmLog -Path $Context.LogPath -Message (Format-PvmMessage -Names $Context.Names -Template 'Note: HideDataPartition is no longer used: in VMware and in VirtualBox, {guest} sees the Data partition as zeros.')
+    }
+    $boot = [int64]0
+    if ($settings['ProtectBootArea']) {
+        $area = Get-PvmBootArea -Disk $Context.StickDisk -DataPartitionStart $settings['DataPartitionStart']
+        if ($area.Problem) {
+            Invoke-PvmStopUnlessDryRun -Context $Context -Message (Format-PvmMessage -Names $Context.Names -Values @{ Cause = $area.Problem } -Template (
+                    "The launcher cannot tell where the stick's first partition starts, because {Cause}, so it cannot keep the stick's boot area read-only for {guest}. Nothing was started."))
+            return $null
+        }
+        $boot = $area.Sectors
+    } else {
+        Write-PvmLog -Path $Context.LogPath -Message (Format-PvmMessage -Names $Context.Names -Template "Note: ProtectBootArea is off, so {guest} can write the stick's partition table and boot code.")
+    }
+    Get-PvmDiskLayout -Drive $Drive -VmSectors $settings['VmSectors'] -DataPartitionStart $settings['DataPartitionStart'] -BootSectors $boot
 }
 
 # Return the descriptor bytes $Bytes as text with one character per byte (ISO-8859-1), so that a
@@ -3661,11 +3723,11 @@ function Start-PvmVMwareVm {
 }
 
 # Start the VM in VMware Workstation from the folder $VMwareDir on the raw disk $Drive, as
-# $Context and its Settings describe. VMware always gets the stick with the Data partition blanked:
-# while the VM runs, it takes every Windows volume in the disk area it gives the VM away from
-# Windows, and it cannot do that for the Data partition, which holds the VM's own files. The disk
-# stays 'fullDevice', because in 'partitionedDevice' mode VMware insists on its own partition-table
-# copy and refuses this descriptor. Returns 'AlreadyRunning', 'DryRun' or 'Started'; throws a stop.
+# $Context and its Settings describe, with the layout a VirtualBox start gives too
+# (Get-PvmStartLayout): the Data partition blanked, since VMware takes every Windows volume in the
+# disk area it gives the VM away from Windows while the VM runs, and cannot do that for the Data
+# partition, which holds the VM's own files. Returns 'AlreadyRunning', 'DryRun' or 'Started';
+# throws a stop.
 function Invoke-PvmVMware {
     [CmdletBinding()]
     [OutputType([string])]
@@ -3679,8 +3741,6 @@ function Invoke-PvmVMware {
     Enter-PvmStep -Context $Context -Name 'checks'
     $settings = $Context.Settings
     $log = $Context.LogPath
-    $layout = Get-PvmDiskLayout -Drive $Drive -VmSectors $settings['VmSectors'] -DataPartitionStart $settings['DataPartitionStart'] -HideData $true
-    $layout.CreateType = 'fullDevice'
     $vmx = Join-PvmStickPath -Root $Context.Root -Path $settings['VMwareVmx']
     if ($Decision.AlreadyRunning) {
         Write-PvmLog -Path $log -Message 'Already running in VMware.'
@@ -3689,6 +3749,7 @@ function Invoke-PvmVMware {
     foreach ($kind in $Decision.Stops) { Invoke-PvmStopUnlessDryRun -Context $Context -Message (Get-PvmDecisionMessage -Kind $kind -Context $Context -Snapshot $Snapshot -Use 'VMware') }
     if ($Context.VmFiles.VMwareProblem) { Invoke-PvmStopUnlessDryRun -Context $Context -Message $Context.VmFiles.VMwareProblem }
     foreach ($problem in @(Get-PvmMountedStop -Context $Context -Disk $Context.StickDisk -Program 'VMware')) { Invoke-PvmStopUnlessDryRun -Context $Context -Message $problem }
+    $layout = Get-PvmStartLayout -Context $Context -Drive $Drive
     Assert-PvmVMwareReady -Context $Context -Vmx $vmx
 
     Enter-PvmStep -Context $Context -Name 'files'
@@ -3700,6 +3761,8 @@ function Invoke-PvmVMware {
     $disk = $Context.VmFiles.VMwareDisk
     if (-not $disk) {
         Write-PvmLog -Path $log -Message 'DRY RUN - no VMware disk file to point at the stick'
+    } elseif ($null -eq $layout) {
+        Write-PvmLog -Path $log -Message "DRY RUN - no disk file is pointed at the stick, since the stick's boot area is unknown"
     } elseif ([IO.File]::Exists($disk)) {
         $copies = @{ Root = $Context.Root; Backups = $Context.Backups; Path = $disk }
         $change = Get-PvmDescriptorChange -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @copies -Suffix '.orig') -PreviousPath (Get-PvmBackupPath @copies -Suffix '.previous.orig') -LogPath $log
@@ -3812,7 +3875,6 @@ function Invoke-PvmVirtualBox {
     Enter-PvmStep -Context $Context -Name 'checks'
     $settings = $Context.Settings
     $log = $Context.LogPath
-    $layout = Get-PvmDiskLayout -Drive $Drive -VmSectors $settings['VmSectors'] -DataPartitionStart $settings['DataPartitionStart'] -HideData $settings['HideDataPartition']
     $vboxManage = Join-Path $VirtualBoxDir 'VBoxManage.exe'
     $uuid = $Context.VmFiles.VirtualBoxVmUuid
     Invoke-PvmSetEnvironment -Name 'VBOX_USER_HOME' -Value (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxHome'])
@@ -3820,6 +3882,7 @@ function Invoke-PvmVirtualBox {
     foreach ($kind in $Decision.Stops) { Invoke-PvmStopUnlessDryRun -Context $Context -Message (Get-PvmDecisionMessage -Kind $kind -Context $Context -Snapshot $Snapshot -Use 'VirtualBox') }
     if ($Context.VmFiles.VirtualBoxProblem) { Invoke-PvmStopUnlessDryRun -Context $Context -Message $Context.VmFiles.VirtualBoxProblem }
     foreach ($problem in @(Get-PvmVirtualBoxStorageProblem -Context $Context -Disk $Context.StickDisk)) { Invoke-PvmStopUnlessDryRun -Context $Context -Message $problem }
+    $layout = Get-PvmStartLayout -Context $Context -Drive $Drive
     $open = @(Invoke-PvmGetProcess -Name 'VirtualBox', 'VirtualBoxVM', 'VBoxHeadless')
     if ($open.Count) {
         # VirtualBox hides its VM processes' command lines, so VirtualBox is asked whether this VM is
@@ -3867,6 +3930,7 @@ function Invoke-PvmVirtualBox {
     # nothing to point at the stick.
     $disk = $Context.VmFiles.VirtualBoxDisk
     if (-not $disk) { Write-PvmLog -Path $log -Message 'DRY RUN - no VirtualBox disk file to point at the stick' }
+    elseif ($null -eq $layout) { Write-PvmLog -Path $log -Message "DRY RUN - no disk file is pointed at the stick, since the stick's boot area is unknown" }
     $backup = @{ Root = $Context.Root; Backups = $Context.Backups }
     # At a drive root the paths to the VM's own files show the stick's old letter. The location
     # gives the stick folder as Windows spells it, which on Windows is $Context.Root.
@@ -3879,7 +3943,7 @@ function Invoke-PvmVirtualBox {
     $changes = @(@(
             $vboxChange
             Get-PvmDriveLetterChange -Path $registry -BackupPath (Get-PvmBackupPath @backup -Path $registry -Suffix '.launcher-backup') -PreviousPath (Get-PvmBackupPath @backup -Path $registry -Suffix '.previous.launcher-backup') @letters
-            if ($disk) { Get-PvmDescriptorChange -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @backup -Path $disk -Suffix '.orig') -PreviousPath (Get-PvmBackupPath @backup -Path $disk -Suffix '.previous.orig') -LogPath $log }
+            if ($disk -and $null -ne $layout) { Get-PvmDescriptorChange -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @backup -Path $disk -Suffix '.orig') -PreviousPath (Get-PvmBackupPath @backup -Path $disk -Suffix '.previous.orig') -LogPath $log }
         ) | Where-Object { $null -ne $_ })
     foreach ($change in $changes) { Save-PvmFileChange -Change $change -LogPath $log -WhatIf:$Context.DryRun }
     Enter-PvmStep -Context $Context -Name 'start'

@@ -268,6 +268,9 @@ function Get-CompareKind {
         '^VM size left as it is, because ' { return 'VM size left as it is' }
         '^Note: this PC is small for the VM' { return 'note: a PC small for the VM' }
         '^Note: this PC has less free memory' { return 'note: little free memory' }
+        '^Note: HideDataPartition is no longer used' { return 'note: HideDataPartition no longer used' }
+        '^Note: ProtectBootArea is off' { return 'note: boot area not protected' }
+        '^DRY RUN - no disk file is pointed at the stick, since the stick''s boot area is unknown$' { return 'no disk file compared, since the boot area is unknown' }
         '^Saved state found: (suspended in VMware|saved in VirtualBox)$' { return "saved state found: $($Matches[1])" }
         '^Using (VMware|VirtualBox)$' { return "using $($Matches[1])" }
         '^Already running in (VMware|VirtualBox)\.$' { return "already running in $($Matches[1])" }

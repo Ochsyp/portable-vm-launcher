@@ -1639,6 +1639,11 @@ Describe 'Compare-StickDryRun: kinds of log lines' {
         @{ Message = 'VM size left as it is, because VmSizing in settings.psd1 is Off.'; Kind = 'VM size left as it is' }
         @{ Message = 'Note: this PC is small for the VM; with it running, the PC keeps less than 6 GB of memory or no core of its own.'; Kind = 'note: a PC small for the VM' }
         @{ Message = 'Note: this PC has less free memory than the VM''s size and 2 GB more; close other programs if the VM is slow.'; Kind = 'note: little free memory' }
+        @{ Message = 'Note: HideDataPartition is no longer used: in VMware and in VirtualBox, the guest sees the Data partition as zeros.'; Kind = 'note: HideDataPartition no longer used' }
+        @{ Message = 'Note: ProtectBootArea is off, so the guest can write the stick''s partition table and boot code.'; Kind = 'note: boot area not protected' }
+        @{ Message = 'DRY RUN - no disk file is pointed at the stick, since the stick''s boot area is unknown'; Kind = 'no disk file compared, since the boot area is unknown' }
+        @{ Message = 'stick.vmdk -> RDONLY 2048 FLAT "\\.\PhysicalDrive3" 0 | RW 2497952 FLAT "\\.\PhysicalDrive3" 2048 | RW 1400000 ZERO'; Kind = 'descriptor would be pointed at the stick' }
+        @{ Message = 'stick.vmdk: rewritten because the disk device, a size, the access mode and the number of extents differ'; Kind = 'reason for the descriptor rewrite' }
         @{ Message = 'Started with VirtualBox 7.1.4r165100'; Kind = 'started with VirtualBox' }
     ) {
         Get-CompareKind -Message $Message -Version 'v2' | Should -BeExactly $Kind
@@ -2205,7 +2210,7 @@ Describe 'Compare-StickDryRun: a full run with a stand-in for the PC' -Tag 'Wind
         Write-TestFile -Path (Join-Path $script:fullStick 'VMware\Test VM.vmx') -Text ((@('.encoding = "windows-1252"', 'config.version = "8"', 'displayName = "Test VM"', 'uuid.action = "keep"', 'suspend.disabled = "TRUE"',
                     'scsi0:0.fileName = "stick.vmdk"', 'scsi0:0.present = "TRUE"', '') -join "`r`n"))
         $descriptor = @('# Disk DescriptorFile', 'version=1', 'encoding="windows-1252"', 'CID=fffffffe', 'parentCID=ffffffff', 'createType="fullDevice"', '', '# Extent description',
-            'RW 2500000 FLAT "\\.\PhysicalDrive99" 0', 'RW 1400000 ZERO ', '', '# The Disk Data Base', '#DDB', '', 'ddb.adapterType = "ide"', '') -join "`r`n"
+            'RDONLY 2048 FLAT "\\.\PhysicalDrive99" 0', 'RW 2497952 FLAT "\\.\PhysicalDrive99" 2048', 'RW 1400000 ZERO ', '', '# The Disk Data Base', '#DDB', '', 'ddb.adapterType = "ide"', '') -join "`r`n"
         Write-TestFile -Path (Join-Path $script:fullStick 'VMware\stick.vmdk') -Text $descriptor
         Write-TestFile -Path (Join-Path $script:fullStick 'VirtualBox\Test VM\stick.vmdk') -Text ($descriptor.Replace("`r`n", "`n"))
         $below = $script:fullStick.Substring(2)
@@ -2239,7 +2244,11 @@ $module = Import-Module (Join-Path $Root 'Launcher\PortableVM.psm1') -PassThru -
     function script:Invoke-PvmEnterLock { param($Name) [pscustomobject]@{ State = 'Acquired'; Mutex = $null } }
     function script:Invoke-PvmExitLock { param($Lock) }
     function script:Invoke-PvmGetPartition { param($DriveLetter) [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512 } }
-    function script:Invoke-PvmGetDiskPartition { param($Number) [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512 } }
+    function script:Invoke-PvmGetDiskPartition {
+        param($Number)
+        [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2048 * 512; Size = [uint64]997952 * 512 }
+        [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512 }
+    }
     function script:Invoke-PvmGetHostSize { [pscustomobject]@{ Cores = 8; Threads = 16; MemoryMB = 32768; FreeMB = 24576 } }
     function script:Invoke-PvmGetFreeSpace { param($Path) [int64]64GB }
     function script:Invoke-PvmGetDisk { param($Number) [pscustomobject]@{ Number = 99; PartitionStyle = 'MBR'; Signature = [uint32]0x5CA1AB1E; LogicalSectorSize = 512; Size = [uint64]4000000 * 512; IsBoot = $false; IsSystem = $false } }
@@ -2355,8 +2364,8 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
                         "    VMwareVmx = 'VMware\Test VM.vmx'", "    VMwareDisk = 'VMware\stick.vmdk'", "    VmDisplayName = 'Kelda Box'", '}', '') -join "`r`n"))
             Write-TestFile -Path (Join-Path $Root 'VMware\Test VM.vmx') -Text ((@('.encoding = "windows-1252"', 'config.version = "8"', 'displayName = "Test VM"', 'uuid.action = "keep"', 'suspend.disabled = "TRUE"',
                         'scsi0:0.fileName = "stick.vmdk"', 'scsi0:0.present = "TRUE"', '') -join "`r`n"))
-            Write-TestFile -Path (Join-Path $Root 'VMware\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 2500000 FLAT "\\.\PhysicalDrive99" 0', 'RW 1400000 ZERO')
-            Write-TestFile -Path (Join-Path $Root 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 3900000 FLAT "\\.\PhysicalDrive99" 0')
+            Write-TestFile -Path (Join-Path $Root 'VMware\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RDONLY 2048 FLAT "\\.\PhysicalDrive99" 0', 'RW 2497952 FLAT "\\.\PhysicalDrive99" 2048', 'RW 1400000 ZERO')
+            Write-TestFile -Path (Join-Path $Root 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RDONLY 2048 FLAT "\\.\PhysicalDrive99" 0', 'RW 2497952 FLAT "\\.\PhysicalDrive99" 2048', 'RW 1400000 ZERO')
             Write-TestFile -Path (Join-Path $Root 'VirtualBox\Test VM\Test VM.vbox') -Text ((@('<?xml version="1.0"?>', '<VirtualBox xmlns="http://www.virtualbox.org/" version="1.19-windows">',
                         '  <Machine uuid="{5ca1ab1e-0000-4000-8000-000000000001}" name="Test VM" OSType="Debian_64">',
                         '    <MediaRegistry><HardDisks><HardDisk uuid="{5ca1ab1e-0000-4000-8000-000000000002}" location="stick.vmdk" format="VMDK"/></HardDisks></MediaRegistry>',
@@ -2401,7 +2410,10 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
         # The stand-in PC: the stick folder's partition is on disk 99, which is the stick.
         Mock -ModuleName PortableVM Invoke-PvmGetPartition { [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512 } }
         Mock -ModuleName PortableVM Invoke-PvmGetDisk { [pscustomobject]@{ Number = 99; PartitionStyle = 'MBR'; Signature = [uint32]0x5CA1AB1E; LogicalSectorSize = 512; Size = [uint64]4000000 * 512; IsBoot = $false; IsSystem = $false } }
-        Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512; DriveLetter = [char]'Q'; AccessPaths = @('Q:\') } }
+        Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition {
+            [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2048 * 512; Size = [uint64]997952 * 512; DriveLetter = [char]0; AccessPaths = @() }
+            [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512; DriveLetter = [char]'Q'; AccessPaths = @('Q:\') }
+        }
     }
 
     It 'reports a stick as a start leaves it, and that nothing needs attention' {
@@ -2494,10 +2506,40 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
     }
 
     It 'says why the next start rewrites a disk file that does not point at the stick, which needs no attention' {
-        Write-TestFile -Path (Join-Path $script:stateStick 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 3900000 FLAT "\\.\PortableVM-disarmed" 0')
+        Write-TestFile -Path (Join-Path $script:stateStick 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RDONLY 2048 FLAT "\\.\PortableVM-disarmed" 0', 'RW 2497952 FLAT "\\.\PortableVM-disarmed" 2048', 'RW 1400000 ZERO')
         $result = Invoke-StateCheck
         $result.Lines | Should -Contain '  VirtualBox disk file points at the stick: no; the next start rewrites it because the disk device differs'
         $result.ExitCode | Should -Be 0
+    }
+
+    It 'says that the next start in each program rewrites a disk file in the layout from before one layout for both' {
+        Write-TestFile -Path (Join-Path $script:stateStick 'VMware\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 2500000 FLAT "\\.\PhysicalDrive99" 0', 'RW 1400000 ZERO')
+        Write-TestFile -Path (Join-Path $script:stateStick 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 3900000 FLAT "\\.\PhysicalDrive99" 0')
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  VMware disk file points at the stick: no; the next start rewrites it because a size, the access mode, the extent type and the number of extents differ'
+        $result.Lines | Should -Contain '  VirtualBox disk file points at the stick: no; the next start rewrites it because a size, the access mode and the number of extents differ'
+        $result.Lines | Should -Contain '  the stick''s boot area read-only for the guest: yes'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: OK - nothing needs attention'
+    }
+
+    It 'says that the boot area is <Answer> when <Case>' -ForEach @(
+        @{ Case = 'ProtectBootArea is off'; Off = $true; Partitions = $null; Answer = 'no, since ProtectBootArea is off'; Points = 'no; the next start rewrites it because a size, the access mode, the extent type and the number of extents differ' }
+        @{ Case = 'a partition starts at sector 0'; Off = $false; Answer = 'unknown, so the next start stops'; Points = 'unknown, since the stick''s boot area is unknown'
+            Partitions = {
+                [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]0; Size = [uint64]1000 * 512; DriveLetter = [char]0; AccessPaths = @() }
+                [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512; DriveLetter = [char]'Q'; AccessPaths = @('Q:\') }
+            }
+        }
+    ) {
+        if ($Off) {
+            $settings = Join-Path $script:stateStick 'LauncherData\settings.psd1'
+            [IO.File]::WriteAllText($settings, [IO.File]::ReadAllText($settings).Replace('    SchemaVersion = 2', "    SchemaVersion = 2`r`n    ProtectBootArea = `$false"))
+        }
+        if ($Partitions) { Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition $Partitions }
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain "  the stick's boot area read-only for the guest: $Answer"
+        $result.Lines | Should -Contain "  VMware disk file points at the stick: $Points"
+        if (-not $Off) { $result.Lines[-1] | Should -BeLike 'RESULT: ATTENTION - *the stick''s boot area*' }
     }
 
     It 'says when the next start stops at a disk file it cannot read' {
