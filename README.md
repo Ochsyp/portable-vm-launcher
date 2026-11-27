@@ -176,8 +176,9 @@ the extended partition, outside the boot area, so they are not protected.
 What fails in the guest from now on is a write into the boot area: a boot-loader install to the
 whole disk, such as `grub-install` on the stick's device; a partition editor, such as fdisk,
 parted or GParted, when it writes a changed partition table; a tool that writes a new disk
-signature. The write fails, and the tool reports an error. For such a job, set
-`ProtectBootArea = $false` in `LauncherData\settings.psd1` and start the VM through the
+signature. VMware and VirtualBox do not write those sectors to the stick; in VirtualBox the
+guest gets a write error, and how VMware answers such a write has not been tried. For such a
+job, set `ProtectBootArea = $false` in `LauncherData\settings.psd1` and start the VM through the
 launcher, which points the disk file at the stick without the protection and notes it in the
 log. Do the job, shut the guest down, then delete the line or set it back to `$true`; the next
 start protects the boot area again. Or boot the stick natively for the job. Either way, a

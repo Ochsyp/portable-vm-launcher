@@ -1488,10 +1488,10 @@ function Write-PvmFile {
 # descriptor, the same in VMware and VirtualBox: sectors 0 to VmSectors-1 of the stick, with the
 # Data partition, from sector DataPartitionStart on, blanked: the guest reads zeros there, and its
 # writes there are dropped. With $BootSectors above 0, sectors 0 to $BootSectors-1, the boot area
-# (Get-PvmBootArea), are read-only for the guest, and a write there fails: the MBR, which holds
-# the native boot code, the disk signature the launcher checks and the partition table, and the
-# sectors after it up to the first partition, where a boot loader such as GRUB keeps more of its
-# code. The boot area never reaches into the Data partition. The createType is 'fullDevice', which
+# (Get-PvmBootArea), are read-only for the guest, so neither program writes them: the MBR,
+# which holds the native boot code, the disk signature the launcher checks and the partition
+# table, and the sectors after it up to the first partition, where a boot loader such as GRUB
+# keeps more of its code. The boot area never reaches into the Data partition. The createType is 'fullDevice', which
 # VMware needs for this layout: in 'partitionedDevice' mode it insists on its own partition-table
 # copy and refuses the descriptor.
 function Get-PvmDiskLayout {

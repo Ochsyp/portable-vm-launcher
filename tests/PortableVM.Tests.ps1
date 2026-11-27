@@ -2283,6 +2283,19 @@ Describe 'A start' {
                 Should -BeExactly @('Note: HideDataPartition is no longer used: in VMware and in VirtualBox, the guest sees the Data partition as zeros.')
         }
 
+        It 'says in a dry run that a real start would stop where the boot area is unknown, and compares no disk file' {
+            Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { Get-TestPartition -Change @{ Offset = [uint64]0; Size = [uint64]1000 * 512 }; Get-TestPartition } -ParameterFilter { $Number -eq 3 }
+            $before = Get-TestTreeHash -Root $script:stick.Root
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun
+            $result.ExitCode | Should -Be 1
+            $log = Get-TestLog -Path $script:stick.Log
+            $log | Should -Contain 'DRY RUN - a real start would stop here: The launcher cannot tell where the stick''s first partition starts, because a partition of the stick starts at sector 0, so it cannot keep the stick''s boot area read-only for the guest. Nothing was started.'
+            $log | Should -Contain 'DRY RUN - no disk file is pointed at the stick, since the stick''s boot area is unknown'
+            @($log | Where-Object { $_ -like 'stick.vmdk*' }) | Should -BeNullOrEmpty
+            $after = Get-TestTreeHash -Root $script:stick.Root
+            foreach ($path in $before.Keys) { $after[$path] | Should -BeExactly $before[$path] }
+        }
+
         It 'leaves the boot area writable, and notes so, when ProtectBootArea is off' {
             $script:stick = Initialize-TestStick -Name 'virtualbox-stick' -Change @{ ProtectBootArea = $false }
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
