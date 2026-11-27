@@ -1,5 +1,5 @@
 # Tests of tools\Deploy-PortableVM.ps1, tools\Get-StickInventory.ps1, tools\Compare-StickDryRun.ps1
-# and tools\Test-StickState.ps1 on a synthetic clone and stick in TestDrive. Each tool is
+# tools\Test-StickState.ps1 and tools\New-StickSettings.ps1 on a synthetic clone and stick in TestDrive. Each tool is
 # dot-sourced for its functions, which skips its main block, and the functions that read the PC
 # (processes, git, disks, registry) are mocked. The deploy tool
 # imports the clone's src\PortableVM.psm1, so the fake clone holds a copy of the real module.
@@ -13,6 +13,7 @@ BeforeAll {
     . (Join-Path $script:repoRoot 'tools\Get-StickInventory.ps1')
     . (Join-Path $script:repoRoot 'tools\Compare-StickDryRun.ps1')
     . (Join-Path $script:repoRoot 'tools\Test-StickState.ps1')
+    . (Join-Path $script:repoRoot 'tools\New-StickSettings.ps1')
 
     # Return the system's ANSI code page, read from the registry: the encoding of old settings
     # files, which Windows PowerShell 5.1 calls Default.
@@ -2639,5 +2640,180 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
         finally { $env:PVM_TEST = $previous }
         $LASTEXITCODE | Should -Be 1
         $lines[-1] | Should -BeExactly 'RESULT: ATTENTION - settings that do not pass'
+    }
+}
+
+Describe 'New-StickSettings' -Tag 'WindowsOnly' {
+    BeforeAll {
+        Get-Module -Name PortableVM | Remove-Module -Force
+        Import-Module -Name (Join-Path $script:repoRoot 'src\PortableVM.psm1') -Force -Global -DisableNameChecking
+
+        # Write a new stick in $Root: the launcher, both VMs and their disk files, no settings.
+        function Initialize-SetupStick {
+            param([string]$Root)
+            Remove-Item -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue
+            $descriptor = (@('# Disk DescriptorFile', 'version=1', 'createType="fullDevice"', '', 'RW 3900000 FLAT "\\.\PhysicalDrive99" 0', '', 'ddb.adapterType = "ide"', '') -join "`r`n")
+            Write-TestFile -Path (Join-Path $Root 'Launcher\Start-PortableVM.ps1') -Text '# script'
+            Write-TestFile -Path (Join-Path $Root 'VMware\Test VM.vmx') -Text ((@('.encoding = "windows-1252"', 'config.version = "8"', 'uuid.action = "keep"', 'suspend.disabled = "TRUE"',
+                        'scsi0:0.fileName = "stick.vmdk"', 'scsi0:0.present = "TRUE"', '') -join "`r`n"))
+            Write-TestFile -Path (Join-Path $Root 'VMware\stick.vmdk') -Text $descriptor
+            Write-TestFile -Path (Join-Path $Root 'VirtualBox\Test VM\stick.vmdk') -Text $descriptor
+            Write-TestFile -Path (Join-Path $Root 'VirtualBox\Test VM\Test VM.vbox') -Text ((@('<?xml version="1.0"?>', '<VirtualBox xmlns="http://www.virtualbox.org/" version="1.19-windows">',
+                        '  <Machine uuid="{5ca1ab1e-0000-4000-8000-000000000001}" name="Test VM" OSType="Debian_64">',
+                        '    <MediaRegistry><HardDisks><HardDisk uuid="{5ca1ab1e-0000-4000-8000-000000000002}" location="stick.vmdk" format="VMDK"/></HardDisks></MediaRegistry>',
+                        '    <Hardware><StorageControllers><StorageController name="SATA" type="AHCI" useHostIOCache="true">',
+                        '      <AttachedDevice type="HardDisk" port="0" device="0"><Image uuid="{5ca1ab1e-0000-4000-8000-000000000002}"/></AttachedDevice>',
+                        '    </StorageController></StorageControllers></Hardware>', '  </Machine>', '</VirtualBox>', '') -join "`n"))
+            Write-TestFile -Path (Join-Path $Root 'VirtualBox\VirtualBox.xml') -Text ((@('<?xml version="1.0"?>', '<VirtualBox xmlns="http://www.virtualbox.org/" version="1.12-windows"/>', '') -join "`n"))
+        }
+
+        # The settings the tool writes for that stick.
+        $script:setupText = (@(
+                '# Written by tools\New-StickSettings.ps1 from the stick and its VM files. Every setting is in'
+                '# examples\settings.example.psd1. The launcher reads the disk files and the VM''s UUID from the'
+                '# .vmx and the .vbox, so they are not set here.'
+                '@{'
+                '    SchemaVersion = 2'
+                '    StickMbrSignature = ''5CA1AB1E'''
+                '    StickSectors = 4000000'
+                '    VmSectors = 3900000'
+                '    DataPartitionStart = 2500000'
+                '    VirtualBoxHome = ''VirtualBox'''
+                '    VirtualBoxVbox = ''VirtualBox\Test VM\Test VM.vbox'''
+                '    VMwareVmx = ''VMware\Test VM.vmx'''
+                '}'
+                ''
+            ) -join "`r`n")
+
+        # Return every file below $Root with its hash, and every folder, as sorted lines.
+        function Get-SetupTree {
+            param([string]$Root)
+            @(Get-ChildItem -LiteralPath $Root -Recurse -Force | Sort-Object FullName | ForEach-Object {
+                    if ($_.PSIsContainer) { "$($_.FullName)\" } else { "$($_.FullName) $((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)" }
+                })
+        }
+
+        # Run the tool on the scratch stick; return its result.
+        function Invoke-SetupCheck {
+            param([switch]$Compare, [hashtable]$More = @{})
+            Invoke-StickSetup -RepositoryPath $script:repoRoot -Target $script:setupStick -Compare:$Compare -OutputRoot $script:setupOut -Now ([datetimeoffset]::new(2026, 11, 27, 9, 30, 0, [TimeSpan]::FromHours(1))) @More
+        }
+    }
+
+    BeforeEach {
+        $script:setupStick = Join-Path $TestDrive 'setup stick'
+        $script:setupOut = Join-Path $TestDrive 'setup out'
+        Remove-Item -LiteralPath $script:setupOut -Recurse -Force -ErrorAction SilentlyContinue
+        Initialize-SetupStick -Root $script:setupStick
+        $script:settingsPath = Join-Path $script:setupStick 'LauncherData\settings.psd1'
+        Mock Write-Host {}
+        # The stand-in PC: the stick folder's partition, Data, is on disk 99, which is the stick.
+        Mock -ModuleName PortableVM Invoke-PvmGetPartition { [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512 } }
+        Mock -ModuleName PortableVM Invoke-PvmGetDisk { [pscustomobject]@{ Number = 99; PartitionStyle = 'MBR'; Signature = [uint32]0x5CA1AB1E; LogicalSectorSize = 512; Size = [uint64]4000000 * 512; IsBoot = $false; IsSystem = $false } }
+    }
+
+    It 'writes checked settings for a new stick, which pass the launcher''s check, and prints no value' {
+        $result = Invoke-SetupCheck
+        $result.ExitCode | Should -Be 0 -Because ($result.Lines -join "`n")
+        $result.Lines[-1] | Should -BeExactly 'RESULT: WRITTEN - LauncherData\settings.psd1'
+        [IO.File]::ReadAllText($script:settingsPath) | Should -BeExactly $script:setupText
+        $settings = Import-PvmSetting -Path $script:settingsPath
+        $settings['VMwareDisk'] | Should -BeNullOrEmpty
+        foreach ($line in @(
+                '  stick folder: given'
+                '  .vmx files below the stick folder: 1'
+                '  .vbox files below the stick folder: 1'
+                '  VirtualBox.xml files below the stick folder: 1'
+                '  VMware disk file as the .vmx attaches it: yes'
+                '  VirtualBox disk file and UUID as the .vbox has them: yes'
+                '  the settings pass the launcher''s checks: yes'
+            )) { $result.Lines | Should -Contain $line }
+        ($result.Lines -join "`n") | Should -Not -Match '5CA1AB1E|Test VM|4000000|3900000|2500000|5ca1ab1e|stick\.vmdk'
+        Join-Path $script:setupOut '*' | Should -Not -Exist
+    }
+
+    It 'never replaces settings that are there, and changes nothing' {
+        Write-TestFile -Path $script:settingsPath -Text 'x'
+        $result = Invoke-SetupCheck
+        $result.ExitCode | Should -Be 1
+        $result.Lines[-1] | Should -BeExactly 'RESULT: NOT WRITTEN - LauncherData\settings.psd1 is there already, and the tool never replaces it; compare them with -Compare'
+        [IO.File]::ReadAllText($script:settingsPath) | Should -BeExactly 'x'
+    }
+
+    It 'compares with the stick''s settings, writing only its own copy on the PC: <Case>' -ForEach @(
+        @{ Case = 'the same, with keys of its own'; Change = { param($Text) $Text.Replace('    VMwareVmx', "    Hypervisor = 'VMware'`r`n    VMwareDisk = 'VMware\stick.vmdk'`r`n    VMwareVmx") }
+            Code = 0; Result = 'RESULT: SAME - every key the tool would write equals the stick''s settings'; Differ = 'none'; Own = 'Hypervisor, VMwareDisk'
+        }
+        @{ Case = 'other sizes'; Change = { param($Text) $Text.Replace('StickSectors = 4000000', 'StickSectors = 3999999').Replace('VmSectors = 3900000', 'VmSectors = 3800000') }
+            Code = 1; Result = 'RESULT: DIFFERENT - StickSectors, VmSectors'; Differ = 'StickSectors, VmSectors'; Own = 'none'
+        }
+        @{ Case = 'a path in another case and with /'; Change = { param($Text) $Text.Replace("'VMware\Test VM.vmx'", "'vmware/Test VM.VMX'") }
+            Code = 0; Result = 'RESULT: SAME - every key the tool would write equals the stick''s settings'; Differ = 'none'; Own = 'none'
+        }
+        @{ Case = 'a disk file and a UUID that disagree with the VM''s files'; Change = {
+                param($Text) $Text.Replace('    VMwareVmx', "    VMwareDisk = 'VMware\other.vmdk'`r`n    VirtualBoxVmUuid = '5ca1ab1e-0000-4000-8000-0000000000ff'`r`n    VMwareVmx")
+            }
+            Code = 1; Result = 'RESULT: DIFFERENT - VirtualBoxVmUuid, VMwareDisk'; Differ = 'VirtualBoxVmUuid, VMwareDisk'; Own = 'VirtualBoxVmUuid, VMwareDisk'
+        }
+    ) {
+        Write-TestFile -Path $script:settingsPath -Text (& $Change $script:setupText)
+        $before = Get-SetupTree -Root $script:setupStick
+        $result = Invoke-SetupCheck -Compare
+        $result.ExitCode | Should -Be $Code -Because ($result.Lines -join "`n")
+        $result.Lines[-1] | Should -BeExactly $Result
+        $result.Lines | Should -Contain "  keys that differ: $Differ"
+        $result.Lines | Should -Contain "  keys set only in the stick's settings: $Own"
+        Get-SetupTree -Root $script:setupStick | Should -BeExactly $before
+        [IO.File]::ReadAllText((Join-Path $script:setupOut '20261127-093000\settings.psd1')) | Should -BeExactly $script:setupText
+        ($result.Lines -join "`n") | Should -Not -Match '3999999|3800000|5ca1ab1e|other\.vmdk|Test VM'
+    }
+
+    It 'stops and writes nothing when <Case>' -ForEach @(
+        @{ Case = 'two .vmx files lie below the stick folder'; Setup = { Write-TestFile -Path (Join-Path $script:setupStick 'VMware\Old\Old VM.vmx') -Text 'config.version = "8"' }
+            Reason = 'found 2 .vmx files below the stick folder; name the VM''s with -VMwareVmx'
+        }
+        @{ Case = 'no VirtualBox.xml lies below the stick folder'; Setup = { Remove-Item -LiteralPath (Join-Path $script:setupStick 'VirtualBox\VirtualBox.xml') }
+            Reason = 'found 0 VirtualBox.xml files below the stick folder; name VirtualBox''s home folder with -VirtualBoxHome'
+        }
+        @{ Case = 'the .vmx attaches no raw disk'; Setup = { Write-TestFile -Path (Join-Path $script:setupStick 'VMware\stick.vmdk') -Text 'RW 10 FLAT "stick-flat.vmdk" 0' }
+            Reason = 'the VMware disk file as the .vmx attaches it: no raw-disk file is attached'
+        }
+        @{ Case = 'the .vbox attaches a disk that its media registry does not list'; Setup = {
+                $vbox = Join-Path $script:setupStick 'VirtualBox\Test VM\Test VM.vbox'
+                [IO.File]::WriteAllText($vbox, [IO.File]::ReadAllText($vbox).Replace('Image uuid="{5ca1ab1e-0000-4000-8000-000000000002}"', 'Image uuid="{5ca1ab1e-0000-4000-8000-000000000009}"'))
+            }
+            Reason = 'the VirtualBox disk file and UUID as the .vbox has them: it attaches a disk that its media registry does not list'
+        }
+        @{ Case = 'the stick is no MBR disk'; Setup = {
+                Mock -ModuleName PortableVM Invoke-PvmGetDisk { [pscustomobject]@{ Number = 99; PartitionStyle = 'GPT'; Signature = $null; LogicalSectorSize = 512; Size = [uint64]4000000 * 512; IsBoot = $false; IsSystem = $false } }
+            }
+            Reason = 'the stick is no MBR disk with 512-byte sectors, which the launcher needs'
+        }
+        @{ Case = 'the disk is the PC''s Windows disk'; Setup = {
+                Mock -ModuleName PortableVM Invoke-PvmGetDisk { [pscustomobject]@{ Number = 99; PartitionStyle = 'MBR'; Signature = [uint32]0x5CA1AB1E; LogicalSectorSize = 512; Size = [uint64]4000000 * 512; IsBoot = $true; IsSystem = $true } }
+            }
+            Reason = 'the disk the folder is on is this PC''s Windows disk'
+        }
+    ) {
+        & $Setup
+        $before = Get-SetupTree -Root $script:setupStick
+        $result = Invoke-SetupCheck
+        $result.ExitCode | Should -Be 1 -Because ($result.Lines -join "`n")
+        $result.Lines[-1] | Should -BeExactly "RESULT: NOT WRITTEN - $Reason"
+        Get-SetupTree -Root $script:setupStick | Should -BeExactly $before
+    }
+
+    It 'takes the .vmx and the .vbox it is given when there are more' {
+        Write-TestFile -Path (Join-Path $script:setupStick 'VMware\Old\Old VM.vmx') -Text 'config.version = "8"'
+        Write-TestFile -Path (Join-Path $script:setupStick 'VirtualBox\Old\Old.vbox') -Text '<VirtualBox/>'
+        $result = Invoke-SetupCheck -More @{ VMwareVmx = 'VMware\Test VM.vmx'; VirtualBoxVbox = 'VirtualBox/Test VM/Test VM.vbox' }
+        $result.ExitCode | Should -Be 0 -Because ($result.Lines -join "`n")
+        [IO.File]::ReadAllText($script:settingsPath) | Should -BeExactly $script:setupText
+    }
+
+    It 'runs as a script and exits with the result''s code' {
+        $lines = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $script:repoRoot 'tools\New-StickSettings.ps1') -Target (Join-Path $TestDrive 'no such folder') -Compare 2>&1 | ForEach-Object { "$_" })
+        $LASTEXITCODE | Should -Be 2
+        $lines[-1] | Should -BeExactly 'RESULT: FAILED - the -Target folder does not exist'
     }
 }
