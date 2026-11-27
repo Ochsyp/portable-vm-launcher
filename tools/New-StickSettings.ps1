@@ -126,7 +126,11 @@ function Select-SetupPath {
         return $value
     }
     if ($Found.Count -ne 1) { throw (ConvertTo-SetupRefusal -Reason "found $($Found.Count) $What files below the stick folder; name $(if ($Folder) { 'VirtualBox''s home folder' } else { 'the VM''s' }) with $Parameter") }
-    if ($Folder) { return (Split-Path $Found[0]) }
+    if ($Folder) {
+        $parent = Split-Path $Found[0]
+        if (-not $parent) { throw (ConvertTo-SetupRefusal -Reason "$What lies in the stick folder itself; VirtualBox's home must be a folder below it") }
+        return $parent
+    }
     $Found[0]
 }
 
@@ -242,19 +246,9 @@ function Invoke-StickSetup {
         if ($problems.Count) { throw (ConvertTo-SetupRefusal -Reason "the settings would not pass the launcher's checks: $(@($problems | ForEach-Object { ($_ -split ':')[0] }) -join ', ')") }
         Add-SetupLine '  the settings pass the launcher''s checks: yes'
 
-        # The VM's own files, read as a start reads them; with -Compare also against the disk
-        # files and the UUID that the stick's settings name.
-        $existing = @{}
-        if ($Compare) {
-            try { $existing = Import-PvmDataFile -Path $paths.Settings }
-            catch { throw (ConvertTo-CompareStop -Reason 'the stick''s LauncherData\settings.psd1 cannot be read') }
-        }
-        $checked = Merge-PvmSetting -Settings $plain
-        foreach ($key in 'VMwareDisk', 'VirtualBoxDisk', 'VirtualBoxVmUuid') {
-            if ($existing.ContainsKey($key) -and $existing[$key] -is [string]) { $checked[$key] = $existing[$key] }
-        }
+        # The VM's own files, read as a start with these settings reads them.
         $context = [pscustomobject]@{
-            Settings = $checked; Root = $Target; Backups = $paths.Backups; Location = $location
+            Settings = (Merge-PvmSetting -Settings $plain); Root = $Target; Backups = $paths.Backups; Location = $location
             Names = @{ VM = 'the VM'; Guest = 'the guest' }; VmFiles = $null
         }
         $context.VmFiles = New-PvmVmFileRecord -Context $context
@@ -270,14 +264,28 @@ function Invoke-StickSetup {
         $virtualBox = if (-not $files.VirtualBoxRead) { 'unknown, since the .vbox cannot be read' } elseif ($files.VirtualBoxKind) { "no, $($words[$files.VirtualBoxKind])" } else { 'yes' }
         Add-SetupLine "  VMware disk file as the .vmx attaches it: $vmware"
         Add-SetupLine "  VirtualBox disk file and UUID as the .vbox has them: $virtualBox"
-        # A disk file or UUID that only the stick's settings name is a difference to report, not a
-        # reason to refuse.
+        if ($vmware -ne 'yes') { throw (ConvertTo-SetupRefusal -Reason "the VMware disk file as the .vmx attaches it: $($vmware -replace '^no, ', '')") }
+        if ($virtualBox -ne 'yes') { throw (ConvertTo-SetupRefusal -Reason "the VirtualBox disk file and UUID as the .vbox has them: $($virtualBox -replace '^no, ', '')") }
+
+        # With -Compare, the disk files and the UUID that the stick's settings name too, which the
+        # VM's files must not contradict; one they do is a difference to report.
+        $existing = @{}
         $contradicted = @()
-        if ($files.VMwareKind -eq 'Setting') { $contradicted += 'VMwareDisk' }
-        if ($files.VirtualBoxKind -eq 'Setting') { $contradicted += 'VirtualBoxDisk' }
-        if ($files.VirtualBoxKind -eq 'Uuid') { $contradicted += 'VirtualBoxVmUuid' }
-        if ($vmware -ne 'yes' -and $files.VMwareKind -ne 'Setting') { throw (ConvertTo-SetupRefusal -Reason "the VMware disk file as the .vmx attaches it: $($vmware -replace '^no, ', '')") }
-        if ($virtualBox -ne 'yes' -and $files.VirtualBoxKind -notin 'Setting', 'Uuid') { throw (ConvertTo-SetupRefusal -Reason "the VirtualBox disk file and UUID as the .vbox has them: $($virtualBox -replace '^no, ', '')") }
+        if ($Compare) {
+            try { $existing = Import-PvmDataFile -Path $paths.Settings }
+            catch { throw (ConvertTo-CompareStop -Reason 'the stick''s LauncherData\settings.psd1 cannot be read') }
+            $named = Merge-PvmSetting -Settings $plain
+            foreach ($key in 'VMwareDisk', 'VirtualBoxDisk', 'VirtualBoxVmUuid') {
+                if ($existing.ContainsKey($key) -and $existing[$key] -is [string]) { $named[$key] = $existing[$key] }
+            }
+            $context.Settings = $named
+            $context.VmFiles = New-PvmVmFileRecord -Context $context
+            Resolve-PvmVMwareFile -Context $context
+            Resolve-PvmVirtualBoxFile -Context $context
+            if ($context.VmFiles.VMwareKind) { $contradicted += 'VMwareDisk' }
+            if ($context.VmFiles.VirtualBoxKind -eq 'Uuid') { $contradicted += 'VirtualBoxVmUuid' }
+            elseif ($context.VmFiles.VirtualBoxKind) { $contradicted += 'VirtualBoxDisk' }
+        }
 
         $text = ConvertTo-SetupText -Settings $settings
         $bytes = if ($text -match '[^\x00-\x7F]') { [byte[]](@(0xEF, 0xBB, 0xBF) + (New-Object System.Text.UTF8Encoding $false).GetBytes($text)) } else { [Text.Encoding]::ASCII.GetBytes($text) }
@@ -299,7 +307,12 @@ function Invoke-StickSetup {
             }
         } else {
             $null = [IO.Directory]::CreateDirectory($paths.Data)
-            $null = Write-PvmFile -Path $paths.Settings -Bytes $bytes
+            try { $null = Write-PvmFile -Path $paths.Settings -Bytes $bytes }
+            catch {
+                # Settings that another run wrote meanwhile are never replaced either.
+                if ("$($_.Exception.Data['PvmWrite'])" -eq 'Exists') { throw (ConvertTo-SetupRefusal -Reason 'LauncherData\settings.psd1 is there already, and the tool never replaces it; compare them with -Compare') }
+                throw
+            }
             Add-SetupLine 'RESULT: WRITTEN - LauncherData\settings.psd1'
             $exitCode = 0
         }

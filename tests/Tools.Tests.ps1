@@ -2792,6 +2792,11 @@ Describe 'New-StickSettings' -Tag 'WindowsOnly' {
             }
             Reason = 'the VirtualBox disk file and UUID as the .vbox has them: it attaches a disk that its media registry does not list'
         }
+        @{ Case = 'VirtualBox.xml lies in the stick folder itself'; Setup = {
+                Move-Item -LiteralPath (Join-Path $script:setupStick 'VirtualBox\VirtualBox.xml') -Destination (Join-Path $script:setupStick 'VirtualBox.xml')
+            }
+            Reason = 'VirtualBox.xml lies in the stick folder itself; VirtualBox''s home must be a folder below it'
+        }
         @{ Case = 'the stick is no MBR disk'; Setup = {
                 Mock -ModuleName PortableVM Invoke-PvmGetDisk { [pscustomobject]@{ Number = 99; PartitionStyle = 'GPT'; Signature = $null; LogicalSectorSize = 512; Size = [uint64]4000000 * 512; IsBoot = $false; IsSystem = $false } }
             }
@@ -2809,6 +2814,23 @@ Describe 'New-StickSettings' -Tag 'WindowsOnly' {
         $result.ExitCode | Should -Be 1 -Because ($result.Lines -join "`n")
         $result.Lines[-1] | Should -BeExactly "RESULT: NOT WRITTEN - $Reason"
         Get-SetupTree -Root $script:setupStick | Should -BeExactly $before
+    }
+
+    It 'compares without taking the stick''s disk key for the one raw disk the written settings need' {
+        Write-TestFile -Path (Join-Path $script:setupStick 'VMware\Test VM.vmx') -Text ((@('config.version = "8"', 'uuid.action = "keep"', 'suspend.disabled = "TRUE"',
+                    'scsi0:0.fileName = "stick.vmdk"', 'scsi0:0.present = "TRUE"', 'scsi0:1.fileName = "second.vmdk"', 'scsi0:1.present = "TRUE"', '') -join "`r`n"))
+        Copy-Item -LiteralPath (Join-Path $script:setupStick 'VMware\stick.vmdk') -Destination (Join-Path $script:setupStick 'VMware\second.vmdk')
+        Write-TestFile -Path $script:settingsPath -Text $script:setupText.Replace('    VMwareVmx', "    VMwareDisk = 'VMware\stick.vmdk'`r`n    VMwareVmx")
+        $result = Invoke-SetupCheck -Compare
+        $result.ExitCode | Should -Be 1 -Because ($result.Lines -join "`n")
+        $result.Lines[-1] | Should -BeExactly 'RESULT: NOT WRITTEN - the VMware disk file as the .vmx attaches it: more than one raw-disk file is attached'
+    }
+
+    It 'says that settings are there already when they appear during the run' {
+        Mock Write-PvmFile { throw (Get-PvmWriteException -Code 'Exists' -Message 'An item of that name is in the way.' -Detail 'x') }
+        $result = Invoke-SetupCheck
+        $result.ExitCode | Should -Be 1
+        $result.Lines[-1] | Should -BeExactly 'RESULT: NOT WRITTEN - LauncherData\settings.psd1 is there already, and the tool never replaces it; compare them with -Compare'
     }
 
     It 'takes the .vmx and the .vbox it is given when there are more' {
