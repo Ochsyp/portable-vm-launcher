@@ -162,7 +162,7 @@ BeforeAll {
 Describe 'Tracked files' {
     It 'include the launcher and its tools, so the other checks have something to check' {
         foreach ($path in 'src/Start-PortableVM.ps1', 'src/PortableVM.psm1', 'tools/Deploy-PortableVM.ps1',
-            'tools/Get-StickInventory.ps1', 'tools/Compare-StickDryRun.ps1', 'tools/Test-StickState.ps1', 'examples/settings.example.psd1', 'tests/Settings.Tests.ps1') {
+            'tools/Get-StickInventory.ps1', 'tools/Compare-StickDryRun.ps1', 'tools/Test-StickState.ps1', 'tools/New-StickSettings.ps1', 'examples/settings.example.psd1', 'tests/Settings.Tests.ps1') {
             $script:tracked | Should -Contain $path
         }
     }
@@ -396,6 +396,26 @@ Describe 'Static guards' {
         @($commands | Where-Object { $_.Operator -eq 'Ampersand' }) | Should -BeNullOrEmpty
         @($commands | Where-Object { $_.Operator -eq 'Dot' } | ForEach-Object { $_.Function }) | Should -BeExactly @('')
         [IO.File]::ReadAllText($path) | Should -Match ([regex]::Escape(". (Join-Path `$PSScriptRoot 'Compare-StickDryRun.ps1')"))
+    }
+
+    It 'let the setup tool write on the stick only its new settings file and, when asked, host I/O cache in the .vbox, through the safe write, and elsewhere only its copy on the PC' {
+        $ast = Get-SourceAst -Path (Join-Path $script:repoRoot 'tools\New-StickSettings.ps1')
+        Get-SourceFileChange -Ast $ast | Should -BeNullOrEmpty
+        @(Get-SourceFileWrite -Ast $ast | Sort-Object -Unique) | Should -BeExactly @('WriteAllBytes in Save-SetupFile')
+        $commands = @(Get-SourceCommand -Ast $ast)
+        @($commands | Where-Object { $_.Name -eq 'Write-PvmFile' } | ForEach-Object { $_.Function }) | Should -BeExactly @('Invoke-StickSetup')
+        @($commands | Where-Object { $_.Name -eq 'Save-SetupFile' } | ForEach-Object { $_.Function }) | Should -BeExactly @('Invoke-StickSetup')
+        # The one change it makes to a VM file, after an explicit switch: host I/O cache on, through the safe write with copies.
+        @($commands | Where-Object { $_.Name -eq 'Save-PvmFileChange' } | ForEach-Object { $_.Function }) | Should -BeExactly @('Set-SetupHostIOCache')
+        @($commands | Where-Object { $_.Name -eq 'Set-SetupHostIOCache' } | ForEach-Object { $_.Function }) | Should -BeExactly @('Invoke-StickSetup')
+        $forbidden = 'Set-Content', 'Add-Content', 'Out-File', 'New-Item', 'Remove-Item', 'Move-Item', 'Copy-Item', 'Rename-Item', 'Set-Item',
+        'Set-ItemProperty', 'New-ItemProperty', 'Remove-ItemProperty', 'Clear-Content', 'Clear-Item', 'Start-Process', 'Invoke-Expression',
+        'Export-Csv', 'Export-Clixml', 'Tee-Object', 'Start-Transcript', 'Set-Acl', 'Invoke-PortableVM', 'Invoke-PvmLaunch',
+        'Set-PvmDiskDescriptor', 'Invoke-PvmNative', 'Invoke-PvmStartProcess', 'Invoke-StickCompare', 'Invoke-CompareCheck', 'Invoke-CompareDeploy'
+        $commands | Where-Object { $forbidden -contains $_.Name } | ForEach-Object { "$($_.Name) at line $($_.Line)" } | Should -BeNullOrEmpty
+        # It runs no program, and dot-sources only the stick-check tool for its stick search.
+        @($commands | Where-Object { $_.Operator -eq 'Ampersand' }) | Should -BeNullOrEmpty
+        @($commands | Where-Object { $_.Operator -eq 'Dot' } | ForEach-Object { $_.Function }) | Should -BeExactly @('')
     }
 
     It 'catch the ways a source could change or write a file past the safe write: <Code>' -ForEach @(

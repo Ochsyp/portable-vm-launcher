@@ -229,7 +229,8 @@ function Invoke-StickState {
                 if ($mounted.Problem) { 'unknown, since Windows did not list the stick''s partitions' } else { "$(@($mounted.Mounts).Count)" }
             }
             Add-StateLine "  partitions mounted in the VM's part of the stick: $mounts"
-            if ($cache -eq 'no' -or $group -eq 'set' -or ($mounts -match '\A\d+\z' -and $mounts -ne '0')) { $attention.Add('VirtualBox storage settings') }
+            if ($cache -eq 'no' -or $group -eq 'set') { $attention.Add('VirtualBox storage settings') }
+            if ($mounts -match '\A\d+\z' -and $mounts -ne '0') { $attention.Add('a stick partition mounted in the VM''s part') }
         }
 
         # The files a start may write, their copies, and where each disk file points.

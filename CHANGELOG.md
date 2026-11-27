@@ -159,6 +159,23 @@ All notable changes to this project are listed here. The format follows
 - Tests of whole VMware starts and dry runs with VMware's blank at the end of the extent line and
   a tab at the end of the `createType` line: the disk file and its copies stay byte for byte as
   they were, so a later start path that compares the file another way fails a test.
+- `tools\New-StickSettings.ps1`, the stick setup tool (phase 7, second pull request). Run from a
+  clone with the stick plugged in, it reads the stick's identity as the launcher checks it, finds
+  the `.vmx`, the `.vbox` and `VirtualBox.xml` below the stick folder, checks with the launcher's
+  module that the settings pass and that each VM file attaches one raw disk on the stick, and
+  writes `LauncherData\settings.psd1` through the safe write. It never replaces a settings file.
+  It works on a new stick before the first deploy. With `-Compare` it writes nothing on the stick
+  and names the keys that differ, also a disk file or UUID there that the VM's files contradict.
+  It needs no administrator rights, runs no program and prints key names, never values.
+  Beyond the approved plan, by the owner's later answers: it reports whether host I/O cache is on
+  for the VirtualBox controller that holds the stick disk, and `-TurnOnHostIOCache` switches it on
+  (d219): that one setting in the `.vbox`, through the safe write with the launcher's copies, only
+  while VirtualBox and its background service are closed and the VM has no saved state and no
+  snapshots.
+- A VMware start now stops too, a dry run as it stops, when Windows has mounted a partition in
+  the VM's part of the stick, before Data (d220): the guest could not write to it while Windows
+  uses it. Before, only a VirtualBox start checked this. The read-only check names such a
+  partition apart from VirtualBox's storage settings.
 - VM config checks (phase 7, first pull request). The launcher reads which raw-disk file the VM
   uses from its own `.vmx` and `.vbox`, and the VM's UUID from the `.vbox`, and points exactly
   those files at the stick. `VMwareDisk`, `VirtualBoxDisk` and `VirtualBoxVmUuid` become

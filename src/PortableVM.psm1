@@ -2774,9 +2774,8 @@ function Resolve-PvmVirtualBoxFile {
 
 # Return the messages of the stops for VirtualBox's storage settings of the stick's disk in
 # $Context.VmFiles: host I/O cache must be on and no bandwidth group set, or VirtualBox takes the
-# stick's volumes away from Windows, the Data partition with the launcher's own files too. On
-# Windows, no partition of the stick other than Data may be mounted before the Data partition,
-# in the part of the stick the VM uses (Get-PvmMountedVmPartition).
+# stick's volumes away from Windows, the Data partition with the launcher's own files too; then
+# the stop for a mounted partition in the VM's part of the stick (Get-PvmMountedStop).
 function Get-PvmVirtualBoxStorageProblem {
     [CmdletBinding()]
     [OutputType([string])]
@@ -2796,15 +2795,33 @@ function Get-PvmVirtualBoxStorageProblem {
             '{VM}''s stick disk in VirtualBox has the bandwidth group {Group}, with which VirtualBox takes the stick''s volumes away from Windows. ' +
             'Set its bandwidth group to none in VirtualBox, then start {vm} again. Nothing was started.')
     }
+    Get-PvmMountedStop -Context $Context -Disk $Disk -Program 'VirtualBox'
+}
+
+# Return the message of the stop for a start in $Program, VMware or VirtualBox, when, on Windows,
+# a partition of the stick other than Data is mounted before the Data partition, in the part of the
+# stick the VM uses (Get-PvmMountedVmPartition), or when the partitions cannot be read; else
+# nothing. VirtualBox would take such a partition away from Windows, and in either program
+# Windows refuses the guest's writes into it while it is mounted.
+function Get-PvmMountedStop {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)]$Disk,
+        [Parameter(Mandatory)][ValidateSet('VMware', 'VirtualBox')][string]$Program
+    )
     if (-not (Test-PvmWindowsHost)) { return }
     $mounted = Get-PvmMountedVmPartition -Disk $Disk -DataPartitionStart $Context.Settings['DataPartitionStart']
     if ($mounted.Problem) {
-        Format-PvmMessage -Names $Context.Names -Values @{ Cause = $mounted.Problem } -Template 'The launcher cannot tell which partitions of the stick Windows has mounted, because {Cause}. Nothing was started.'
-    } elseif ($mounted.Mounts.Count) {
-        Format-PvmMessage -Names $Context.Names -Values @{ Mounts = ($mounted.Mounts -join ', ') } -Template (
-            'Windows has mounted a partition in the part of the stick that {vm} uses ({Mounts}). VirtualBox would take it away from Windows, or {guest} would write into it ' +
-            'while Windows uses it. Remove its drive letter or folder path in Disk Management, then start {vm} again. Nothing was started.')
+        return (Format-PvmMessage -Names $Context.Names -Values @{ Cause = $mounted.Problem } -Template 'The launcher cannot tell which partitions of the stick Windows has mounted, because {Cause}. Nothing was started.')
     }
+    if (-not $mounted.Mounts.Count) { return }
+    $why = if ($Program -eq 'VirtualBox') { '. VirtualBox would take it away from Windows, or {guest} would write into it while Windows uses it.' }
+    else { ', and {guest} could not write to it while Windows uses it.' }
+    Format-PvmMessage -Names $Context.Names -Values @{ Mounts = ($mounted.Mounts -join ', ') } -Template (
+        'Windows has mounted a partition in the part of the stick that {vm} uses ({Mounts})' + $why +
+        ' Remove its drive letter or folder path in Disk Management, then start {vm} again. Nothing was started.')
 }
 
 # Return the places, such as E:\, where Windows has mounted a partition of the disk $Disk that
@@ -2912,7 +2929,18 @@ function Test-PvmHypervisorOpen {
     [CmdletBinding()]
     [OutputType([bool])]
     param()
-    if (@(Invoke-PvmGetProcess -Name 'vmware', 'vmware-vmx', 'VirtualBox', 'VirtualBoxVM', 'VBoxHeadless').Count) { return $true }
+    if (@(Invoke-PvmGetProcess -Name 'vmware', 'vmware-vmx').Count) { return $true }
+    Test-PvmVirtualBoxOpen
+}
+
+# Return whether VirtualBox, a VM of VirtualBox, or VirtualBox's background service in this Windows
+# session runs, any of which may hold or rewrite the VM's .vbox. Another session's VBoxSVC uses
+# that user's own VirtualBox home, not the stick's, so it is not counted, as at a start.
+function Test-PvmVirtualBoxOpen {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+    if (@(Invoke-PvmGetProcess -Name 'VirtualBox', 'VirtualBoxVM', 'VBoxHeadless').Count) { return $true }
     [bool](Invoke-PvmTestProcess -Name 'VBoxSVC')
 }
 
@@ -3358,6 +3386,7 @@ function Invoke-PvmVMware {
     }
     foreach ($kind in $Decision.Stops) { Invoke-PvmStopUnlessDryRun -Context $Context -Message (Get-PvmDecisionMessage -Kind $kind -Context $Context -Snapshot $Snapshot -Use 'VMware') }
     if ($Context.VmFiles.VMwareProblem) { Invoke-PvmStopUnlessDryRun -Context $Context -Message $Context.VmFiles.VMwareProblem }
+    foreach ($problem in @(Get-PvmMountedStop -Context $Context -Disk $Context.StickDisk -Program 'VMware')) { Invoke-PvmStopUnlessDryRun -Context $Context -Message $problem }
     Assert-PvmVMwareReady -Context $Context -Vmx $vmx
 
     Enter-PvmStep -Context $Context -Name 'files'
