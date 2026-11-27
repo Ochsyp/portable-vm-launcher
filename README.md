@@ -219,7 +219,8 @@ prints key names, never values. Without `-Target` it takes the one folder with a
 folder at a drive's root or one level below. It also says whether host I/O cache is on for the
 VirtualBox controller that holds the stick disk; `-TurnOnHostIOCache` switches it on, changing
 that one setting in the `.vbox` with copies below `LauncherData\backups`, and only while
-VirtualBox is closed and the VM has no saved state or snapshots.
+VirtualBox is closed and the VM has no saved state or snapshots. On a stick that has settings,
+give it with `-Compare`, since without `-Compare` the tool stops at the settings file there.
 
 Or copy `examples\settings.example.psd1` from this repository to `LauncherData\settings.psd1` on
 the stick, fill it in and delete its `IsExample` line; its comments say how to read each value.

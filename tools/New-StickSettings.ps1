@@ -94,7 +94,9 @@ function Set-SetupHostIOCache {
         [Parameter(Mandatory)][string]$LogPath
     )
     if (Test-PvmVirtualBoxOpen) { throw (ConvertTo-SetupRefusal -Reason 'host I/O cache: VirtualBox or its background service is running; close every VirtualBox window, wait a minute, then run the tool again') }
-    if ((Get-PvmVirtualBoxState -Path $Vbox).State -ne 'NotSaved') { throw (ConvertTo-SetupRefusal -Reason 'host I/O cache: the VM has a saved state in VirtualBox, which needs the same hardware to resume') }
+    $state = (Get-PvmVirtualBoxState -Path $Vbox).State
+    if ($state -eq 'Saved') { throw (ConvertTo-SetupRefusal -Reason 'host I/O cache: the VM has a saved state in VirtualBox, which needs the same hardware to resume') }
+    if ($state -ne 'NotSaved') { throw (ConvertTo-SetupRefusal -Reason 'host I/O cache: the tool cannot tell from the .vbox whether the VM has a saved state in VirtualBox') }
     $copy = @{ Root = $Root; Backups = $Backups; Path = $Vbox }
     $first = Get-PvmBackupPath @copy -Suffix '.launcher-backup'
     $previous = Get-PvmBackupPath @copy -Suffix '.previous.launcher-backup'

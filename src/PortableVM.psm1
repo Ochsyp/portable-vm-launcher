@@ -2934,7 +2934,8 @@ function Test-PvmHypervisorOpen {
 }
 
 # Return whether VirtualBox, a VM of VirtualBox, or VirtualBox's background service in this Windows
-# session runs, any of which may hold or rewrite the VM's .vbox.
+# session runs, any of which may hold or rewrite the VM's .vbox. Another session's VBoxSVC uses
+# that user's own VirtualBox home, not the stick's, so it is not counted, as at a start.
 function Test-PvmVirtualBoxOpen {
     [CmdletBinding()]
     [OutputType([bool])]
