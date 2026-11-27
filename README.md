@@ -35,7 +35,8 @@ Before every start the launcher:
   names it, with the adapter type of its controller;
 - before a VirtualBox start, checks the stick's disk in the `.vbox`: host I/O cache on for its
   controller and no bandwidth group, or VirtualBox takes the stick's volumes away from Windows;
-  and no partition that Windows has mounted in the VM's part of the stick, before Data;
+- before a start in either program, checks that Windows has mounted no partition in the VM's part
+  of the stick, before Data, since the guest could not write to it while Windows uses it;
 - fixes the stick's drive letter in the VirtualBox files: below a drive root in every quoted
   path below the stick folder, whatever its letter, as before; when the stick folder is a drive
   root, only in the paths on the stick's old letter, so that a path on another drive never moves;
@@ -215,7 +216,10 @@ attaches one raw disk on the stick, and never replaces one. With `-Compare` it w
 the stick: it names the keys that differ from the settings there, and keeps the file it would
 write below `%LOCALAPPDATA%\PortableVM\setup` on the PC. It needs no administrator rights and
 prints key names, never values. Without `-Target` it takes the one folder with a `Launcher`
-folder at a drive's root or one level below.
+folder at a drive's root or one level below. It also says whether host I/O cache is on for the
+VirtualBox controller that holds the stick disk; `-TurnOnHostIOCache` switches it on, changing
+that one setting in the `.vbox` with copies below `LauncherData\backups`, and only while
+VirtualBox is closed and the VM has no saved state or snapshots.
 
 Or copy `examples\settings.example.psd1` from this repository to `LauncherData\settings.psd1` on
 the stick, fill it in and delete its `IsExample` line; its comments say how to read each value.

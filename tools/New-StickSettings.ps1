@@ -18,6 +18,12 @@
 # replaces one. With -Compare it writes nothing on the stick: it writes the file it would make to
 # a run folder below %LOCALAPPDATA%\PortableVM\setup on this PC and names the keys that differ
 # from the stick's settings, also a disk file or UUID there that the VM's files contradict.
+# The tool also reports whether host I/O cache is on for the VirtualBox controller that holds the
+# stick disk; with it off, VirtualBox takes the stick's volumes away from Windows. With
+# -TurnOnHostIOCache it switches it on: one attribute in the .vbox, through the safe write, with
+# the launcher's copies of the .vbox below LauncherData\backups, and only while VirtualBox and its
+# background service are closed and the VM has no saved state and no snapshots. That is the one
+# change it makes on the stick besides a new settings file, also with -Compare.
 # It needs no administrator rights, runs no program and starts no VM. Each line names a check and
 # a kind, a yes or no, a count or a key's name, never a value from the stick. The last line is
 # "RESULT: WRITTEN", "SAME", "DIFFERENT", "NOT WRITTEN - <why>" or "FAILED - <why>", with exit
@@ -30,13 +36,17 @@ param(
     [string]$VMwareVmx,
     [string]$VirtualBoxVbox,
     [string]$VirtualBoxHome,
-    [string]$OutputRoot
+    [string]$OutputRoot,
+    [switch]$TurnOnHostIOCache
 )
 
 $ErrorActionPreference = 'Stop'
 # The stick-check tool's stick search and stops are shared; dot-sourcing it sets its own
 # parameters to their defaults, so this script's are kept aside.
-$setupParameters = @{ Target = $Target; Compare = $Compare; VMwareVmx = $VMwareVmx; VirtualBoxVbox = $VirtualBoxVbox; VirtualBoxHome = $VirtualBoxHome; OutputRoot = $OutputRoot }
+$setupParameters = @{
+    Target = $Target; Compare = $Compare; VMwareVmx = $VMwareVmx; VirtualBoxVbox = $VirtualBoxVbox; VirtualBoxHome = $VirtualBoxHome; OutputRoot = $OutputRoot
+    TurnOnHostIOCache = $TurnOnHostIOCache
+}
 . (Join-Path $PSScriptRoot 'Compare-StickDryRun.ps1')
 
 # Print the line $Text and keep it for the result.
@@ -66,6 +76,50 @@ function Save-SetupFile {
         [Parameter(Mandatory)][byte[]]$Bytes
     )
     [IO.File]::WriteAllBytes($Path, $Bytes)
+}
+
+# Switch host I/O cache on for the storage controller $Controller of the .vbox $Vbox on the stick
+# folder $Root: its useHostIOCache from "false" to "true" and nothing else, through the safe write
+# with the launcher's copies below $Backups, as a start keeps them, logging a failure to $LogPath.
+# Throws a refusal, changing nothing, while VirtualBox or its background service runs, when the
+# VM has a saved state or snapshots, when a write of the .vbox or of a copy did not finish, or when
+# the controller's entry is not one start tag that says "false" once.
+function Set-SetupHostIOCache {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Backups,
+        [Parameter(Mandatory)][string]$Vbox,
+        [Parameter(Mandatory)][string]$Controller,
+        [Parameter(Mandatory)][string]$LogPath
+    )
+    if (Test-PvmVirtualBoxOpen) { throw (ConvertTo-SetupRefusal -Reason 'host I/O cache: VirtualBox or its background service is running; close every VirtualBox window, wait a minute, then run the tool again') }
+    if ((Get-PvmVirtualBoxState -Path $Vbox).State -ne 'NotSaved') { throw (ConvertTo-SetupRefusal -Reason 'host I/O cache: the VM has a saved state in VirtualBox, which needs the same hardware to resume') }
+    $copy = @{ Root = $Root; Backups = $Backups; Path = $Vbox }
+    $first = Get-PvmBackupPath @copy -Suffix '.launcher-backup'
+    $previous = Get-PvmBackupPath @copy -Suffix '.previous.launcher-backup'
+    if ((Get-PvmLeftoverProblem -Path $Vbox) -or (Get-PvmLeftoverProblem -Path $first) -or (Get-PvmCopyLeftoverProblem -Path $previous -Of $Vbox)) {
+        throw (ConvertTo-SetupRefusal -Reason 'host I/O cache: a write of the .vbox or of a copy of it did not finish; start the VM through the launcher once to be asked about it')
+    }
+    $bytes = [IO.File]::ReadAllBytes($Vbox)
+    $strict = New-Object System.Text.UTF8Encoding $false, $true
+    $text = $strict.GetString($bytes)
+    if ($text -match '<Snapshot\b') { throw (ConvertTo-SetupRefusal -Reason 'host I/O cache: the VM has snapshots, which hold copies of the controller; switch it on in VirtualBox instead') }
+    $name = [Security.SecurityElement]::Escape($Controller)
+    $tags = @([regex]::Matches($text, '<StorageController\b[^>]*>') | Where-Object { $_.Value -match ('\sname="' + [regex]::Escape($name) + '"') })
+    $off = if ($tags.Count -eq 1) { @([regex]::Matches($tags[0].Value, '\suseHostIOCache="false"')) } else { @() }
+    if ($off.Count -ne 1) { throw (ConvertTo-SetupRefusal -Reason 'host I/O cache: the controller''s entry in the .vbox is not as the tool expects; switch it on in VirtualBox instead') }
+    $tag = $tags[0]
+    $newTag = $tag.Value.Remove($off[0].Index, $off[0].Length).Insert($off[0].Index, ' useHostIOCache="true"')
+    $new = $text.Remove($tag.Index, $tag.Length).Insert($tag.Index, $newTag)
+    Assert-PvmRewritable -Path $Vbox
+    if ([IO.File]::Exists($previous)) { Assert-PvmRewritable -Path $previous }
+    if (-not $PSCmdlet.ShouldProcess($Vbox, 'Switch host I/O cache on for the controller that holds the stick disk')) { return }
+    $change = [pscustomobject]@{
+        Path = $Vbox; Old = $bytes; New = $strict.GetBytes($new); FirstBackup = $first; PreviousBackup = $previous; Disarm = $false
+        Action = 'Switch host I/O cache on for the controller that holds the stick disk'
+    }
+    Save-PvmFileChange -Change $change -LogPath $LogPath
 }
 
 # Return the folders at a drive's root or one level below that hold Launcher\Start-PortableVM.ps1,
@@ -188,6 +242,7 @@ function Invoke-StickSetup {
         [AllowEmptyString()][string]$VirtualBoxVbox = '',
         [AllowEmptyString()][string]$VirtualBoxHome = '',
         [AllowEmptyString()][string]$OutputRoot = '',
+        [switch]$TurnOnHostIOCache,
         [datetimeoffset]$Now = [datetimeoffset]::Now
     )
     $script:SetupOutput = New-Object System.Collections.Generic.List[string]
@@ -287,22 +342,41 @@ function Invoke-StickSetup {
             elseif ($context.VmFiles.VirtualBoxKind) { $contradicted += 'VirtualBoxDisk' }
         }
 
+        # Host I/O cache for the controller that holds the stick disk, switched on when asked.
+        if (-not $OutputRoot) { $OutputRoot = Join-Path $env:LOCALAPPDATA 'PortableVM\setup' }
+        $run = Join-Path $OutputRoot $Now.ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture)
+        $cache = if ($files.HostIOCache -eq 'true') { 'yes' } else { 'no' }
+        $cacheNote = ''
+        if ($cache -eq 'no') {
+            if ($TurnOnHostIOCache) {
+                $null = [IO.Directory]::CreateDirectory($run)
+                $vbox = Join-PvmStickPath -Root $Target -Path $settings['VirtualBoxVbox']
+                Set-SetupHostIOCache -Root $Target -Backups $paths.Backups -Vbox $vbox -Controller $files.Controller -LogPath (Join-Path $run 'setup.log')
+                $context.Settings = Merge-PvmSetting -Settings $plain
+                $context.VmFiles = New-PvmVmFileRecord -Context $context
+                Resolve-PvmVirtualBoxFile -Context $context
+                if ($context.VmFiles.HostIOCache -ne 'true') { throw (ConvertTo-CompareStop -Reason 'the .vbox does not read as changed; check it against its copies below LauncherData\backups') }
+                $cache = 'yes, switched on now'
+            } else {
+                $cacheNote = '; host I/O cache is off for the stick disk, which -TurnOnHostIOCache switches on'
+            }
+        }
+        Add-SetupLine "  VirtualBox host I/O cache on for the stick disk: $cache"
+
         $text = ConvertTo-SetupText -Settings $settings
         $bytes = if ($text -match '[^\x00-\x7F]') { [byte[]](@(0xEF, 0xBB, 0xBF) + (New-Object System.Text.UTF8Encoding $false).GetBytes($text)) } else { [Text.Encoding]::ASCII.GetBytes($text) }
         if ($Compare) {
             $differ = @(@($settings.Keys | Where-Object { -not $existing.ContainsKey($_) -or -not (Test-SetupSame -Key $_ -Left $settings[$_] -Right $existing[$_]) }) + $contradicted | Sort-Object -Unique)
             $own = @($existing.Keys | Where-Object { -not $settings.Contains($_) } | Sort-Object)
-            if (-not $OutputRoot) { $OutputRoot = Join-Path $env:LOCALAPPDATA 'PortableVM\setup' }
-            $run = Join-Path $OutputRoot $Now.ToString('yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture)
             $null = [IO.Directory]::CreateDirectory($run)
             Save-SetupFile -Path (Join-Path $run 'settings.psd1') -Bytes $bytes
             Add-SetupLine "  keys that differ: $(if ($differ.Count) { $differ -join ', ' } else { 'none' })"
             Add-SetupLine "  keys set only in the stick's settings: $(if ($own.Count) { $own -join ', ' } else { 'none' })"
             if ($differ.Count) {
-                Add-SetupLine "RESULT: DIFFERENT - $($differ -join ', ')"
+                Add-SetupLine "RESULT: DIFFERENT - $($differ -join ', ')$cacheNote"
                 $exitCode = 1
             } else {
-                Add-SetupLine 'RESULT: SAME - every key the tool would write equals the stick''s settings'
+                Add-SetupLine "RESULT: SAME - every key the tool would write equals the stick's settings$cacheNote"
                 $exitCode = 0
             }
         } else {
@@ -313,7 +387,7 @@ function Invoke-StickSetup {
                 if ("$($_.Exception.Data['PvmWrite'])" -eq 'Exists') { throw (ConvertTo-SetupRefusal -Reason 'LauncherData\settings.psd1 is there already, and the tool never replaces it; compare them with -Compare') }
                 throw
             }
-            Add-SetupLine 'RESULT: WRITTEN - LauncherData\settings.psd1'
+            Add-SetupLine "RESULT: WRITTEN - LauncherData\settings.psd1$cacheNote"
             $exitCode = 0
         }
     } catch {
@@ -336,6 +410,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     $Target = $setupParameters.Target
     if ($Target -and (Test-Path -LiteralPath $Target -PathType Container)) { $Target = Convert-Path -LiteralPath $Target }
     $result = Invoke-StickSetup -RepositoryPath (Split-Path $PSScriptRoot -Parent) -Target $Target -Compare:$setupParameters.Compare -VMwareVmx $setupParameters.VMwareVmx `
-        -VirtualBoxVbox $setupParameters.VirtualBoxVbox -VirtualBoxHome $setupParameters.VirtualBoxHome -OutputRoot $setupParameters.OutputRoot
+        -VirtualBoxVbox $setupParameters.VirtualBoxVbox -VirtualBoxHome $setupParameters.VirtualBoxHome -OutputRoot $setupParameters.OutputRoot `
+        -TurnOnHostIOCache:$setupParameters.TurnOnHostIOCache
     exit $result.ExitCode
 }

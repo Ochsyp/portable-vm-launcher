@@ -167,6 +167,15 @@ All notable changes to this project are listed here. The format follows
   It works on a new stick before the first deploy. With `-Compare` it writes nothing on the stick
   and names the keys that differ, also a disk file or UUID there that the VM's files contradict.
   It needs no administrator rights, runs no program and prints key names, never values.
+  Beyond the approved plan, by the owner's later answers: it reports whether host I/O cache is on
+  for the VirtualBox controller that holds the stick disk, and `-TurnOnHostIOCache` switches it on
+  (d219): that one setting in the `.vbox`, through the safe write with the launcher's copies, only
+  while VirtualBox and its background service are closed and the VM has no saved state and no
+  snapshots.
+- A VMware start now stops too, a dry run as it stops, when Windows has mounted a partition in
+  the VM's part of the stick, before Data (d220): the guest could not write to it while Windows
+  uses it. Before, only a VirtualBox start checked this. The read-only check names such a
+  partition apart from VirtualBox's storage settings.
 - VM config checks (phase 7, first pull request). The launcher reads which raw-disk file the VM
   uses from its own `.vmx` and `.vbox`, and the VM's UUID from the `.vbox`, and points exactly
   those files at the stick. `VMwareDisk`, `VirtualBoxDisk` and `VirtualBoxVmUuid` become
