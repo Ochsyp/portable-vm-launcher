@@ -129,7 +129,7 @@ BeforeAll {
     function Get-TestVmxText {
         param([string[]]$Without = @(), [string[]]$Add = @())
         $lines = @('.encoding = "windows-1252"', 'config.version = "8"', 'displayName = "Test VM"', 'scsi0:0.fileName = "stick.vmdk"',
-            'scsi0:0.present = "TRUE"', 'uuid.action = "keep"', 'suspend.disabled = "TRUE"') | Where-Object { $Without -notcontains ($_ -split ' = ')[0] }
+            'scsi0:0.present = "TRUE"', 'numvcpus = "7"', 'cpuid.coresPerSocket = "7"', 'memsize = "16384"', 'uuid.action = "keep"', 'suspend.disabled = "TRUE"') | Where-Object { $Without -notcontains ($_ -split ' = ')[0] }
         (@($lines) + $Add + '') -join "`r`n"
     }
 
@@ -179,7 +179,7 @@ BeforeAll {
                 "  <Machine uuid=`"{$script:uuid}`" name=`"Test VM`" OSType=`"Debian_64`">",
                 '    <MediaRegistry><HardDisks>',
                 "      <HardDisk uuid=`"{5ca1ab1e-0000-4000-8000-000000000002}`" location=`"$($stick.OldLetter):$below\VirtualBox\Test VM\stick.vmdk`" format=`"VMDK`"/>",
-                '    </HardDisks></MediaRegistry>', '    <Hardware><StorageControllers>',
+                '    </HardDisks></MediaRegistry>', '    <Hardware><CPU count="7"/><Memory RAMSize="16384"/><BIOS><IOAPIC enabled="true"/></BIOS><StorageControllers>',
                 '      <StorageController name="SATA" type="AHCI" PortCount="1" useHostIOCache="true" Bootable="true">',
                 '        <AttachedDevice type="HardDisk" hotpluggable="false" port="0" device="0"><Image uuid="{5ca1ab1e-0000-4000-8000-000000000002}"/></AttachedDevice>',
                 '      </StorageController>', '    </StorageControllers></Hardware>', '  </Machine>', '</VirtualBox>', '') -join "`n")
@@ -264,6 +264,8 @@ BeforeAll {
         Mock -ModuleName PortableVM Invoke-PvmExitLock {}
         Mock -ModuleName PortableVM Invoke-PvmGetPartition { throw "No partition has the drive letter $DriveLetter." }
         Mock -ModuleName PortableVM Invoke-PvmGetPartition { Get-TestPartition } -ParameterFilter { $DriveLetter -ceq $script:testStick.Letter }
+        Mock -ModuleName PortableVM Invoke-PvmGetHostSize { [pscustomobject]@{ Cores = 8; Threads = 16; MemoryMB = 32768; FreeMB = 24576 } }
+        Mock -ModuleName PortableVM Invoke-PvmGetFreeSpace { [int64]64GB }
         Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { throw "No disk has the number $Number." }
         Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { Get-TestPartition -Change @{ DriveLetter = [char]$script:testStick.Letter; AccessPaths = @("$($script:testStick.Letter):\") } } -ParameterFilter { $Number -eq 3 }
         Mock -ModuleName PortableVM Invoke-PvmGetDisk { throw "No disk has the number $Number." }
@@ -1802,6 +1804,7 @@ Describe 'A start' {
                 'Launcher version unknown'
                 "Stick found: disk 3 (\\.\PhysicalDrive3), drive $($script:stick.Letter):, ID 5CA1AB1E"
                 'Using VMware'
+                'VM size OK: 7 CPUs, 16384 MB'
                 'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'
                 'stick.vmdk: rewritten because the disk device, a size and the number of extents differ'
                 "Started with VMware Workstation ($($script:stick.VMwareDir))"
@@ -1822,6 +1825,7 @@ Describe 'A start' {
                 'Launcher version unknown'
                 "Stick found: disk 3 (\\.\PhysicalDrive3), drive $($script:stick.Letter):, ID 5CA1AB1E"
                 'Using VMware'
+                'VM size OK: 7 CPUs, 16384 MB'
                 'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'
                 'stick.vmdk: rewritten because the disk device, a size and the number of extents differ'
                 "DRY RUN - would start $($script:stick.Vmx) with VMware Workstation ($($script:stick.VMwareDir))"
@@ -2148,6 +2152,7 @@ Describe 'A start' {
                 "Stick found: disk 3 (\\.\PhysicalDrive3), drive $($script:stick.Letter):, ID 5CA1AB1E"
                 'Using VirtualBox'
                 "Test VM.vbox: paths moved to drive $($script:stick.Letter):"
+                'VM size OK: 7 CPUs, 16384 MB'
                 "VirtualBox.xml: paths moved to drive $($script:stick.Letter):"
                 'stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0'
                 'stick.vmdk: rewritten because the disk device differs'
@@ -2177,6 +2182,7 @@ Describe 'A start' {
                 "Stick found: disk 3 (\\.\PhysicalDrive3), drive $($script:stick.Letter):, ID 5CA1AB1E"
                 'Using VirtualBox'
                 "Test VM.vbox: paths moved to drive $($script:stick.Letter):"
+                'VM size OK: 7 CPUs, 16384 MB'
                 "VirtualBox.xml: paths moved to drive $($script:stick.Letter):"
                 'stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0'
                 'stick.vmdk: rewritten because the disk device differs'
@@ -3914,6 +3920,227 @@ Describe 'The VM''s own files' {
     }
 }
 
+Describe 'The VM''s size' {
+    Context 'by the rule' {
+        It 'gives <Cores> cores, <Threads> threads and <MemoryMB> MB <Expect>' -ForEach @(
+            @{ Cores = 4; Threads = 8; MemoryMB = 16384; Max = @{}; Expect = '3 CPUs, 8192 MB' }
+            @{ Cores = 8; Threads = 16; MemoryMB = 32768; Max = @{}; Expect = '7 CPUs, 16384 MB' }
+            @{ Cores = 2; Threads = 4; MemoryMB = 8192; Max = @{}; Expect = '2 CPUs, 4096 MB, small' }
+            @{ Cores = 16; Threads = 32; MemoryMB = 65536; Max = @{}; Expect = '8 CPUs, 16384 MB' }
+            @{ Cores = 16; Threads = 32; MemoryMB = 65536; Max = @{ MaxCpus = 12; MaxMemoryGB = 32 }; Expect = '12 CPUs, 32768 MB' }
+            @{ Cores = 1; Threads = 2; MemoryMB = 4096; Max = @{}; Expect = '2 CPUs, 4096 MB, small' }
+            @{ Cores = 1; Threads = 1; MemoryMB = 8192; Max = @{}; Expect = '1 CPUs, 4096 MB, small' }
+            @{ Cores = 6; Threads = 6; MemoryMB = 12288; Max = @{}; Expect = '4 CPUs, 6144 MB' }
+            @{ Cores = 4; Threads = 8; MemoryMB = 10000; Max = @{}; Expect = '3 CPUs, 4096 MB, small' }
+            @{ Cores = 8; Threads = 16; MemoryMB = 20000; Max = @{}; Expect = '7 CPUs, 9984 MB' }
+            @{ Cores = 24; Threads = 48; MemoryMB = 262144; Max = @{}; Expect = '8 CPUs, 16384 MB' }
+        ) {
+            $size = Get-PvmVmSize -Cores $Cores -Threads $Threads -MemoryMB $MemoryMB @Max
+            "$($size.Cpus) CPUs, $($size.MemoryMB) MB$(if ($size.Small) { ', small' })" | Should -BeExactly $Expect
+        }
+    }
+
+    Context 'in the .vmx' {
+        It 'sets the size and changes nothing else: <Case>' -ForEach @(
+            @{ Case = 'values, a comment after one, CRLF'; Newline = "`r`n"
+                Lines = @('config.version = "8"', 'numvcpus = "6"', 'cpuid.coresPerSocket = "6"', 'memsize = "12288" # note', 'displayName = "Test VM"')
+                Expect = @('config.version = "8"', 'numvcpus = "7"', 'cpuid.coresPerSocket = "7"', 'memsize = "16384" # note', 'displayName = "Test VM"')
+            }
+            @{ Case = 'keys missing, LF'; Newline = "`n"
+                Lines = @('config.version = "8"', 'displayName = "Test VM"')
+                Expect = @('config.version = "8"', 'displayName = "Test VM"', 'numvcpus = "7"', 'cpuid.coresPerSocket = "7"', 'memsize = "16384"')
+            }
+            @{ Case = 'keys in another case and spacing'; Newline = "`r`n"
+                Lines = @('NUMVCPUS="2"', 'memSize   =   "4096"', 'cpuid.corespersocket = "1"')
+                Expect = @('NUMVCPUS="7"', 'memSize   =   "16384"', 'cpuid.corespersocket = "7"')
+            }
+        ) {
+            $text = (@($Lines) + '') -join $Newline
+            $result = ConvertTo-PvmVmxSizeText -Text $text -Cpus 7 -MemoryMB 16384
+            $result.Problem | Should -BeNullOrEmpty
+            $result.Text | Should -BeExactly ((@($Expect) + '') -join $Newline)
+        }
+
+        It 'leaves a .vmx that sets a size key twice' {
+            $result = ConvertTo-PvmVmxSizeText -Text "numvcpus = `"2`"`r`nmemsize = `"4096`"`r`nmemsize = `"8192`"`r`n" -Cpus 7 -MemoryMB 16384
+            $result.Problem | Should -BeExactly 'the .vmx sets memsize more than once'
+        }
+    }
+
+    Context 'in the .vbox' {
+        It 'sets the size and changes nothing else: <Case>' -ForEach @(
+            @{ Case = 'count and RAMSize there'; Before = '<Hardware><CPU count="6"><PAE enabled="true"/></CPU><Memory RAMSize="12288"/><BIOS><IOAPIC enabled="true"/></BIOS></Hardware>'
+                After = '<Hardware><CPU count="7"><PAE enabled="true"/></CPU><Memory RAMSize="16384"/><BIOS><IOAPIC enabled="true"/></BIOS></Hardware>'
+            }
+            @{ Case = 'no count, as VirtualBox writes one CPU'; Before = '<Hardware><CPU><PAE enabled="true"/></CPU><Memory RAMSize="2048"/><BIOS><IOAPIC enabled="true"/></BIOS></Hardware>'
+                After = '<Hardware><CPU count="7"><PAE enabled="true"/></CPU><Memory RAMSize="16384"/><BIOS><IOAPIC enabled="true"/></BIOS></Hardware>'
+            }
+            @{ Case = 'an empty CPU element'; Before = '<Hardware><CPU/><Memory RAMSize="2048"/><IOAPIC enabled="true"/></Hardware>'
+                After = '<Hardware><CPU count="7"/><Memory RAMSize="16384"/><IOAPIC enabled="true"/></Hardware>'
+            }
+        ) {
+            $result = ConvertTo-PvmVboxSizeText -Text "<VirtualBox><Machine>$Before</Machine></VirtualBox>`n" -Cpus 7 -MemoryMB 16384
+            $result.Problem | Should -BeNullOrEmpty
+            $result.Text | Should -BeExactly "<VirtualBox><Machine>$After</Machine></VirtualBox>`n"
+        }
+
+        It 'leaves a .vbox <Case>' -ForEach @(
+            @{ Case = 'with snapshots'; Text = '<Machine><Hardware><CPU count="2"/><Memory RAMSize="2048"/><IOAPIC enabled="true"/></Hardware><Snapshot><Hardware><CPU count="2"/><Memory RAMSize="2048"/></Hardware></Snapshot></Machine>'
+                Problem = 'the .vbox holds snapshots, whose hardware the launcher leaves as it is'
+            }
+            @{ Case = 'with IOAPIC off, for more than one CPU'; Text = '<Machine><Hardware><CPU count="1"/><Memory RAMSize="2048"/><BIOS><IOAPIC enabled="false"/></BIOS></Hardware></Machine>'
+                Problem = 'IOAPIC is off in the .vbox, which more than one CPU needs'
+            }
+            @{ Case = 'without a Memory element'; Text = '<Machine><Hardware><CPU count="1"/><IOAPIC enabled="true"/></Hardware></Machine>'
+                Problem = 'the .vbox has no CPU or Memory element of its own'
+            }
+        ) {
+            (ConvertTo-PvmVboxSizeText -Text $Text -Cpus 7 -MemoryMB 16384).Problem | Should -BeExactly $Problem
+        }
+    }
+
+    Context 'in a start' {
+        AfterEach { Remove-Item -LiteralPath $script:stick.Root -Recurse -Force }
+
+        It 'sets a VMware VM''s size where it differs, keeps the .vmx as it was in its copy, logs it and starts the VM' {
+            $script:stick = Initialize-TestStick -Name 'size-stick'
+            Set-TestPc -Stick $script:stick -Installed 'VMware'
+            $before = Get-TestVmxText -Without 'numvcpus', 'cpuid.coresPerSocket', 'memsize' -Add 'numvcpus = "6"', 'cpuid.coresPerSocket = "6"', 'memsize = "12288"'
+            Write-TestFile -Path $script:stick.Vmx -Text $before
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 0 -Because $result.Message
+            [IO.File]::ReadAllText($script:stick.Vmx) | Should -BeExactly $before.Replace('numvcpus = "6"', 'numvcpus = "7"').Replace('cpuid.coresPerSocket = "6"', 'cpuid.coresPerSocket = "7"').Replace('memsize = "12288"', 'memsize = "16384"')
+            [IO.File]::ReadAllText((Join-Path $script:stick.Backups 'VMware\Test VM.vmx.launcher-backup')) | Should -BeExactly $before
+            Get-TestLog -Path $script:stick.Log | Should -Contain 'VM size: 6 CPUs, 12288 MB -> 7 CPUs, 16384 MB (this PC: 8 cores, 16 threads, 32768 MB)'
+            Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
+        }
+
+        It 'leaves a VMware VM of the right size alone, byte for byte, and says so' {
+            $script:stick = Initialize-TestStick -Name 'size-stick'
+            Set-TestPc -Stick $script:stick -Installed 'VMware'
+            $written = [IO.File]::GetLastWriteTimeUtc($script:stick.Vmx)
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 0 -Because $result.Message
+            [IO.File]::GetLastWriteTimeUtc($script:stick.Vmx) | Should -Be $written
+            Get-TestLog -Path $script:stick.Log | Should -Contain 'VM size OK: 7 CPUs, 16384 MB'
+        }
+
+        It 'shows the change in a dry run and changes nothing' {
+            $script:stick = Initialize-TestStick -Name 'size-stick'
+            Set-TestPc -Stick $script:stick -Installed 'VMware'
+            $before = Get-TestVmxText -Without 'numvcpus', 'cpuid.coresPerSocket', 'memsize' -Add 'numvcpus = "6"', 'cpuid.coresPerSocket = "6"', 'memsize = "12288"'
+            Write-TestFile -Path $script:stick.Vmx -Text $before
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun
+            $result.ExitCode | Should -Be 0 -Because $result.Message
+            [IO.File]::ReadAllText($script:stick.Vmx) | Should -BeExactly $before
+            Join-Path $script:stick.Backups 'VMware\Test VM.vmx.launcher-backup' | Should -Not -Exist
+            Get-TestLog -Path $script:stick.Log | Should -Contain 'VM size: 6 CPUs, 12288 MB -> 7 CPUs, 16384 MB (this PC: 8 cores, 16 threads, 32768 MB)'
+        }
+
+        It 'sets the size from the settings with VmSizing Fixed' {
+            $script:stick = Initialize-TestStick -Name 'size-stick' -Change @{ VmSizing = 'Fixed'; VmCpus = 4; VmMemoryGB = 6 }
+            Set-TestPc -Stick $script:stick -Installed 'VMware'
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 0 -Because $result.Message
+            [IO.File]::ReadAllText($script:stick.Vmx) | Should -BeLike '*numvcpus = "4"*cpuid.coresPerSocket = "4"*memsize = "6144"*'
+            Get-TestLog -Path $script:stick.Log | Should -Contain 'VM size: 7 CPUs, 16384 MB -> 4 CPUs, 6144 MB (VmSizing Fixed)'
+        }
+
+        It 'notes a PC that is small for the VM, and still sets the floors' {
+            $script:stick = Initialize-TestStick -Name 'size-stick'
+            Set-TestPc -Stick $script:stick -Installed 'VMware'
+            Mock -ModuleName PortableVM Invoke-PvmGetHostSize { [pscustomobject]@{ Cores = 2; Threads = 4; MemoryMB = 8192; FreeMB = 6000 } }
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 0 -Because $result.Message
+            $log = Get-TestLog -Path $script:stick.Log
+            $log | Should -Contain 'VM size: 7 CPUs, 16384 MB -> 2 CPUs, 4096 MB (this PC: 2 cores, 4 threads, 8192 MB)'
+            $log | Should -Contain 'Note: this PC is small for the VM; with it running, the PC keeps less than 6 GB of memory or no core of its own.'
+        }
+
+        It 'notes little free memory, <Free> MB' -ForEach @(@{ Free = 10000 }, @{ Free = 0 }) {
+            $script:stick = Initialize-TestStick -Name 'size-stick'
+            Set-TestPc -Stick $script:stick -Installed 'VMware'
+            $script:free = $Free
+            Mock -ModuleName PortableVM Invoke-PvmGetHostSize { [pscustomobject]@{ Cores = 8; Threads = 16; MemoryMB = 32768; FreeMB = $script:free } }
+            $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            Get-TestLog -Path $script:stick.Log | Should -Contain 'Note: this PC has less free memory than the VM''s size and 2 GB more; close other programs if the VM is slow.'
+        }
+
+        It 'leaves a VMware VM''s size as it is, starting the VM, when <Case>' -ForEach @(
+            @{ Case = 'VmSizing is Off'; Change = @{ VmSizing = 'Off' }; Setup = {}; Reason = 'VmSizing in settings.psd1 is Off' }
+            @{ Case = 'this PC''s numbers cannot be read'; Change = @{}; Setup = { Mock -ModuleName PortableVM Invoke-PvmGetHostSize { throw 'No CIM.' } }
+                Reason = 'this PC''s cores and memory cannot be read'
+            }
+            @{ Case = 'VMware Workstation is open'; Change = @{}; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'vmware.exe'; CommandLine = $null }) }
+                Reason = 'VMware Workstation is open and could write its own copy of the .vmx back'
+            }
+            @{ Case = 'the VM has a saved state, resumed'; Change = @{}; Setup = { Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without 'numvcpus' -Add 'numvcpus = "6"', 'checkpoint.vmState = "Test VM.vmss"') }
+                Reason = 'the VM has a saved state, which needs the same hardware to resume'
+            }
+            @{ Case = 'the .vmx is read-only'; Change = @{}; Setup = {
+                    Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without 'numvcpus' -Add 'numvcpus = "6"')
+                    Set-ItemProperty -LiteralPath $script:stick.Vmx -Name IsReadOnly -Value $true
+                }
+                Reason = 'the .vmx, or its copy below LauncherData\backups, is read-only or a link, which the launcher does not rewrite'
+            }
+            @{ Case = 'the .vmx sets a size key twice'; Change = @{}; Setup = { Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without 'numvcpus' -Add 'numvcpus = "6"', 'numvcpus = "5"') }
+                Reason = 'the .vmx sets numvcpus more than once'
+            }
+            @{ Case = 'the stick has no room for VMware''s memory file of the larger size'; Change = @{}; Setup = {
+                    Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without 'memsize' -Add 'memsize = "4096"')
+                    Mock -ModuleName PortableVM Invoke-PvmGetFreeSpace { [int64]8GB }
+                }
+                Reason = 'the stick has too little free space for VMware''s memory file of the larger size'
+            }
+        ) {
+            $script:stick = Initialize-TestStick -Name 'size-stick' -Change $Change
+            Set-TestPc -Stick $script:stick -Installed 'VMware'
+            & $Setup
+            $before = [IO.File]::ReadAllText($script:stick.Vmx)
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskResume { $true }
+            $result.ExitCode | Should -Be 0 -Because $result.Message
+            [IO.File]::ReadAllText($script:stick.Vmx) | Should -BeExactly $before
+            Get-TestLog -Path $script:stick.Log | Should -Contain "VM size left as it is, because $Reason."
+            Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 1 -Exactly
+            Set-ItemProperty -LiteralPath $script:stick.Vmx -Name IsReadOnly -Value $false
+        }
+
+        It 'sets a VirtualBox VM''s size in the same write as the drive letters, with one copy of the .vbox as it was' {
+            $script:stick = Initialize-TestStick -Name 'size-stick'
+            Set-TestPc -Stick $script:stick -Installed 'VirtualBox'
+            $vbox = [IO.File]::ReadAllText($script:stick.Vbox).Replace('<CPU count="7"/>', '<CPU count="6"/>').Replace('RAMSize="16384"', 'RAMSize="12288"')
+            [IO.File]::WriteAllText($script:stick.Vbox, $vbox)
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 0 -Because $result.Message
+            $after = [IO.File]::ReadAllText($script:stick.Vbox)
+            $after | Should -BeLike '*<CPU count="7"/>*RAMSize="16384"*'
+            $after | Should -BeLike "*location=`"$($script:stick.Letter):*"
+            [IO.File]::ReadAllText((Join-Path $script:stick.Backups 'VirtualBox\Test VM\Test VM.vbox.launcher-backup')) | Should -BeExactly $vbox
+            Get-TestLog -Path $script:stick.Log | Should -Contain 'VM size: 6 CPUs, 12288 MB -> 7 CPUs, 16384 MB (this PC: 8 cores, 16 threads, 32768 MB)'
+        }
+
+        It 'leaves a VirtualBox VM''s size as it is when IOAPIC is off, starting the VM' {
+            $script:stick = Initialize-TestStick -Name 'size-stick'
+            Set-TestPc -Stick $script:stick -Installed 'VirtualBox'
+            [IO.File]::WriteAllText($script:stick.Vbox, [IO.File]::ReadAllText($script:stick.Vbox).Replace('<CPU count="7"/>', '<CPU count="6"/>').Replace('<IOAPIC enabled="true"/>', '<IOAPIC enabled="false"/>'))
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 0 -Because $result.Message
+            [IO.File]::ReadAllText($script:stick.Vbox) | Should -BeLike '*<CPU count="6"/>*'
+            Get-TestLog -Path $script:stick.Log | Should -Contain 'VM size left as it is, because IOAPIC is off in the .vbox, which more than one CPU needs.'
+        }
+
+        It 'offers to set right a cut-off write of the .vmx, as of any file a start writes' {
+            $script:stick = Initialize-TestStick -Name 'size-stick'
+            Set-TestPc -Stick $script:stick -Installed 'VMware'
+            Write-TestFile -Path "$($script:stick.Vmx).pvm-tmp" -Text 'x'
+            $script:asked = ''
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -AskFix { param($Question) $script:asked = $Question; $false }
+            $result.ExitCode | Should -Be 1
+            $script:asked | Should -BeLike "A write of $($script:stick.Vmx) did not finish. To set it right, remove Test VM.vmx.pvm-tmp; Test VM.vmx itself is whole.*"
+        }
+    }
+}
+
 Describe 'Dry-run parity' {
     It 'takes the decisions of a real start: <Case>' -ForEach @(
         @{ Case = 'VMware, nothing in the way'; Installed = @('VMware'); Change = @{}; Setup = {}; Expect = 'stick.vmdk: rewritten because the disk device, a size and the number of extents differ' }
@@ -4018,6 +4245,12 @@ Describe 'Dry-run parity' {
                 Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { Get-TestPartition -Change @{ Offset = [uint64]2048 * 512; DriveLetter = [char]'K'; AccessPaths = @('K:\') } } -ParameterFilter { $Number -eq 3 }
             }
         }
+        @{ Case = 'a VMware VM of another size'; Installed = @('VMware'); Change = @{}; Setup = { Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without 'memsize' -Add 'memsize = "12288"') } }
+        @{ Case = 'a VirtualBox VM of another size'; Installed = @('VirtualBox'); Change = @{}; Setup = {
+                [IO.File]::WriteAllText($script:stick.Vbox, [IO.File]::ReadAllText($script:stick.Vbox).Replace('<CPU count="7"/>', '<CPU count="6"/>'))
+            }
+        }
+        @{ Case = 'VmSizing Off'; Installed = @('VMware'); Change = @{ VmSizing = 'Off' }; Setup = { Write-TestFile -Path $script:stick.Vmx -Text (Get-TestVmxText -Without 'memsize' -Add 'memsize = "12288"') } }
         # A cut-off write of each kind, which a real start asks to set right, here answered No.
         @{ Case = 'a new version beside a whole VirtualBox.xml, answered No'; Installed = @('VMware'); Change = @{}; Setup = { Write-TestFile -Path "$($script:stick.VirtualBoxXml).pvm-tmp" -Text 'x' } }
         @{ Case = 'both copies beside a whole VirtualBox.xml, answered No'; Installed = @('VMware'); Change = @{}; Setup = {

@@ -13,7 +13,7 @@
 # result here.
 #
 # Any difference between the two dry runs fails the check, apart from the version line, the
-# Timings line, a wait line and the note on a log moved aside. -ExpectChange names each difference
+# Timings line, a wait line, the note on a log moved aside and the note on little free memory. -ExpectChange names each difference
 # a pull request expects, by the kinds of its two lines: 'stick found => stick found' for a changed
 # line, '=> <kind>' for an added one and '<kind> =>' for a removed one. Each expected change must
 # happen, on one line per pair of dry runs at most. -AlsoVirtualBox adds a pair of dry runs with
@@ -263,6 +263,11 @@ function Get-CompareKind {
         '^Asking for administrator rights$' { return 'asking for administrator rights' }
         '^Waiting up to 30 s for ' { return 'waiting for VBoxSVC' }
         '^Stick found: ' { return 'stick found' }
+        '^VM size OK: ' { return 'VM size OK' }
+        '^VM size: ' { return 'VM size changes' }
+        '^VM size left as it is, because ' { return 'VM size left as it is' }
+        '^Note: this PC is small for the VM' { return 'note: a PC small for the VM' }
+        '^Note: this PC has less free memory' { return 'note: little free memory' }
         '^Saved state found: (suspended in VMware|saved in VirtualBox)$' { return "saved state found: $($Matches[1])" }
         '^Using (VMware|VirtualBox)$' { return "using $($Matches[1])" }
         '^Already running in (VMware|VirtualBox)\.$' { return "already running in $($Matches[1])" }
@@ -289,15 +294,15 @@ function Get-CompareKind {
 }
 
 # Return the messages of the dry-run lines $Lines that two launchers must log alike: all but the
-# version line, the Timings line, a wait for VirtualBox's background service and the note on a log
-# moved aside.
+# version line, the Timings line, a wait for VirtualBox's background service, the note on a log
+# moved aside and the note on little free memory, which changes from minute to minute.
 function Get-CompareDecision {
     [CmdletBinding()]
     [OutputType([string])]
     param([AllowEmptyCollection()][string[]]$Lines = @())
     $Lines | ForEach-Object { Get-CompareLogMessage -Line $_ } | Where-Object {
         $_ -notmatch '^Launcher version ' -and $_ -notmatch '^Timings: ' -and $_ -notmatch '^Waiting up to 30 s for ' -and
-        $_ -notmatch '^Note: the earlier lines of the log are in launcher-\d{8}-\d{6}\.log\.$'
+        $_ -notmatch '^Note: the earlier lines of the log are in launcher-\d{8}-\d{6}\.log\.$' -and $_ -notmatch '^Note: this PC has less free memory '
     }
 }
 

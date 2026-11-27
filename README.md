@@ -37,6 +37,14 @@ Before every start the launcher:
   controller and no bandwidth group, or VirtualBox takes the stick's volumes away from Windows;
 - before a start in either program, checks that Windows has mounted no partition in the VM's part
   of the stick, before Data, since the guest could not write to it while Windows uses it;
+- sizes the VM to the PC in the program it starts (`VmSizing = 'Auto'`, the default): all but one
+  core or two threads, 2 to `VmMaxCpus` (8) CPUs, and half the PC's memory while leaving the PC at
+  least 6 GB, 4 to `VmMaxMemoryGB` (16) GB. It writes the `.vmx` or the `.vbox` only when the size
+  differs, with copies as for any rewrite, and logs `VM size: <before> -> <after>`, or
+  `VM size OK`. It leaves the size while the VM has a saved state, while VMware Workstation is open
+  or when the PC's numbers cannot be read, and says why. `VmSizing = 'Off'` leaves the VM's file
+  alone; `'Fixed'` sets `VmCpus` and `VmMemoryGB` on every PC. Keep the guest's own hibernation
+  off: a guest that hibernated with more memory may not wake with less;
 - fixes the stick's drive letter in the VirtualBox files: below a drive root in every quoted
   path below the stick folder, whatever its letter, as before; when the stick folder is a drive
   root, only in the paths on the stick's old letter, so that a path on another drive never moves;
@@ -228,6 +236,8 @@ Until then the launcher stops and says the file is still the example. The settin
 schema 2 (`SchemaVersion = 2`): every value is checked before the launcher reads the PC, and a
 value of the wrong type or an unknown word is refused rather than guessed. The path settings are
 relative to the folder that holds `Launcher` and `LauncherData`, without a drive, `.` or `..`.
+The VM's size settings, `VmSizing`, `VmCpus`, `VmMemoryGB`, `VmMaxCpus` and `VmMaxMemoryGB`, are
+optional; a launcher from before request r9 refuses them, so remove them before going back to one.
 `VMwareDisk`, `VirtualBoxDisk` and `VirtualBoxVmUuid` are optional: the launcher reads them from
 the `.vmx` and the `.vbox`. Set one only to have the launcher check it; a value that differs
 from the VM's file stops the start and names both. A launcher from before phase 7 still needs all

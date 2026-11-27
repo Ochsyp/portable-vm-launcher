@@ -351,6 +351,17 @@ pull request also makes a VMware start stop at a partition mounted in the VM's p
 
 No VM starts.
 
+## Checks for the VM's size (request r9)
+
+The launcher now writes the VM's file when its size differs from what the PC gives it, so:
+
+1. Run the read-only check; it must end with `RESULT: OK`.
+2. Run the dry-run check with `-AlsoVirtualBox`, deploying the branch, with
+   `-ExpectChange '=> VM size changes'` when the size differs on this PC, or
+   `'=> VM size OK'` when it does not. Both pairs of dry runs must show only that change.
+3. One VMware start by the owner, with the guest's own hibernation off. The log shows the
+   `VM size:` line, and the `.vmx` holds the new size; the start after it says `VM size OK`.
+
 ## Rules for the real stick
 
 - Never switch VirtualBox's host I/O cache off for the stick's controller.

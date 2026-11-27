@@ -159,6 +159,19 @@ All notable changes to this project are listed here. The format follows
 - Tests of whole VMware starts and dry runs with VMware's blank at the end of the extent line and
   a tab at the end of the `createType` line: the disk file and its copies stay byte for byte as
   they were, so a later start path that compares the file another way fails a test.
+- The VM's size at each start (request r9). The launcher reads the PC's cores, threads and memory
+  and sizes the VM in the program it starts: all but one core or two threads, 2 to 8 CPUs, and
+  half the PC's memory while leaving the PC at least 6 GB, 4 to 16 GB. It writes the `.vmx`
+  (`numvcpus`, `cpuid.coresPerSocket`, `memsize`) or the `.vbox` (`CPU count`, `RAMSize`) only
+  when the size differs, changing those values and nothing else, through the safe write with
+  copies; the `.vbox` change goes into the same write as its drive letters, and the `.vmx` joins
+  the files whose cut-off writes the next start offers to set right. It leaves the size, and says
+  why, while the VM has a saved state, while VMware Workstation is open, when the PC's numbers
+  cannot be read, when VMware's memory file of a larger size would not fit on the stick, and for
+  a `.vbox` with snapshots or with IOAPIC off. Notes in the log name a PC that is small for the VM
+  and little free memory. A dry run logs the same line and changes nothing. New optional settings:
+  `VmSizing` (`Auto`, `Off`, `Fixed`), `VmCpus`, `VmMemoryGB`, `VmMaxCpus` and `VmMaxMemoryGB`.
+  The stick-check tool knows the new lines and ignores the note on little free memory.
 - `tools\New-StickSettings.ps1`, the stick setup tool (phase 7, second pull request). Run from a
   clone with the stick plugged in, it reads the stick's identity as the launcher checks it, finds
   the `.vmx`, the `.vbox` and `VirtualBox.xml` below the stick folder, checks with the launcher's

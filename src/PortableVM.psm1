@@ -386,6 +386,37 @@ function Invoke-PvmGetPartition {
     Get-Partition -DriveLetter $DriveLetter -ErrorAction Stop
 }
 
+# Return this PC's size, for the VM's size (request r9): Cores and Threads, the processors' cores
+# and logical processors, MemoryMB, the memory installed, and FreeMB, the memory free now; outside
+# Windows nothing yet, which the step "Linux host" adds.
+function Invoke-PvmGetHostSize {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param()
+    Assert-PvmNotUnderTest -Name $MyInvocation.MyCommand.Name
+    if (-not (Test-PvmWindowsHost)) { return $null }
+    $processors = @(Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop)
+    [uint64]$installed = 0
+    foreach ($module in @(Get-CimInstance -ClassName Win32_PhysicalMemory -ErrorAction Stop)) { $installed += [uint64]$module.Capacity }
+    if (-not $installed) { $installed = [uint64](Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory }
+    $system = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+    [pscustomobject]@{
+        Cores    = [int](($processors | Measure-Object -Property NumberOfCores -Sum).Sum)
+        Threads  = [int](($processors | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum)
+        MemoryMB = [int64][Math]::Floor($installed / 1MB)
+        FreeMB   = [int64][Math]::Floor([uint64]$system.FreePhysicalMemory / 1024)
+    }
+}
+
+# Return the bytes free for this account on the drive that holds the path $Path.
+function Invoke-PvmGetFreeSpace {
+    [CmdletBinding()]
+    [OutputType([int64])]
+    param([Parameter(Mandatory)][string]$Path)
+    Assert-PvmNotUnderTest -Name $MyInvocation.MyCommand.Name
+    [IO.DriveInfo]::new([IO.Path]::GetPathRoot([IO.Path]::GetFullPath($Path))).AvailableFreeSpace
+}
+
 # Return the partitions of the disk with the number $Number.
 function Invoke-PvmGetDiskPartition {
     [CmdletBinding()]
@@ -800,6 +831,11 @@ function Get-PvmSettingSchema {
     [pscustomobject]@{ Name = 'VirtualBoxDisk'; Required = $false; Default = $null; Kind = 'Path'; Values = @('.vmdk') }
     [pscustomobject]@{ Name = 'VMwareVmx'; Required = $true; Default = $null; Kind = 'Path'; Values = @('.vmx') }
     [pscustomobject]@{ Name = 'VMwareDisk'; Required = $false; Default = $null; Kind = 'Path'; Values = @('.vmdk') }
+    [pscustomobject]@{ Name = 'VmSizing'; Required = $false; Default = 'Auto'; Kind = 'Choice'; Values = @('Auto', 'Off', 'Fixed') }
+    [pscustomobject]@{ Name = 'VmCpus'; Required = $false; Default = $null; Kind = 'Count'; Values = @() }
+    [pscustomobject]@{ Name = 'VmMemoryGB'; Required = $false; Default = $null; Kind = 'Count'; Values = @() }
+    [pscustomobject]@{ Name = 'VmMaxCpus'; Required = $false; Default = 8; Kind = 'Count'; Values = @() }
+    [pscustomobject]@{ Name = 'VmMaxMemoryGB'; Required = $false; Default = 16; Kind = 'Count'; Values = @() }
 }
 
 # Return what is wrong with the path setting $Value, or nothing when it names a file that ends in
@@ -947,6 +983,13 @@ function Test-PvmSetting {
         -not ($values['DataPartitionStart'] -lt $values['VmSectors'] -and $values['VmSectors'] -le $values['StickSectors'])) {
         'VmSectors: must be above DataPartitionStart and at most StickSectors'
     }
+    # The VM's size (Get-PvmVmSizeTarget): Fixed needs both numbers, and the upper bounds of the
+    # rule are not below its floors of 2 CPUs and 4 GB.
+    if ($good['VmSizing'] -and $values['VmSizing'] -eq 'Fixed') {
+        foreach ($key in 'VmCpus', 'VmMemoryGB') { if (-not $values.ContainsKey($key)) { "${key}: needed when VmSizing is Fixed" } }
+    }
+    if ($good['VmMaxCpus'] -and $values['VmMaxCpus'] -lt 2) { 'VmMaxCpus: must be at least 2' }
+    if ($good['VmMaxMemoryGB'] -and $values['VmMaxMemoryGB'] -lt 4) { 'VmMaxMemoryGB: must be at least 4' }
 }
 
 # Return the checked settings $Settings with the Default of each missing key filled in and the
@@ -2847,9 +2890,9 @@ function Get-PvmMountedVmPartition {
 }
 
 # Return the files a start may write, each followed by its first copy and the copy of the version
-# before its latest rewrite below the backups folder: the VMware descriptor, the .vbox,
+# before its latest rewrite below the backups folder: the .vmx, the VMware descriptor, the .vbox,
 # VirtualBox.xml and the VirtualBox descriptor, the descriptors as $Context.VmFiles names them, or
-# else as the settings do; one that neither names is left out. Each has its Kind (VMwareDisk,
+# else as the settings do; one that neither names is left out. Each has its Kind (Vmx, VMwareDisk,
 # Vbox, VirtualBoxXml, VirtualBoxDisk) and Path; a copy also the file it is Of, whether its copies
 # are disarmed (Disarm), and whether it is the copy of the version before (Previous). With $Kind,
 # only the files of those kinds.
@@ -2858,12 +2901,13 @@ function Get-PvmWrittenPath {
     [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory)][pscustomobject]$Context,
-        [string[]]$Kind = @('VMwareDisk', 'Vbox', 'VirtualBoxXml', 'VirtualBoxDisk')
+        [string[]]$Kind = @('Vmx', 'VMwareDisk', 'Vbox', 'VirtualBoxXml', 'VirtualBoxDisk')
     )
     $settings = $Context.Settings
     $backup = @{ Root = $Context.Root; Backups = $Context.Backups }
     $vmFiles = if ($Context.PSObject.Properties.Name -contains 'VmFiles' -and $null -ne $Context.VmFiles) { $Context.VmFiles } else { New-PvmVmFileRecord -Context $Context }
     $files = @(
+        @{ Kind = 'Vmx'; Path = (Join-PvmStickPath -Root $Context.Root -Path $settings['VMwareVmx']); Suffix = '.launcher-backup' }
         @{ Kind = 'VMwareDisk'; Path = $vmFiles.VMwareDisk; Suffix = '.orig' }
         @{ Kind = 'Vbox'; Path = (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxVbox']); Suffix = '.launcher-backup' }
         @{ Kind = 'VirtualBoxXml'; Path = (Join-Path (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxHome']) 'VirtualBox.xml'); Suffix = '.launcher-backup' }
@@ -2891,7 +2935,7 @@ function Assert-PvmNoWrittenLeftover {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][pscustomobject]$Context,
-        [string[]]$Kind = @('VMwareDisk', 'Vbox', 'VirtualBoxXml', 'VirtualBoxDisk')
+        [string[]]$Kind = @('Vmx', 'VMwareDisk', 'Vbox', 'VirtualBoxXml', 'VirtualBoxDisk')
     )
     $broken = @{}
     $open = $null
@@ -3124,6 +3168,264 @@ function Assert-PvmVMwareReady {
     if ($Context.VMwareState.State -eq 'Saved') {
         $question = Format-PvmMessage -Names $Context.Names -Template "{VM} is suspended in VMware. Resume it only if the stick has not been booted any other way since the suspend; otherwise the resume can corrupt {guest}'s disk.`n`nResume {vm} now?"
         Confirm-PvmResume -Context $Context -Program 'VMware' -Question $question
+    }
+}
+
+# --- The VM's size ---------------------------------------------------------------------------
+# Request r9: at each start the launcher sizes the VM to the PC, in the program that starts it,
+# writing the VM's file only when the size differs, never while the VM has a saved state or VMware
+# Workstation is open, with copies of the file as for any rewrite.
+
+# Return the VM's size for a PC with $Cores cores, $Threads logical processors and $MemoryMB of
+# memory: Cpus, the smaller of all but one core and all but two threads, at least 2, at most
+# $MaxCpus and never more than the threads; MemoryMB, the smaller of half the memory and all but
+# 6 GB, rounded down to 256 MB, at least 4 GB and at most $MaxMemoryGB; and Small, whether the PC
+# then keeps less than 6 GB or no core of its own.
+function Get-PvmVmSize {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][int]$Cores,
+        [Parameter(Mandatory)][int]$Threads,
+        [Parameter(Mandatory)][int64]$MemoryMB,
+        [int]$MaxCpus = 8,
+        [int]$MaxMemoryGB = 16
+    )
+    $cpus = [Math]::Min($Cores - 1, $Threads - 2)
+    $cpus = [Math]::Min([Math]::Min([Math]::Max($cpus, 2), $MaxCpus), $Threads)
+    [int64]$memory = [Math]::Min([Math]::Floor($MemoryMB / 2), $MemoryMB - 6144)
+    $memory = [int64]([Math]::Floor($memory / 256) * 256)
+    $memory = [Math]::Min([Math]::Max($memory, [int64]4096), [int64]$MaxMemoryGB * 1024)
+    [pscustomobject]@{ Cpus = [int]$cpus; MemoryMB = [int64]$memory; Small = (($MemoryMB - $memory) -lt 6144) -or (($Cores - $cpus) -lt 1) }
+}
+
+# Return the size the VM gets now, as the settings in $Context say: Why, the reason to leave the
+# size as it is, or Cpus, MemoryMB, Detail for the log line and Notes, the lines to log after it.
+# VmSizing Off leaves it; Fixed gives VmCpus and VmMemoryGB; Auto, the default, gives the rule's
+# size for this PC (Get-PvmVmSize, Invoke-PvmGetHostSize).
+function Get-PvmVmSizeTarget {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param([Parameter(Mandatory)][pscustomobject]$Context)
+    $settings = $Context.Settings
+    if ($settings['VmSizing'] -eq 'Off') { return [pscustomobject]@{ Why = 'VmSizing in settings.psd1 is Off' } }
+    if ($settings['VmSizing'] -eq 'Fixed') {
+        return [pscustomobject]@{ Why = ''; Cpus = [int]$settings['VmCpus']; MemoryMB = [int64]$settings['VmMemoryGB'] * 1024; Detail = '(VmSizing Fixed)'; Notes = @() }
+    }
+    $pc = $null
+    try { $pc = Invoke-PvmGetHostSize } catch { $pc = $null }
+    if ($null -eq $pc -or $pc.Cores -lt 1 -or $pc.Threads -lt 1 -or $pc.MemoryMB -lt 1) { return [pscustomobject]@{ Why = 'this PC''s cores and memory cannot be read' } }
+    $size = Get-PvmVmSize -Cores $pc.Cores -Threads $pc.Threads -MemoryMB $pc.MemoryMB -MaxCpus $settings['VmMaxCpus'] -MaxMemoryGB $settings['VmMaxMemoryGB']
+    $notes = @(
+        if ($size.Small) { 'Note: this PC is small for the VM; with it running, the PC keeps less than 6 GB of memory or no core of its own.' }
+        if ($null -ne $pc.FreeMB -and $pc.FreeMB -lt $size.MemoryMB + 2048) { 'Note: this PC has less free memory than the VM''s size and 2 GB more; close other programs if the VM is slow.' }
+    )
+    [pscustomobject]@{ Why = ''; Cpus = $size.Cpus; MemoryMB = $size.MemoryMB; Detail = "(this PC: $($pc.Cores) cores, $($pc.Threads) threads, $($pc.MemoryMB) MB)"; Notes = $notes }
+}
+
+# Return whether each of the files $Path that exists may be rewritten (Assert-PvmRewritable): not
+# read-only and no link. The VM's size, which can wait, leaves such a file as it is.
+function Test-PvmRewritable {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)][string[]]$Path)
+    foreach ($file in $Path) {
+        if (-not [IO.File]::Exists($file)) { continue }
+        try { Assert-PvmRewritable -Path $file } catch { return $false }
+    }
+    $true
+}
+
+# Return the size $Cpus and $Memory, as the VM's file holds them, as the log shows it.
+function Format-PvmVmSize {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [AllowEmptyString()][string]$Cpus,
+        [AllowEmptyString()][string]$Memory
+    )
+    "$Cpus CPUs, $(if ($Memory) { "$Memory MB" } else { 'memory not set' })"
+}
+
+# Return the .vmx text $Text with numvcpus and cpuid.coresPerSocket set to $Cpus, one socket, and
+# memsize to $MemoryMB, as Text, each value changed in place and a missing key added at the end,
+# so that every other byte stays; or Problem, why it is left, when a key is set more than once or
+# not as a quoted value.
+function ConvertTo-PvmVmxSizeText {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory)][int]$Cpus,
+        [Parameter(Mandatory)][int64]$MemoryMB
+    )
+    $newline = if ($Text.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $new = $Text
+    foreach ($pair in @(@('numvcpus', "$Cpus"), @('cpuid.coresPerSocket', "$Cpus"), @('memsize', "$MemoryMB"))) {
+        $key = [regex]::Escape($pair[0])
+        $lines = @([regex]::Matches($new, '(?im)^[ \t]*' + $key + '[ \t]*='))
+        if ($lines.Count -gt 1) { return [pscustomobject]@{ Text = ''; Problem = "the .vmx sets $($pair[0]) more than once" } }
+        if ($lines.Count -eq 1) {
+            $value = [regex]::Match($new, '(?im)^([ \t]*' + $key + '[ \t]*=[ \t]*)"[^"\r\n]*"')
+            if (-not $value.Success) { return [pscustomobject]@{ Text = ''; Problem = "the .vmx sets $($pair[0]) in a form the launcher does not change" } }
+            $start = $value.Index + $value.Groups[1].Length
+            $new = $new.Remove($start, $value.Length - $value.Groups[1].Length).Insert($start, '"' + $pair[1] + '"')
+        } else {
+            if ($new.Length -and -not $new.EndsWith("`n")) { $new += $newline }
+            $new += $pair[0] + ' = "' + $pair[1] + '"' + $newline
+        }
+    }
+    [pscustomobject]@{ Text = $new; Problem = '' }
+}
+
+# Return the .vbox text $Text with the Machine's CPU count set to $Cpus and its RAMSize to
+# $MemoryMB, as Text, the attributes changed or added in place so that every other byte stays; or
+# Problem, why it is left: snapshots, whose hardware stays as it was saved; not one CPU and one
+# Memory element; or more than one CPU with IOAPIC off, which VirtualBox refuses.
+function ConvertTo-PvmVboxSizeText {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory)][int]$Cpus,
+        [Parameter(Mandatory)][int64]$MemoryMB
+    )
+    if ($Text -match '<Snapshot\b') { return [pscustomobject]@{ Text = ''; Problem = 'the .vbox holds snapshots, whose hardware the launcher leaves as it is' } }
+    $cpu = @([regex]::Matches($Text, '<CPU\b[^>]*>'))
+    $memory = @([regex]::Matches($Text, '<Memory\b[^>]*>'))
+    if ($cpu.Count -ne 1 -or $memory.Count -ne 1) { return [pscustomobject]@{ Text = ''; Problem = 'the .vbox has no CPU or Memory element of its own' } }
+    if ($Cpus -gt 1 -and $Text -notmatch '<IOAPIC\b[^>]*\benabled="true"') { return [pscustomobject]@{ Text = ''; Problem = 'IOAPIC is off in the .vbox, which more than one CPU needs' } }
+    $new = $Text
+    # The later element first, so that the earlier one's position stays.
+    foreach ($tag in @(@($cpu[0], 'count', "$Cpus", '<CPU'), @($memory[0], 'RAMSize', "$MemoryMB", '<Memory')) | Sort-Object { $_[0].Index } -Descending) {
+        $match = $tag[0]
+        $attribute = [regex]::Match($match.Value, '\s' + $tag[1] + '="[^"]*"')
+        $value = if ($attribute.Success) { $match.Value.Remove($attribute.Index, $attribute.Length).Insert($attribute.Index, ' ' + $tag[1] + '="' + $tag[2] + '"') }
+        else { $match.Value.Insert($tag[3].Length, ' ' + $tag[1] + '="' + $tag[2] + '"') }
+        $new = $new.Remove($match.Index, $match.Length).Insert($match.Index, $value)
+    }
+    [pscustomobject]@{ Text = $new; Problem = '' }
+}
+
+# Log the VM's size line and its notes, or why the size stays, to the log of $Context, for the size
+# $Old in the VM's file and the size $Target (Get-PvmVmSizeTarget), unless $Why is given. Returns
+# whether the file is to change.
+function Write-PvmVmSizeLine {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [AllowEmptyString()][string]$Why = '',
+        [AllowNull()]$Target,
+        [AllowEmptyString()][string]$Old = '',
+        [switch]$Same
+    )
+    $log = $Context.LogPath
+    if ($Why) {
+        Write-PvmLog -Path $log -Message "VM size left as it is, because $Why."
+        return $false
+    }
+    $new = Format-PvmVmSize -Cpus "$($Target.Cpus)" -Memory "$($Target.MemoryMB)"
+    if ($Same) { Write-PvmLog -Path $log -Message "VM size OK: $new" }
+    else { Write-PvmLog -Path $log -Message "VM size: $Old -> $new $($Target.Detail)" }
+    foreach ($note in @($Target.Notes)) { Write-PvmLog -Path $log -Message $note }
+    -not $Same
+}
+
+# Return the change of the .vmx $Vmx that sets the VMware VM's size (Get-PvmVmSizeTarget), for
+# Save-PvmFileChange, or $null, after logging the size or why it stays: VmSizing Off, a saved state
+# that a resume needs as it is, VMware Workstation open, which can write its own copy of the .vmx
+# back, this PC's numbers unknown, a .vmx the launcher does not change, or, when VMware keeps the
+# VM's memory in a file beside the .vmx, too little free space for the larger size.
+function Get-PvmVMwareSizeChange {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][string]$Vmx
+    )
+    $line = @{ Context = $Context }
+    if ($Context.Settings['VmSizing'] -eq 'Off') { $null = Write-PvmVmSizeLine @line -Why 'VmSizing in settings.psd1 is Off'; return $null }
+    if ($Context.VMwareState.State -eq 'Saved') { $null = Write-PvmVmSizeLine @line -Why 'the VM has a saved state, which needs the same hardware to resume'; return $null }
+    if (@(Invoke-PvmGetProcess -Name 'vmware').Count) { $null = Write-PvmVmSizeLine @line -Why 'VMware Workstation is open and could write its own copy of the .vmx back'; return $null }
+    $target = Get-PvmVmSizeTarget -Context $Context
+    if ($target.Why) { $null = Write-PvmVmSizeLine @line -Why $target.Why; return $null }
+    $latin1 = [Text.Encoding]::GetEncoding(28591)
+    $bytes = [IO.File]::ReadAllBytes($Vmx)
+    $text = $latin1.GetString($bytes)
+    $values = ConvertFrom-PvmVmxText -Text $text
+    $cpus = if ($values['numvcpus']) { $values['numvcpus'] } else { '1' }
+    $old = Format-PvmVmSize -Cpus $cpus -Memory "$($values['memsize'])"
+    if ($cpus -eq "$($target.Cpus)" -and $values['cpuid.corespersocket'] -eq "$($target.Cpus)" -and $values['memsize'] -eq "$($target.MemoryMB)") {
+        $null = Write-PvmVmSizeLine @line -Target $target -Same
+        return $null
+    }
+    $converted = ConvertTo-PvmVmxSizeText -Text $text -Cpus $target.Cpus -MemoryMB $target.MemoryMB
+    if ($converted.Problem) { $null = Write-PvmVmSizeLine @line -Why $converted.Problem; return $null }
+    [int64]$memory = 0
+    $null = [int64]::TryParse("$($values['memsize'])", [ref]$memory)
+    if ($target.MemoryMB -gt $memory -and "$($values['mainmem.usenamedfile'])" -ne 'FALSE') {
+        $free = $null
+        try { $free = Invoke-PvmGetFreeSpace -Path $Vmx } catch { $free = $null }
+        if ($null -eq $free) { $null = Write-PvmVmSizeLine @line -Why 'the free space on the stick cannot be read'; return $null }
+        if ($free -lt $target.MemoryMB * 1MB) { $null = Write-PvmVmSizeLine @line -Why 'the stick has too little free space for VMware''s memory file of the larger size'; return $null }
+    }
+    $copies = @{ Root = $Context.Root; Backups = $Context.Backups; Path = $Vmx }
+    $previous = Get-PvmBackupPath @copies -Suffix '.previous.launcher-backup'
+    if (-not (Test-PvmRewritable -Path $Vmx, $previous)) { $null = Write-PvmVmSizeLine @line -Why 'the .vmx, or its copy below LauncherData\backups, is read-only or a link, which the launcher does not rewrite'; return $null }
+    $null = Write-PvmVmSizeLine @line -Target $target -Old $old
+    [pscustomobject]@{
+        Path = $Vmx; Old = $bytes; New = $latin1.GetBytes($converted.Text); FirstBackup = (Get-PvmBackupPath @copies -Suffix '.launcher-backup'); PreviousBackup = $previous
+        Disarm = $false; Action = 'Set the VM''s CPUs and memory'
+    }
+}
+
+# Return the change $Change of the .vbox $Vbox (Get-PvmDriveLetterChange, or $null) with the
+# VirtualBox VM's size (Get-PvmVmSizeTarget) set too, as one write with the copies $BackupPath and
+# $PreviousPath, or $Change as it is, after logging the size or why it stays: VmSizing Off, a saved
+# state, this PC's numbers unknown, or a .vbox the launcher does not change
+# (ConvertTo-PvmVboxSizeText). VirtualBox and its background service are closed by then.
+function Add-PvmVirtualBoxSizeChange {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][string]$Vbox,
+        [AllowNull()]$Change,
+        [Parameter(Mandatory)][string]$BackupPath,
+        [Parameter(Mandatory)][string]$PreviousPath
+    )
+    $line = @{ Context = $Context }
+    if ($Context.Settings['VmSizing'] -eq 'Off') { $null = Write-PvmVmSizeLine @line -Why 'VmSizing in settings.psd1 is Off'; return $Change }
+    if ($Context.VirtualBoxState.State -eq 'Saved') { $null = Write-PvmVmSizeLine @line -Why 'the VM has a saved state, which needs the same hardware to resume'; return $Change }
+    $target = Get-PvmVmSizeTarget -Context $Context
+    if ($target.Why) { $null = Write-PvmVmSizeLine @line -Why $target.Why; return $Change }
+    $strict = New-Object System.Text.UTF8Encoding $false, $true
+    $bytes = if ($null -ne $Change) { $Change.New } else { [IO.File]::ReadAllBytes($Vbox) }
+    try { $text = $strict.GetString($bytes) }
+    catch { $null = Write-PvmVmSizeLine @line -Why 'the .vbox is not UTF-8 text, as VirtualBox writes it'; return $Change }
+    $cpuTag = [regex]::Match($text, '<CPU\b[^>]*>')
+    $count = [regex]::Match($cpuTag.Value, '\scount="([^"]*)"')
+    $cpus = if ($count.Success) { $count.Groups[1].Value } else { '1' }
+    $ram = [regex]::Match([regex]::Match($text, '<Memory\b[^>]*>').Value, '\sRAMSize="([^"]*)"')
+    $memory = if ($ram.Success) { $ram.Groups[1].Value } else { '' }
+    if ($cpus -eq "$($target.Cpus)" -and $memory -eq "$($target.MemoryMB)") { $null = Write-PvmVmSizeLine @line -Target $target -Same; return $Change }
+    $converted = ConvertTo-PvmVboxSizeText -Text $text -Cpus $target.Cpus -MemoryMB $target.MemoryMB
+    if ($converted.Problem) { $null = Write-PvmVmSizeLine @line -Why $converted.Problem; return $Change }
+    # A drive-letter change has checked that both files may be rewritten.
+    if ($null -eq $Change -and -not (Test-PvmRewritable -Path $Vbox, $PreviousPath)) {
+        $null = Write-PvmVmSizeLine @line -Why 'the .vbox, or its copy below LauncherData\backups, is read-only or a link, which the launcher does not rewrite'
+        return $Change
+    }
+    $null = Write-PvmVmSizeLine @line -Target $target -Old (Format-PvmVmSize -Cpus $cpus -Memory $memory)
+    if ($null -ne $Change) {
+        $Change.New = $strict.GetBytes($converted.Text)
+        $Change.Action = "$($Change.Action), and set the VM's CPUs and memory"
+        return $Change
+    }
+    [pscustomobject]@{
+        Path = $Vbox; Old = $bytes; New = $strict.GetBytes($converted.Text); FirstBackup = $BackupPath; PreviousBackup = $PreviousPath
+        Disarm = $false; Action = 'Set the VM''s CPUs and memory'
     }
 }
 
@@ -3390,6 +3692,9 @@ function Invoke-PvmVMware {
     Assert-PvmVMwareReady -Context $Context -Vmx $vmx
 
     Enter-PvmStep -Context $Context -Name 'files'
+    # The VM's size (request r9), in the .vmx.
+    $size = Get-PvmVMwareSizeChange -Context $Context -Vmx $vmx
+    if ($null -ne $size) { Save-PvmFileChange -Change $size -LogPath $log -WhatIf:$Context.DryRun }
     # The disk file the .vmx attaches (Resolve-PvmVMwareFile); a dry run that found none has
     # nothing to point at the stick.
     $disk = $Context.VmFiles.VMwareDisk
@@ -3567,8 +3872,12 @@ function Invoke-PvmVirtualBox {
     # gives the stick folder as Windows spells it, which on Windows is $Context.Root.
     $letters = @{ Root = $Context.Location.Path; Letter = $Context.Location.Letter; Known = @(@($vbox, $disk) | Where-Object { $_ }); LogPath = $log }
     # Every file is checked first, so that a refusal leaves all of them as they are.
+    # The VM's size (request r9) goes into the same write of the .vbox as its drive letters.
+    $vboxCopies = @{ BackupPath = (Get-PvmBackupPath @backup -Path $vbox -Suffix '.launcher-backup'); PreviousPath = (Get-PvmBackupPath @backup -Path $vbox -Suffix '.previous.launcher-backup') }
+    $vboxChange = Get-PvmDriveLetterChange -Path $vbox @vboxCopies @letters
+    $vboxChange = Add-PvmVirtualBoxSizeChange -Context $Context -Vbox $vbox -Change $vboxChange @vboxCopies
     $changes = @(@(
-            Get-PvmDriveLetterChange -Path $vbox -BackupPath (Get-PvmBackupPath @backup -Path $vbox -Suffix '.launcher-backup') -PreviousPath (Get-PvmBackupPath @backup -Path $vbox -Suffix '.previous.launcher-backup') @letters
+            $vboxChange
             Get-PvmDriveLetterChange -Path $registry -BackupPath (Get-PvmBackupPath @backup -Path $registry -Suffix '.launcher-backup') -PreviousPath (Get-PvmBackupPath @backup -Path $registry -Suffix '.previous.launcher-backup') @letters
             if ($disk) { Get-PvmDescriptorChange -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @backup -Path $disk -Suffix '.orig') -PreviousPath (Get-PvmBackupPath @backup -Path $disk -Suffix '.previous.orig') -LogPath $log }
         ) | Where-Object { $null -ne $_ })
@@ -3642,6 +3951,7 @@ function Invoke-PvmLaunch {
     # which VirtualBox disk file and the VM's UUID.
     $Context.StickDisk = $disk
     $Context.VmFiles = New-PvmVmFileRecord -Context $Context
+    Assert-PvmNoWrittenLeftover -Context $Context -Kind 'Vmx'
     Resolve-PvmVMwareFile -Context $Context
     Assert-PvmNoWrittenLeftover -Context $Context -Kind 'VMwareDisk', 'Vbox', 'VirtualBoxXml'
     Resolve-PvmVirtualBoxFile -Context $Context

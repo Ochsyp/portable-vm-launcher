@@ -273,7 +273,7 @@ Describe 'Static guards' {
     }
 
     It 'let only the adapters in the module read the PC or run programs' {
-        $adapters = 'Invoke-PvmGetPartition', 'Invoke-PvmGetDiskPartition', 'Invoke-PvmGetDisk', 'Invoke-PvmGetProcess', 'Invoke-PvmTestProcess', 'Invoke-PvmGetDeviceGuard',
+        $adapters = 'Invoke-PvmGetPartition', 'Invoke-PvmGetDiskPartition', 'Invoke-PvmGetDisk', 'Invoke-PvmGetProcess', 'Invoke-PvmGetHostSize', 'Invoke-PvmGetFreeSpace', 'Invoke-PvmTestProcess', 'Invoke-PvmGetDeviceGuard',
         'Invoke-PvmGetRegistryValue', 'Invoke-PvmNative', 'Invoke-PvmStartProcess', 'Invoke-PvmSetEnvironment', 'Invoke-PvmSleep',
         'Invoke-PvmTestAdministrator', 'Invoke-PvmEnterLock', 'Invoke-PvmExitLock', 'Invoke-PvmGetSignature'
         $reads = 'Get-Partition', 'Get-Disk', 'Get-Volume', 'Get-PhysicalDisk', 'Get-CimInstance', 'Get-WmiObject', 'Get-Process',
@@ -452,7 +452,7 @@ Describe 'Static guards' {
             $name = if ($parent) { $parent.Name } else { '' }
             $counts[$name] = 1 + [int]$counts[$name]
         }
-        $expected = @{ 'Invoke-PvmStopUnlessDryRun' = 1; 'Confirm-PvmResume' = 1; 'Confirm-PvmLeftoverFix' = 1; 'Invoke-PvmVMware' = 3; 'Invoke-PvmVirtualBox' = 2; 'Invoke-PortableVM' = 4 }
+        $expected = @{ 'Invoke-PvmStopUnlessDryRun' = 1; 'Confirm-PvmResume' = 1; 'Confirm-PvmLeftoverFix' = 1; 'Invoke-PvmVMware' = 4; 'Invoke-PvmVirtualBox' = 2; 'Invoke-PortableVM' = 4 }
         @($counts.Keys | Sort-Object | ForEach-Object { "$_=$($counts[$_])" }) | Should -BeExactly @($expected.Keys | Sort-Object | ForEach-Object { "$_=$($expected[$_])" })
     }
 
@@ -515,9 +515,11 @@ Describe 'Static guards' {
         # A new sentence with a cause after "because" needs a change of these counts on purpose.
         # Get-PvmWriteCause words a cause of Windows through Format-PvmBecause too. The reason for a
         # descriptor rewrite is no error, and Format-PvmDescriptorReason words it. The guided fix
-        # holds its cause, worded by Format-PvmBecause, in $cause.
+        # holds its cause, worded by Format-PvmBecause, in $cause. The VM's size names its reason,
+        # no error, in $Why.
         $text = [IO.File]::ReadAllText($script:module)
-        [regex]::Matches($text, 'because \$').Count | Should -Be 6
+        [regex]::Matches($text, 'because \$').Count | Should -Be 7
+        [regex]::Matches($text, 'VM size left as it is, because \$Why\.').Count | Should -Be 1
         [regex]::Matches($text, 'because \$\((Format-PvmBecause -Cause|Get-PvmWriteCause -ErrorRecord|Format-PvmDescriptorReason -Kinds) ').Count | Should -Be 5
         [regex]::Matches($text, '\$cause = Format-PvmBecause -Cause \(Get-PvmPathCause -Path \$step\.Path -ErrorRecord \$_\)').Count | Should -Be 1
     }
@@ -615,8 +617,8 @@ Describe 'Example settings' {
         Remove-Module PortableVM
     }
 
-    It 'has exactly the keys of settings schema 2, those the VM''s files give as comments' {
-        $fromVm = 'VirtualBoxVmUuid', 'VirtualBoxDisk', 'VMwareDisk'
+    It 'has exactly the keys of settings schema 2, those the VM''s files give and the fixed VM size as comments' {
+        $fromVm = 'VirtualBoxVmUuid', 'VirtualBoxDisk', 'VMwareDisk', 'VmCpus', 'VmMemoryGB'
         (@($script:settings.Keys | Sort-Object) -join ', ') | Should -BeExactly (@($script:schema | Where-Object { $fromVm -notcontains $_ } | Sort-Object) -join ', ')
         $text = [IO.File]::ReadAllText($script:example)
         foreach ($key in $fromVm) { $text | Should -Match ('(?m)^    #' + $key + ' +=') }
