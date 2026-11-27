@@ -2732,6 +2732,14 @@ Describe 'New-StickSettings' -Tag 'WindowsOnly' {
         Join-Path $script:setupOut '*' | Should -Not -Exist
     }
 
+    It 'sets up a new stick that has no launcher yet, as the deploy tool needs the settings first' {
+        Remove-Item -LiteralPath (Join-Path $script:setupStick 'Launcher') -Recurse
+        $result = Invoke-SetupCheck
+        $result.ExitCode | Should -Be 0 -Because ($result.Lines -join "`n")
+        [IO.File]::ReadAllText($script:settingsPath) | Should -BeExactly $script:setupText
+        Join-Path $script:setupStick 'Launcher' | Should -Not -Exist
+    }
+
     It 'never replaces settings that are there, and changes nothing' {
         Write-TestFile -Path $script:settingsPath -Text 'x'
         $result = Invoke-SetupCheck
@@ -2742,25 +2750,25 @@ Describe 'New-StickSettings' -Tag 'WindowsOnly' {
 
     It 'compares with the stick''s settings, writing only its own copy on the PC: <Case>' -ForEach @(
         @{ Case = 'the same, with keys of its own'; Change = { param($Text) $Text.Replace('    VMwareVmx', "    Hypervisor = 'VMware'`r`n    VMwareDisk = 'VMware\stick.vmdk'`r`n    VMwareVmx") }
-            Code = 0; Result = 'RESULT: SAME - every key the tool would write equals the stick''s settings'; Differ = 'none'; Own = 'Hypervisor, VMwareDisk'
+            Code = 0; Last = 'RESULT: SAME - every key the tool would write equals the stick''s settings'; Differ = 'none'; Own = 'Hypervisor, VMwareDisk'
         }
         @{ Case = 'other sizes'; Change = { param($Text) $Text.Replace('StickSectors = 4000000', 'StickSectors = 3999999').Replace('VmSectors = 3900000', 'VmSectors = 3800000') }
-            Code = 1; Result = 'RESULT: DIFFERENT - StickSectors, VmSectors'; Differ = 'StickSectors, VmSectors'; Own = 'none'
+            Code = 1; Last = 'RESULT: DIFFERENT - StickSectors, VmSectors'; Differ = 'StickSectors, VmSectors'; Own = 'none'
         }
         @{ Case = 'a path in another case and with /'; Change = { param($Text) $Text.Replace("'VMware\Test VM.vmx'", "'vmware/Test VM.VMX'") }
-            Code = 0; Result = 'RESULT: SAME - every key the tool would write equals the stick''s settings'; Differ = 'none'; Own = 'none'
+            Code = 0; Last = 'RESULT: SAME - every key the tool would write equals the stick''s settings'; Differ = 'none'; Own = 'none'
         }
         @{ Case = 'a disk file and a UUID that disagree with the VM''s files'; Change = {
                 param($Text) $Text.Replace('    VMwareVmx', "    VMwareDisk = 'VMware\other.vmdk'`r`n    VirtualBoxVmUuid = '5ca1ab1e-0000-4000-8000-0000000000ff'`r`n    VMwareVmx")
             }
-            Code = 1; Result = 'RESULT: DIFFERENT - VirtualBoxVmUuid, VMwareDisk'; Differ = 'VirtualBoxVmUuid, VMwareDisk'; Own = 'VirtualBoxVmUuid, VMwareDisk'
+            Code = 1; Last = 'RESULT: DIFFERENT - VirtualBoxVmUuid, VMwareDisk'; Differ = 'VirtualBoxVmUuid, VMwareDisk'; Own = 'VirtualBoxVmUuid, VMwareDisk'
         }
     ) {
         Write-TestFile -Path $script:settingsPath -Text (& $Change $script:setupText)
         $before = Get-SetupTree -Root $script:setupStick
         $result = Invoke-SetupCheck -Compare
         $result.ExitCode | Should -Be $Code -Because ($result.Lines -join "`n")
-        $result.Lines[-1] | Should -BeExactly $Result
+        $result.Lines[-1] | Should -BeExactly $Last
         $result.Lines | Should -Contain "  keys that differ: $Differ"
         $result.Lines | Should -Contain "  keys set only in the stick's settings: $Own"
         Get-SetupTree -Root $script:setupStick | Should -BeExactly $before

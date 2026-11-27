@@ -336,6 +336,17 @@ first, before anything is deployed:
 
 No VM start is needed, and nothing is changed in VirtualBox or VMware.
 
+## Checks for the setup tool
+
+The setup tool writes nothing on a stick that has settings, so its check is read-only:
+
+1. Run `tools\New-StickSettings.ps1 -Compare`. It must end with `RESULT: SAME`; keys set only in
+   the stick's settings, such as `Hypervisor` or the optional disk keys, are listed by name and
+   are no difference.
+2. Run the read-only check; it must end with `RESULT: OK`.
+
+No deploy is needed, since the launcher on the stick does not change; no VM starts.
+
 ## Rules for the real stick
 
 - Never switch VirtualBox's host I/O cache off for the stick's controller.

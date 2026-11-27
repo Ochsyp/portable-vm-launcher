@@ -200,7 +200,24 @@ of the process that wrote it:
 
 ## Settings
 
-Copy `examples\settings.example.psd1` from this repository to `LauncherData\settings.psd1` on
+`tools\New-StickSettings.ps1` writes `LauncherData\settings.psd1` for a stick, run from a clone
+of this repository with the stick plugged in and `X:\` as the folder that holds, or is to hold,
+`Launcher` and `LauncherData`:
+
+```text
+powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\New-StickSettings.ps1 -Target X:\
+```
+
+It reads the stick's identity as the launcher checks it and finds the one `.vmx`, `.vbox` and
+`VirtualBox.xml` below that folder; `-VMwareVmx`, `-VirtualBoxVbox` and `-VirtualBoxHome` name
+them when there are more. It writes the file only when there is none and only when each VM file
+attaches one raw disk on the stick, and never replaces one. With `-Compare` it writes nothing on
+the stick: it names the keys that differ from the settings there, and keeps the file it would
+write below `%LOCALAPPDATA%\PortableVM\setup` on the PC. It needs no administrator rights and
+prints key names, never values. Without `-Target` it takes the one folder with a `Launcher`
+folder at a drive's root or one level below.
+
+Or copy `examples\settings.example.psd1` from this repository to `LauncherData\settings.psd1` on
 the stick, fill it in and delete its `IsExample` line; its comments say how to read each value.
 Until then the launcher stops and says the file is still the example. The settings follow
 schema 2 (`SchemaVersion = 2`): every value is checked before the launcher reads the PC, and a
@@ -287,6 +304,8 @@ What a stick, a script or a user may rely on between versions:
   `tools\Compare-StickDryRun.ps1` 0 when the check passed, 1 when it refused or failed;
   `tools\Test-StickState.ps1` 0 when nothing needs attention, 1 when something does, 2 when it
   cannot run;
+  `tools\New-StickSettings.ps1` 0 when it wrote the settings or they are the same, 1 when they
+  differ or it wrote nothing, 2 when it cannot run;
   `tools\Find-PrivateData.ps1` 0 when clean, 1 on a finding, 2 when it cannot run.
 - The settings are `LauncherData\settings.psd1` in schema 2; `examples\settings.example.psd1`
   lists every key with its default.
