@@ -295,6 +295,26 @@ Describe 'Checking settings against schema 2' {
     }
 }
 
+Describe 'The VM size settings' {
+    It 'checks them: <Case>' -ForEach @(
+        @{ Case = 'Fixed without its numbers'; Change = @{ VmSizing = 'Fixed' }; Expect = @('VmCpus: needed when VmSizing is Fixed', 'VmMemoryGB: needed when VmSizing is Fixed') }
+        @{ Case = 'Fixed with both'; Change = @{ VmSizing = 'Fixed'; VmCpus = 4; VmMemoryGB = 6 }; Expect = @() }
+        @{ Case = 'an unknown word'; Change = @{ VmSizing = 'Max' }; Expect = @("VmSizing: must be 'Auto', 'Off' or 'Fixed'") }
+        @{ Case = 'upper bounds below the floors'; Change = @{ VmMaxCpus = 1; VmMaxMemoryGB = 3 }; Expect = @('VmMaxCpus: must be at least 2', 'VmMaxMemoryGB: must be at least 4') }
+        @{ Case = 'a number that is no whole number'; Change = @{ VmCpus = 'four' }; Expect = @('VmCpus: must be a whole number above 0') }
+    ) {
+        @(Test-PvmSetting -Settings (Get-GoodSetting -Change $Change)) | Should -BeExactly $Expect
+    }
+
+    It 'size the VM by the rule unless set otherwise' {
+        $merged = Merge-PvmSetting -Settings (Get-GoodSetting)
+        $merged['VmSizing'] | Should -BeExactly 'Auto'
+        $merged['VmMaxCpus'] | Should -Be 8
+        $merged['VmMaxMemoryGB'] | Should -Be 16
+        $merged['VmCpus'] | Should -BeNullOrEmpty
+    }
+}
+
 Describe 'Filling in the defaults' {
     It 'gives each missing optional key its default and the sector values as [int64]' {
         $merged = Merge-PvmSetting -Settings (Get-GoodSetting)

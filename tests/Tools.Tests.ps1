@@ -1634,6 +1634,11 @@ Describe 'Compare-StickDryRun: kinds of log lines' {
         @{ Message = 'Fix confirmed: A write of Q:\VMware\stick.vmdk did not finish. To set it right, remove stick.vmdk.pvm-tmp; stick.vmdk itself is whole.'; Kind = 'fix of a write that did not finish confirmed' }
         @{ Message = 'Moved aside: Q:\VMware\stick.vmdk.pvm-tmp -> Q:\LauncherData\backups\removed\20261112-101530\VMware\stick.vmdk.pvm-tmp'; Kind = 'a file the fix moved aside' }
         @{ Message = 'Renamed: Q:\VMware\stick.vmdk.pvm-old -> Q:\VMware\stick.vmdk'; Kind = 'a file the fix renamed' }
+        @{ Message = 'VM size OK: 7 CPUs, 16384 MB'; Kind = 'VM size OK' }
+        @{ Message = 'VM size: 6 CPUs, 12288 MB -> 7 CPUs, 16384 MB (this PC: 8 cores, 16 threads, 32768 MB)'; Kind = 'VM size changes' }
+        @{ Message = 'VM size left as it is, because VmSizing in settings.psd1 is Off.'; Kind = 'VM size left as it is' }
+        @{ Message = 'Note: this PC is small for the VM; with it running, the PC keeps less than 6 GB of memory or no core of its own.'; Kind = 'note: a PC small for the VM' }
+        @{ Message = 'Note: this PC has less free memory than the VM''s size and 2 GB more; close other programs if the VM is slow.'; Kind = 'note: little free memory' }
         @{ Message = 'Started with VirtualBox 7.1.4r165100'; Kind = 'started with VirtualBox' }
     ) {
         Get-CompareKind -Message $Message -Version 'v2' | Should -BeExactly $Kind
@@ -2234,6 +2239,8 @@ $module = Import-Module (Join-Path $Root 'Launcher\PortableVM.psm1') -PassThru -
     function script:Invoke-PvmExitLock { param($Lock) }
     function script:Invoke-PvmGetPartition { param($DriveLetter) [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512 } }
     function script:Invoke-PvmGetDiskPartition { param($Number) [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512 } }
+    function script:Invoke-PvmGetHostSize { [pscustomobject]@{ Cores = 8; Threads = 16; MemoryMB = 32768; FreeMB = 24576 } }
+    function script:Invoke-PvmGetFreeSpace { param($Path) [int64]64GB }
     function script:Invoke-PvmGetDisk { param($Number) [pscustomobject]@{ Number = 99; PartitionStyle = 'MBR'; Signature = [uint32]0x5CA1AB1E; LogicalSectorSize = 512; Size = [uint64]4000000 * 512; IsBoot = $false; IsSystem = $false } }
     function script:Invoke-PvmGetProcess { param($Name) @() }
     function script:Invoke-PvmTestProcess { param($Name) $false }
