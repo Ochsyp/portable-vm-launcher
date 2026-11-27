@@ -452,7 +452,7 @@ Describe 'Static guards' {
             $name = if ($parent) { $parent.Name } else { '' }
             $counts[$name] = 1 + [int]$counts[$name]
         }
-        $expected = @{ 'Invoke-PvmStopUnlessDryRun' = 1; 'Confirm-PvmResume' = 1; 'Confirm-PvmLeftoverFix' = 1; 'Invoke-PvmVMware' = 3; 'Invoke-PvmVirtualBox' = 2; 'Invoke-PortableVM' = 4 }
+        $expected = @{ 'Invoke-PvmStopUnlessDryRun' = 1; 'Confirm-PvmResume' = 1; 'Confirm-PvmLeftoverFix' = 1; 'Invoke-PvmVMware' = 4; 'Invoke-PvmVirtualBox' = 2; 'Invoke-PortableVM' = 4 }
         @($counts.Keys | Sort-Object | ForEach-Object { "$_=$($counts[$_])" }) | Should -BeExactly @($expected.Keys | Sort-Object | ForEach-Object { "$_=$($expected[$_])" })
     }
 
@@ -515,9 +515,11 @@ Describe 'Static guards' {
         # A new sentence with a cause after "because" needs a change of these counts on purpose.
         # Get-PvmWriteCause words a cause of Windows through Format-PvmBecause too. The reason for a
         # descriptor rewrite is no error, and Format-PvmDescriptorReason words it. The guided fix
-        # holds its cause, worded by Format-PvmBecause, in $cause.
+        # holds its cause, worded by Format-PvmBecause, in $cause. The VM's size names its reason,
+        # no error, in $Why.
         $text = [IO.File]::ReadAllText($script:module)
-        [regex]::Matches($text, 'because \$').Count | Should -Be 6
+        [regex]::Matches($text, 'because \$').Count | Should -Be 7
+        [regex]::Matches($text, 'VM size left as it is, because \$Why\.').Count | Should -Be 1
         [regex]::Matches($text, 'because \$\((Format-PvmBecause -Cause|Get-PvmWriteCause -ErrorRecord|Format-PvmDescriptorReason -Kinds) ').Count | Should -Be 5
         [regex]::Matches($text, '\$cause = Format-PvmBecause -Cause \(Get-PvmPathCause -Path \$step\.Path -ErrorRecord \$_\)').Count | Should -Be 1
     }

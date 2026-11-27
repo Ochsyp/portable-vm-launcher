@@ -65,6 +65,17 @@
     VirtualBoxHome   = 'VirtualBox'
     VirtualBoxVbox   = 'VirtualBox\Example VM\Example VM.vbox'
 
+    # The VM's CPUs and memory, which the launcher sets in the VM's file at each start when they
+    # differ. Auto sizes the VM to the PC: all but one core or two threads, 2 to VmMaxCpus CPUs,
+    # and half the PC's memory, leaving the PC at least 6 GB, 4 to VmMaxMemoryGB GB. Off leaves
+    # the VM's file as it is. Fixed sets VmCpus and VmMemoryGB on every PC; remove the # in front
+    # of them for it. It never changes a VM that has a saved state, or while VMware is open.
+    VmSizing      = 'Auto'
+    VmMaxCpus     = 8
+    VmMaxMemoryGB = 16
+    #VmCpus       = 4
+    #VmMemoryGB   = 8
+
     # VMware Workstation: the VM's .vmx file. The launcher reads the disk file it points at the
     # stick from the .vmx. To name it here too, which the launcher then checks, remove the #:
     #VMwareDisk = 'VMware\example-stick.vmdk'

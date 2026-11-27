@@ -1804,6 +1804,7 @@ Describe 'A start' {
                 'Launcher version unknown'
                 "Stick found: disk 3 (\\.\PhysicalDrive3), drive $($script:stick.Letter):, ID 5CA1AB1E"
                 'Using VMware'
+                'VM size OK: 7 CPUs, 16384 MB'
                 'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'
                 'stick.vmdk: rewritten because the disk device, a size and the number of extents differ'
                 "Started with VMware Workstation ($($script:stick.VMwareDir))"
@@ -1824,6 +1825,7 @@ Describe 'A start' {
                 'Launcher version unknown'
                 "Stick found: disk 3 (\\.\PhysicalDrive3), drive $($script:stick.Letter):, ID 5CA1AB1E"
                 'Using VMware'
+                'VM size OK: 7 CPUs, 16384 MB'
                 'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'
                 'stick.vmdk: rewritten because the disk device, a size and the number of extents differ'
                 "DRY RUN - would start $($script:stick.Vmx) with VMware Workstation ($($script:stick.VMwareDir))"
@@ -2150,6 +2152,7 @@ Describe 'A start' {
                 "Stick found: disk 3 (\\.\PhysicalDrive3), drive $($script:stick.Letter):, ID 5CA1AB1E"
                 'Using VirtualBox'
                 "Test VM.vbox: paths moved to drive $($script:stick.Letter):"
+                'VM size OK: 7 CPUs, 16384 MB'
                 "VirtualBox.xml: paths moved to drive $($script:stick.Letter):"
                 'stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0'
                 'stick.vmdk: rewritten because the disk device differs'
@@ -2179,6 +2182,7 @@ Describe 'A start' {
                 "Stick found: disk 3 (\\.\PhysicalDrive3), drive $($script:stick.Letter):, ID 5CA1AB1E"
                 'Using VirtualBox'
                 "Test VM.vbox: paths moved to drive $($script:stick.Letter):"
+                'VM size OK: 7 CPUs, 16384 MB'
                 "VirtualBox.xml: paths moved to drive $($script:stick.Letter):"
                 'stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0'
                 'stick.vmdk: rewritten because the disk device differs'

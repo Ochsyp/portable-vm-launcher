@@ -1656,7 +1656,8 @@ Describe 'Compare-StickDryRun: kinds of log lines' {
 
     It 'reads the message after the first two spaces, and keeps only the lines two launchers must log alike' {
         Get-CompareLogMessage -Line '2026-01-02T03:04:05.678+01:00 [42]  Using VMware' | Should -BeExactly 'Using VMware'
-        $lines = @('Launcher version v1', 'Using VMware', 'Waiting up to 30 s for VBoxSVC', 'Timings: total 3 ms', 'Note: the earlier lines of the log are in launcher-20260102-030405.log.', 'Stick found: x') |
+        $lines = @('Launcher version v1', 'Using VMware', 'Waiting up to 30 s for VBoxSVC', 'Timings: total 3 ms', 'Note: the earlier lines of the log are in launcher-20260102-030405.log.', 'Stick found: x',
+            'Note: this PC has less free memory than the VM''s size and 2 GB more; close other programs if the VM is slow.') |
             ForEach-Object { "2026-01-02T03:04:05.678+01:00 [42]  $_" }
         Get-CompareDecision -Lines $lines | Should -BeExactly @('Using VMware', 'Stick found: x')
     }
