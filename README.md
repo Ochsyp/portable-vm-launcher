@@ -157,11 +157,12 @@ The table's paths can also lie in a folder below the drive's root; `Launcher` an
 
 ## Boot area
 
-The guest may read the stick's boot area but not write it, in VMware and in VirtualBox, unless
-the settings say `ProtectBootArea = $false`. The boot area is sector 0 up to the sector before the
-partition that starts first on the stick, whatever its number. At each start the launcher reads
-where that partition starts from the list of the stick's partitions that Windows gives, and stops
-when it cannot. With a first partition at sector 2048, the boot area is sectors 0 to 2047:
+Both disk files, VMware's and VirtualBox's, mark the stick's boot area read-only for the guest,
+unless the settings say `ProtectBootArea = $false`. The boot area is sector 0 up to the sector
+before the partition that starts first on the stick, whatever its number. At each start the
+launcher reads where that partition starts from the list of the stick's partitions that Windows
+gives, and stops when it cannot. With a first partition at sector 2048, the boot area is sectors 0
+to 2047:
 
 - sector 0, the MBR: the native boot code (bytes 0 to 439), the disk signature by which the
   launcher finds the stick (bytes 440 to 443) and the partition table (bytes 446 to 509);

@@ -34,7 +34,7 @@
     # with No as the default answer; 'Refuse' stops the launcher instead. Without this line: 'Ask'.
     SavedStatePolicy = 'Ask'
 
-    # $true = in VMware and in VirtualBox, the guest may read but not write the stick's boot area:
+    # $true = the disk files of both programs mark the stick's boot area read-only for the guest:
     # sector 0 up to where its first partition starts, with the boot code, the disk signature and
     # the partition table. Set $false only for a job in the guest that writes there, such as a
     # boot-loader install or a partition editor, and set it back afterwards ("Boot area" in
