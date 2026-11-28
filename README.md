@@ -371,15 +371,19 @@ at the stick ("armed"), right after reading the stick's identity once more.
 After the start, the launcher checks that the VM runs: within 60 s, VMware must run a
 `vmware-vmx` process for the VM's `.vmx`, or VirtualBox a VM process for its UUID. If not, it
 points the disk file away from the stick again and says so. Then it stays in the background,
-hidden and with the administrator rights it was given, and checks every 5 s whether the VM still
-runs. When the VM has ended, it points the disk file away from the stick and logs how long the VM
-ran. After a VirtualBox start it then waits up to 60 s for VirtualBox's background service to end
-and reads the disk file once more: should the service have pointed it at the stick again, the
-launcher points it away once more and the log says so. Then it ends. A start that stops after
-the arm, such as a VirtualBox that cannot start the VM, also points the file away before it ends.
+with the administrator rights it was given, in a minimized PowerShell window on the taskbar
+titled "Portable VM: watching the VM - keep this window open", and checks every 5 s whether the
+VM still runs; a check that fails for a moment is logged once and tried again. When the VM has
+ended, it points the disk file away from the stick and logs how long the VM ran. After a
+VirtualBox start it then waits up to 60 s for VirtualBox's background service to end and reads
+the disk file once more: should the service have pointed it at the stick again, the launcher
+points it away once more and the log says so. Should the first try to point the file away fail
+while the service still holds it, the launcher tries once more after that wait. Then it ends. A
+start that stops after the arm, such as a VirtualBox that cannot start the VM, also points the
+file away before it ends.
 
-If the launcher is cut off while the VM runs (the PC crashes, the stick is pulled), the disk file
-stays armed. The read-only check then says "points at the stick: yes, although no VM runs" and
+If the launcher is cut off while the VM runs (the PC crashes, the stick is pulled, its window is
+closed), the disk file stays armed. The read-only check then says "points at the stick: yes, although no VM runs" and
 needs attention, and the next start through the launcher sets it right. A second `Start VM.cmd`
 while the launcher watches finds its lock and says so.
 
@@ -391,21 +395,20 @@ The redesign removes these. Until then:
   write the VM's old view of the disk over what changed in between, which can corrupt the
   guest's file system. Resume the VM through the launcher and shut the guest down first.
 - **Start and resume the VM only through the launcher**, never from the VMware or VirtualBox
-  window or library. Between runs the descriptor still names the disk number of the last run,
-  which another disk may have by then.
+  window or library. Between runs the disk file names no disk ("Arm, verify, watch"), so such a
+  start finds no disk; only a launcher cut off while the VM ran leaves it armed.
 - **VirtualBox: keep "Use Host I/O Cache" on** for the controller that holds the raw disk. With
   it off, VirtualBox takes every volume of the stick offline, the Data partition included. A
   VirtualBox start stops when it is off.
 - A second double-click while Windows still asks for administrator rights for the first one, or
   in the second after that, asks again. That second run then stops, saying that another run is in
-  progress, or says that the VM is already running. Right after a start in VMware, before
-  VMware's process for the VM shows, it can also find no running VM and run VMware for the VM
-  again.
-- The lock covers the launcher's checks and its start command, not the time the VM runs; once the
-  VM's process runs, the process checks find it.
-- While a run waits for the answer to its resume question, or hangs, it keeps the lock, and every
-  double-click says that another run is in progress. Answer the question, or close that run's
-  minimized PowerShell window; the run then ends, and the next one takes the lock.
+  progress.
+- A start keeps the lock until the VM has ended, so every double-click meanwhile says that another
+  run is in progress.
+- While a run waits for the answer to its resume question, or hangs, it keeps the lock too. Answer
+  the question, or, only while no VM runs, close that run's minimized PowerShell window; the run
+  then ends, and the next one takes the lock. While the VM runs, that window is the watch: leave
+  it open.
 
 ## Development
 

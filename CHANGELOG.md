@@ -241,16 +241,20 @@ All notable changes to this project are listed here. The format follows
   pins and gets `-FailOnSkip`, two tests of one edition of PowerShell are tagged `DesktopOnly`
   and `CoreOnly` instead of skipping, and `tools\Find-PrivateData.ps1` reads every denylist the
   hooks read; it now runs by hand, no longer before each push.
-- Arm, verify, watch (phase 9, d239). At rest both disk files point at no disk: their raw-disk
+- Arm, verify, watch, as decided in d239. At rest both disk files point at no disk: their raw-disk
   extents name `\\.\PortableVM-disarmed`, so a VM started from VMware's or VirtualBox's own
   window, or with another disk in the stick's place, writes nowhere. A start reads the stick's
   identity once more right before it points the disk file of the program it starts at the stick,
-  checks within 60 s that the VM runs, and then stays in the background, hidden, until the VM has
-  ended; then it points the file away from the stick again and logs how long the VM ran. After a
+  checks within 60 s that the VM runs, and then stays in the background, in a minimized window
+  titled to be kept open, until the VM has ended, logging once and checking again when a check
+  fails; then it points the file away from the stick again and logs how long the VM ran. After a
   VirtualBox start it waits up to 60 s for VirtualBox's background service to end and reads the
-  file once more, pointing it away again, with a log line, should it point at the stick again. A
-  start that stops after the arm points the file away too. The read-only check says when a disk file points at the stick while no VM
-  runs, which needs attention, and the stick-check tool knows the new log lines.
+  file once more, pointing it away again, with a log line, should it point at the stick again; a
+  first try to point it away that fails is tried once more after that wait, and a VM that
+  VirtualBox says runs already once the file is armed is watched too. A start that stops after
+  the arm points the file away too. The read-only check says when a disk file points at the stick
+  while no VM runs, which needs attention, and the stick-check tool knows the new log lines and
+  notes (phase 9)
 - The history scan accepts one made-up test value (d242): the USB disk name of a fictitious
   `Test_Stick` under `/dev/disk/by-id`, kind `disk-by-id`, in the ten versions of
   `tests/PortableVM.Tests.ps1` on main that hold it, through ten `PRIVACY_HISTORY_ACCEPT` records
