@@ -38,8 +38,8 @@ Before every start the launcher:
 - before a start in either program, checks that Windows has mounted no partition in the VM's part
   of the stick, before Data, since the guest could not write to it while Windows uses it;
 - gives the guest the same view of the stick in VMware and in VirtualBox: the Data partition
-  reads as zeros and the guest's writes there are dropped, and the stick's boot area is read-only
-  (see [Boot area](#boot-area));
+  reads as zeros and the guest's writes there are dropped; the rest of the VM's part, the stick's
+  boot area included, is the guest's to read and write (see [Boot area](#boot-area));
 - sizes the VM to the PC in the program it starts (`VmSizing = 'Auto'`, the default): all but one
   core or two threads, 2 to `VmMaxCpus` (8) CPUs, and half the PC's memory while leaving the PC at
   least 6 GB, 4 to `VmMaxMemoryGB` (16) GB. It writes the `.vmx` or the `.vbox` only when the size
@@ -78,8 +78,8 @@ Before every start the launcher:
 
 Both programs get the stick with the Data partition blanked, because Windows keeps using that
 partition while the VM runs, and VMware takes every volume it gives the guest away from Windows.
-The `HideDataPartition` setting is no longer used; a settings file may keep it, and the log notes
-it.
+The `HideDataPartition` and `ProtectBootArea` settings are no longer used; a settings file may
+keep them, and the log notes each.
 
 Messages and the dialog title name the VM and the guest system as `VmDisplayName` and
 `GuestName` in the settings say; without them they say "the VM" and "the guest". Before the
@@ -157,35 +157,22 @@ The table's paths can also lie in a folder below the drive's root; `Launcher` an
 
 ## Boot area
 
-Both disk files, VMware's and VirtualBox's, mark the stick's boot area read-only for the guest,
-unless the settings say `ProtectBootArea = $false`. The boot area is sector 0 up to the sector
-before the partition that starts first on the stick, whatever its number. At each start the
-launcher reads where that partition starts from the list of the stick's partitions that Windows
-gives, and stops when it cannot. With a first partition at sector 2048, the boot area is sectors 0
-to 2047:
+The stick's boot area is sector 0, the MBR, with the native boot code, the disk signature by which
+the launcher finds the stick and the partition table, and the gap after it up to the first
+partition, where a boot loader such as GRUB keeps the rest of its code. In VMware and in
+VirtualBox, the guest can read and write it, as before phase 8: a boot-loader install to the
+whole disk, such as `grub-install` on the stick's device, or a partition editor, such as fdisk,
+parted or GParted, changes the real stick. Do such a job with care, and keep a copy of the boot
+area first.
 
-- sector 0, the MBR: the native boot code (bytes 0 to 439), the disk signature by which the
-  launcher finds the stick (bytes 440 to 443) and the partition table (bytes 446 to 509);
-- sectors 1 to 2047, the gap before the first partition, where a boot loader such as GRUB keeps
-  the rest of its code.
+The launcher does not mark the boot area read-only. A disk file that does so names the stick in
+two extents, a read-only one in front and a writable one, and VirtualBox opens a device named
+twice only once, with the first extent's access: it then refused every write of the guest, and
+the guest stopped at its file-system check. One layout for both programs, without the protection,
+was chosen over keeping it in VMware alone.
 
-Right behind the boot area lies the first partition, from its own boot sector on. The guest reads
-and writes it, boot sector and file system, as before, and a tool that only reads the MBR or
-that boot sector works as before. The partition tables of logical partitions (EBRs) lie inside
-the extended partition, outside the boot area, so they are not protected.
-
-What fails in the guest from now on is a write into the boot area: a boot-loader install to the
-whole disk, such as `grub-install` on the stick's device; a partition editor, such as fdisk,
-parted or GParted, when it writes a changed partition table; a tool that writes a new disk
-signature. Both disk files mark those sectors read-only; in VirtualBox such a write fails with a
-write error in the guest, while in VMware a write there has not been tried, so do not count on
-VMware to refuse it. For such a job, set `ProtectBootArea = $false` in
-`LauncherData\settings.psd1` and start the VM through the launcher, which points the disk file
-at the stick without the protection and notes it in the log. Do the job, shut the guest down,
-then delete the line or set it back to `$true`; the next start protects the boot area again. Or
-boot the stick natively for the job. Either way, a partition editor must leave the Data
-partition where it is: the launcher checks where it starts and ends, and refuses to start
-otherwise.
+A partition editor must leave the Data partition where it is: the launcher checks where it
+starts and ends, and refuses to start otherwise.
 
 ## Log
 
@@ -275,9 +262,9 @@ value of the wrong type or an unknown word is refused rather than guessed. The p
 relative to the folder that holds `Launcher` and `LauncherData`, without a drive, `.` or `..`.
 The VM's size settings, `VmSizing`, `VmCpus`, `VmMemoryGB`, `VmMaxCpus` and `VmMaxMemoryGB`, are
 optional; a launcher from before request r9 refuses them, so remove them before going back to one.
-`ProtectBootArea` is optional and on by default (see [Boot area](#boot-area)); a launcher from
-before phase 8 refuses it, so remove it before going back to one. `HideDataPartition` is no
-longer used: a file may keep it, and the log notes it.
+`HideDataPartition` and `ProtectBootArea` are no longer used: a file may keep them, and the log
+notes each. A launcher from before phase 8 refuses `ProtectBootArea`, so remove it before going
+back to one.
 `VMwareDisk`, `VirtualBoxDisk` and `VirtualBoxVmUuid` are optional: the launcher reads them from
 the `.vmx` and the `.vbox`. Set one only to have the launcher check it; a value that differs
 from the VM's file stops the start and names both. A launcher from before phase 7 still needs all

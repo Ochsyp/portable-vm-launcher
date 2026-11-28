@@ -323,9 +323,10 @@ Describe 'Filling in the defaults' {
         $merged['Hypervisor'] | Should -BeExactly 'Auto'
         $merged['VMwareView'] | Should -BeExactly 'Window'
         $merged['SavedStatePolicy'] | Should -BeExactly 'Ask'
-        # HideDataPartition is no longer used; only a file that sets it has a value.
+        # HideDataPartition and ProtectBootArea are no longer used; only a file that sets one has a
+        # value.
         $merged['HideDataPartition'] | Should -BeNullOrEmpty
-        $merged['ProtectBootArea'] | Should -BeTrue
+        $merged['ProtectBootArea'] | Should -BeNullOrEmpty
         $merged['IsExample'] | Should -BeFalse
         $merged['VmDisplayName'] | Should -BeExactly 'the VM'
         $merged['GuestName'] | Should -BeExactly 'the guest'

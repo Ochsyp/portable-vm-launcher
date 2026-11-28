@@ -17,7 +17,10 @@
 # a pull request expects, by the kinds of its two lines: 'stick found => stick found' for a changed
 # line, '=> <kind>' for an added one and '<kind> =>' for a removed one. Each expected change must
 # happen, on one line per pair of dry runs at most. -AlsoVirtualBox adds a pair of dry runs with
-# Hypervisor set to VirtualBox. -ListOnly only lists the stick's top folders.
+# Hypervisor set to VirtualBox. -ListOnly only lists the stick's top folders. Several expected
+# changes need -Command, since through -File Windows PowerShell gives -ExpectChange only the first
+# value and binds the next ones to -Target and -OutputFolder, which the tool then refuses:
+#   powershell -NoProfile -ExecutionPolicy RemoteSigned -Command "& '.\tools\Compare-StickDryRun.ps1' -ExpectChange '=> a', 'b => c'"
 #
 # It refuses, changing nothing, while a VM runs, when a write on the stick was left unfinished,
 # when the clone is not clean at its pushed commit or that commit is on the stick already, and
@@ -269,8 +272,7 @@ function Get-CompareKind {
         '^Note: this PC is small for the VM' { return 'note: a PC small for the VM' }
         '^Note: this PC has less free memory' { return 'note: little free memory' }
         '^Note: HideDataPartition is no longer used' { return 'note: HideDataPartition no longer used' }
-        '^Note: ProtectBootArea is off' { return 'note: boot area not protected' }
-        '^DRY RUN - no disk file is pointed at the stick, since the stick''s boot area is unknown$' { return 'no disk file compared, since the boot area is unknown' }
+        '^Note: ProtectBootArea is no longer used' { return 'note: ProtectBootArea no longer used' }
         '^Saved state found: (suspended in VMware|saved in VirtualBox)$' { return "saved state found: $($Matches[1])" }
         '^Using (VMware|VirtualBox)$' { return "using $($Matches[1])" }
         '^Already running in (VMware|VirtualBox)\.$' { return "already running in $($Matches[1])" }
@@ -427,6 +429,26 @@ function Test-CompareChange {
 }
 
 # --- The stick ---------------------------------------------------------------------------------
+
+# Return why -Target $Target or -OutputFolder $OutputFolder cannot be meant as given, or '' when
+# both can: either looks like an expected change ('a => b', '=> b' or 'a =>'), as when the tool was
+# started through powershell -File with several values after -ExpectChange.
+function Get-CompareArgumentProblem {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [AllowEmptyString()][string]$Target = '',
+        [AllowEmptyString()][string]$OutputFolder = ''
+    )
+    $names = @(
+        if ($Target -match '(^|\s)=>(\s|$)') { '-Target' }
+        if ($OutputFolder -match '(^|\s)=>(\s|$)') { '-OutputFolder' }
+    )
+    if (-not $names.Count) { return '' }
+    $what = if ($names.Count -eq 2) { '-Target and -OutputFolder look like expected changes' } else { "$($names[0]) looks like an expected change" }
+    ("$what. Through powershell -File, only the first value after -ExpectChange reaches it, and the next ones land in -Target and -OutputFolder. " +
+        "Pass several expected changes with powershell -Command `"& '<tool>' -ExpectChange 'a', 'b'`"; nothing was changed")
+}
 
 # Return the SHA-256 hash of the file $Path in lowercase hex.
 function Get-CompareHash {
@@ -1014,6 +1036,8 @@ if ($MyInvocation.InvocationName -ne '.') {
             exit $result.ExitCode
         }
         if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw (ConvertTo-CompareStop -Reason 'the check runs on Windows only') }
+        $argumentProblem = Get-CompareArgumentProblem -Target $Target -OutputFolder $OutputFolder
+        if ($argumentProblem) { throw (ConvertTo-CompareStop -Reason $argumentProblem) }
         # Relative paths are read from PowerShell's location here; the window with administrator
         # rights starts in another folder.
         if ($Target -and (Test-Path -LiteralPath $Target -PathType Container)) { $Target = Convert-Path -LiteralPath $Target }
