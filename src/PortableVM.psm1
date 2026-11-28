@@ -4075,7 +4075,8 @@ function Test-PvmVmRunning {
 
 # Return whether the VM runs in $Program (Test-PvmVmRunning, with $Context and $Vmx), or $Assume
 # when the check fails, as with a process list that Windows cannot give for a moment. The first
-# failure of a row goes to the log as a note; $Row.Failed remembers the row.
+# failure of a row goes to the log as a note; $Row.Failures counts the row, and $Row.Cause holds
+# its last cause.
 function Test-PvmVmRunningOrAssume {
     [CmdletBinding()]
     [OutputType([bool])]
@@ -4088,12 +4089,13 @@ function Test-PvmVmRunningOrAssume {
     )
     try {
         $running = Test-PvmVmRunning -Context $Context -Program $Program -Vmx $Vmx
-        $Row.Failed = $false
+        $Row.Failures = 0
         $running
     } catch {
-        if (-not $Row.Failed) {
-            $Row.Failed = $true
-            Write-PvmLog -Path $Context.LogPath -Message "Note: the launcher could not check whether the VM runs, so it checks again: $(Get-PvmErrorText -ErrorRecord $_)"
+        $Row.Failures = [int]$Row.Failures + 1
+        $Row.Cause = Get-PvmErrorText -ErrorRecord $_
+        if ($Row.Failures -eq 1) {
+            Write-PvmLog -Path $Context.LogPath -Message "Note: the launcher could not check whether the VM runs, so it checks again: $($Row.Cause)"
         }
         $Assume
     }
@@ -4114,8 +4116,9 @@ function Write-PvmWindowTitle {
 # files, so for VirtualBox the launcher then waits up to 60 s for it to end and reads the disk
 # file once more: should it point at the stick again, it is pointed away once more, and the log
 # says so. Should the first try to point it away fail there, it tries once more after that wait.
-# A check whether the VM runs that fails counts as not yet started, or as still running. A VM
-# that does not start stops the launcher, after the disarm.
+# A check whether the VM runs that fails counts as not yet started, or as still running; after
+# $FailedChecks failed checks in a row while it runs, the launcher stops watching and says so. A
+# VM that does not start stops the launcher, after the disarm.
 function Watch-PvmVm {
     [CmdletBinding()]
     param(
@@ -4125,12 +4128,13 @@ function Watch-PvmVm {
         [Parameter(Mandatory)][string]$Disk,
         [Parameter(Mandatory)][hashtable]$Copies,
         [int]$StartSeconds = 60,
-        [int]$PollSeconds = 5
+        [int]$PollSeconds = 5,
+        [int]$FailedChecks = 12
     )
     $log = $Context.LogPath
     Enter-PvmStep -Context $Context -Name 'verify'
     $running = $false
-    $row = @{ Failed = $false }
+    $row = @{ Failures = 0; Cause = '' }
     for ($waited = 0; ; $waited += 2) {
         if (Test-PvmVmRunningOrAssume -Context $Context -Program $Program -Vmx $Vmx -Assume $false -Row $row) { $running = $true; break }
         if ($waited -ge $StartSeconds) { break }
@@ -4146,8 +4150,15 @@ function Watch-PvmVm {
     Enter-PvmStep -Context $Context -Name 'watch'
     Write-PvmWindowTitle -Title 'Portable VM: watching the VM - keep this window open'
     $started = Get-Date
-    $row = @{ Failed = $false }
-    while (Test-PvmVmRunningOrAssume -Context $Context -Program $Program -Vmx $Vmx -Assume $true -Row $row) { Invoke-PvmSleep -Seconds $PollSeconds }
+    $row = @{ Failures = 0; Cause = '' }
+    while (Test-PvmVmRunningOrAssume -Context $Context -Program $Program -Vmx $Vmx -Assume $true -Row $row) {
+        # A check that keeps failing would keep the launcher, and its lock, waiting for good.
+        if ($row.Failures -ge $FailedChecks) {
+            throw (Get-PvmStopException -Message (Format-PvmMessage -Names $Context.Names -Values @{ Seconds = $FailedChecks * $PollSeconds; Name = [IO.Path]::GetFileName($Disk); Cause = $row.Cause } -Template (
+                        "For {Seconds} s the launcher could not check whether {vm} still runs, so it stopped watching it. {Name} names the stick's disk until the next start through the launcher sets it right.`n`n{Cause}")))
+        }
+        Invoke-PvmSleep -Seconds $PollSeconds
+    }
     Write-PvmLog -Path $log -Message "The VM has ended, after $([int][Math]::Round(((Get-Date) - $started).TotalMinutes)) min"
     Enter-PvmStep -Context $Context -Name 'disarm'
     $name = [IO.Path]::GetFileName($Disk)

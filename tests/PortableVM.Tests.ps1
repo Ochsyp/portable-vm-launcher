@@ -4279,6 +4279,19 @@ Describe 'Arm, verify, watch' -Tag 'WindowsOnly' {
             [IO.File]::ReadAllText($script:stick.VMwareDisk) | Should -BeExactly $script:disarmed
         }
 
+        It 'stops watching, and says so, when the check whether the VM runs fails for 60 s in a row' {
+            # The check after the start finds the VM; every check while it runs fails.
+            $script:checks = 0
+            Mock -ModuleName PortableVM Test-PvmVmRunning { $script:checks++; if ($script:checks -eq 1) { return $true }; throw 'Call cancelled' }
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly "For 60 s the launcher could not check whether the VM still runs, so it stopped watching it. stick.vmdk names the stick's disk until the next start through the launcher sets it right.`n`nCall cancelled"
+            # The check after the start, then 12 failed checks with a sleep of 5 s between them.
+            Should -Invoke -CommandName Test-PvmVmRunning -ModuleName PortableVM -Times 13 -Exactly
+            Should -Invoke -CommandName Invoke-PvmSleep -ModuleName PortableVM -Times 11 -Exactly -ParameterFilter { $Seconds -eq 5 }
+            @(Get-TestLog -Path $script:stick.Log | Where-Object { $_ -like 'Note: the launcher could not check whether the VM runs*' }).Count | Should -Be 1
+        }
+
         It 'arms a disarmed file again at the next start, and disarms it after' {
             Write-TestFile -Path $script:stick.VMwareDisk -Text $script:disarmed
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher

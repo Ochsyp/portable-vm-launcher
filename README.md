@@ -373,7 +373,8 @@ After the start, the launcher checks that the VM runs: within 60 s, VMware must 
 points the disk file away from the stick again and says so. Then it stays in the background,
 with the administrator rights it was given, in a minimized PowerShell window on the taskbar
 titled "Portable VM: watching the VM - keep this window open", and checks every 5 s whether the
-VM still runs; a check that fails for a moment is logged once and tried again. When the VM has
+VM still runs; a check that fails for a moment is logged once and tried again, and after 60 s of
+failed checks the launcher stops watching and says so, leaving the file armed. When the VM has
 ended, it points the disk file away from the stick and logs how long the VM ran. After a
 VirtualBox start it then waits up to 60 s for VirtualBox's background service to end and reads
 the disk file once more: should the service have pointed it at the stick again, the launcher
