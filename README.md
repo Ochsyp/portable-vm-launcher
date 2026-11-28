@@ -384,12 +384,15 @@ The redesign removes these. Until then:
 
 ## Development
 
-The launcher's code is in `src`, the tools in `tools`, the tests in `tests` and the example
-settings in `examples`. CI runs PSScriptAnalyzer 1.25.0 over these folders and Pester 6.2.0 in
-Windows PowerShell 5.1, then the privacy scan over the tracked files in Git Bash. It also runs
-the tests in PowerShell 7 on Windows and on Linux; on Linux it leaves out those tagged
-`WindowsOnly`. The tests mock everything that reads the PC, so they never touch a disk or a VM.
-Locally:
+The launcher's code is in `src`, the tools in `tools`, the tests in `tests`, the example
+settings in `examples` and the CI stages in `ci`. The repository follows the repository standard
+1.4.0, whose copies are listed in `.github/standard/MANIFEST`. CI runs the standard's checks (its
+copies, the privacy rules over the tree, the version, the changelog and the pull request), then
+three stages of this repository: `lint`, PSScriptAnalyzer in Windows PowerShell 5.1 on Windows;
+`test`, every Pester test in Windows PowerShell 5.1 and in PowerShell 7 on Windows; and `system`,
+the tests not tagged `WindowsOnly`, in PowerShell 7 on Linux. A skipped test fails CI. The
+versions of Pester and PSScriptAnalyzer are those `.github/standard/bin/install-tools` pins. The
+tests mock everything that reads the PC, so they never touch a disk or a VM. Locally:
 
 ```text
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\run-checks.ps1
@@ -402,8 +405,9 @@ are installed for Windows PowerShell, so one install serves both. When a pinned 
 installed nowhere, it stops and prints the one `Install-Module` line that installs it for the
 current user.
 
-This checks that no value of the real settings file or the privacy denylist is in git's index
-or history:
+The hooks refuse every denylist term in a commit or push. This also checks that no value of the
+real settings file or of the denylists is in git's index or anywhere in the history; run it now
+and then, and before a release:
 
 ```text
 powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Find-PrivateData.ps1 -History

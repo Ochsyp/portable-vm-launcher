@@ -3,16 +3,19 @@
 # -------------------------------------------------------
 #
 # Looks for the values of the real, untracked settings files, LauncherData\settings.psd1 and the
-# older Launcher\settings.psd1 in the clone or the files -SettingsPath names, and for the strings
-# listed in .git/info/privacy-denylist, in what GitHub would show: the contents and names of the
-# files in git's index and, with -History, of every commit reachable from any ref, the commit
-# messages and the ref names. Prints the setting's name and where it was found, never the value.
-# Run it in Windows PowerShell 5.1:
+# older Launcher\settings.psd1 in the clone or the files -SettingsPath names, and for the terms of
+# every denylist the repository standard's hooks read (PRIVACY_DENYLIST, each privacy.denylist of
+# git config, the per-user git-privacy/denylist and the clone's info/privacy-denylist), in what
+# GitHub would show: the contents and names of the files in git's index and, with -History, of
+# every commit reachable from any ref, the commit messages and the ref names. Prints the setting's
+# name and where it was found, never the value. The standard's hooks refuse a denylist term in
+# every commit and push; this tool adds the settings' values and a look over the whole history,
+# so run it by hand now and then, and before a release. Run it in Windows PowerShell 5.1:
 #   powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Find-PrivateData.ps1 -History
-# .githooks/pre-push runs it like that before every push. -RepositoryPath checks another clone
-# than the one this script is in. -SettingsPath takes one file when the script runs with -File,
-# several from PowerShell, and each file it names must exist. Exits 0 when nothing is found or
-# there is nothing to look for, 1 on a match, 2 when the check cannot run.
+# -RepositoryPath checks another clone than the one this script is in. -SettingsPath takes one
+# file when the script runs with -File, several from PowerShell, and each file it names must
+# exist. Exits 0 when nothing is found or there is nothing to look for, 1 on a match, 2 when the
+# check cannot run.
 
 [CmdletBinding()]
 param(
@@ -202,14 +205,22 @@ try {
             Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
     }
     $settings = @($SettingsPath | Where-Object { $_ } | ForEach-Object { Read-PrivateSetting -Path $_ })
-    $gitDir = @(Invoke-Git -Arguments @('rev-parse', '--absolute-git-dir'))[0]
-    $denylistPath = Join-Path $gitDir 'info\privacy-denylist'
-    $denylist = @()
-    if (Test-Path -LiteralPath $denylistPath -PathType Leaf) {
-        # Read as UTF-8, with or without a BOM, the way git and privacy-scan read it.
-        $denylist = @(Get-Content -LiteralPath $denylistPath -Encoding UTF8 | ForEach-Object { $_.Trim() } |
-            Where-Object { $_ -and -not $_.StartsWith('#') })
-    }
+    # The denylists the standard's hooks read, in their order; a list that does not exist adds
+    # nothing here, as the hooks only note it.
+    $xdg = if ($env:XDG_CONFIG_HOME) { $env:XDG_CONFIG_HOME } else { Join-Path $HOME '.config' }
+    $denylistPaths = @(
+        $env:PRIVACY_DENYLIST
+        Invoke-Git -Arguments @('config', '--type=path', '--get-all', 'privacy.denylist') -AllowedExitCodes @(0, 1)
+        Join-Path $xdg 'git-privacy\denylist'
+        Invoke-Git -Arguments @('rev-parse', '--path-format=absolute', '--git-path', 'info/privacy-denylist')
+    ) | Where-Object { $_ }
+    $denylist = @(foreach ($path in $denylistPaths) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+            # Read as UTF-8, with or without a BOM, the way git and the hooks read it; a fullwidth
+            # at sign reads as @, as the hooks read it.
+            Get-Content -LiteralPath $path -Encoding UTF8 | ForEach-Object { $_.Replace([string][char]0xFF20, '@').Trim() } |
+                Where-Object { $_ -and -not $_.StartsWith('#') }
+        })
 
     $values = @(Get-PrivateValue -Settings $settings -Denylist $denylist)
     if ($values.Count -eq 0) {
