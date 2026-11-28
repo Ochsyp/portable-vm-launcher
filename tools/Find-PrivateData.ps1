@@ -12,10 +12,10 @@
 # every commit and push; this tool adds the settings' values and a look over the whole history,
 # so run it by hand now and then, and before a release. Run it in Windows PowerShell 5.1:
 #   powershell -NoProfile -ExecutionPolicy RemoteSigned -File .\tools\Find-PrivateData.ps1 -History
-# -RepositoryPath checks another clone
-# than the one this script is in. -SettingsPath takes one file when the script runs with -File,
-# several from PowerShell, and each file it names must exist. Exits 0 when nothing is found or
-# there is nothing to look for, 1 on a match, 2 when the check cannot run.
+# -RepositoryPath checks another clone than the one this script is in. -SettingsPath takes one
+# file when the script runs with -File, several from PowerShell, and each file it names must
+# exist. Exits 0 when nothing is found or there is nothing to look for, 1 on a match, 2 when the
+# check cannot run.
 
 [CmdletBinding()]
 param(

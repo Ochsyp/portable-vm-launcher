@@ -92,8 +92,8 @@ sh .github/standard/bin/standard-check --local
 
 `tests\run-checks.ps1` runs PSScriptAnalyzer and the Pester tests with the versions that
 `.github/standard/bin/install-tools` pins. Locally a test may skip, as one does while a VM runs
-on the PC; CI runs every test and fails on a skipped one (`-FailOnSkip`). `bats
-.github/standard/tests/FILE.bats` runs a suite of the standard, one file at a time in Git Bash.
+on the PC; CI runs every test and fails on a skipped one (`-FailOnSkip`). In Git Bash,
+`bats .github/standard/tests/FILE.bats` runs a suite of the standard, one file at a time.
 
 CI runs the standard's checks and three stages of this repository: `lint` (`ci/lint.ps1`, the
 analyzer, Windows PowerShell 5.1 on Windows), `test` (`ci/test.ps1`, every test in Windows
