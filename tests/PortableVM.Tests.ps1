@@ -1887,6 +1887,9 @@ Describe 'A start' {
         It 'gives the one layout whatever ProtectBootArea says, and notes that the setting is no longer used (<Value>)' -ForEach @(
             @{ Value = $true }
             @{ Value = $false }
+            # A key that is no longer used stops no start, whatever its type.
+            @{ Value = 'off' }
+            @{ Value = 0 }
         ) {
             $script:stick = Initialize-TestStick -Name 'vmware-stick' -Change @{ ProtectBootArea = $Value }
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher

@@ -263,8 +263,8 @@ relative to the folder that holds `Launcher` and `LauncherData`, without a drive
 The VM's size settings, `VmSizing`, `VmCpus`, `VmMemoryGB`, `VmMaxCpus` and `VmMaxMemoryGB`, are
 optional; a launcher from before request r9 refuses them, so remove them before going back to one.
 `HideDataPartition` and `ProtectBootArea` are no longer used: a file may keep them, whatever
-their value, and the log notes each. A launcher from before phase 8 refuses `ProtectBootArea`, so remove it before going
-back to one.
+their value, and the log notes each. A launcher from before phase 8 refuses `ProtectBootArea`, so
+remove it before going back to one.
 `VMwareDisk`, `VirtualBoxDisk` and `VirtualBoxVmUuid` are optional: the launcher reads them from
 the `.vmx` and the `.vbox`. Set one only to have the launcher check it; a value that differs
 from the VM's file stops the start and names both. A launcher from before phase 7 still needs all

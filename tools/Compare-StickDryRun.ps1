@@ -41,7 +41,10 @@ param(
     [switch]$ListOnly,
     [string]$OutputFolder,
     # Set only by the tool itself, for the window with administrator rights.
-    [string]$RunFolder
+    [string]$RunFolder,
+    # Values with no parameter of their own, as when powershell -File passed more expected changes
+    # than there are parameters to bind them to by position; the tool refuses them.
+    [Parameter(ValueFromRemainingArguments)][string[]]$Unbound = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -433,25 +436,28 @@ function Test-CompareChange {
 
 # Return why -Target $Target, -OutputFolder $OutputFolder or -RunFolder $RunFolder cannot be
 # meant as given, or '' when none of them holds '=>', as an expected change does ('a => b', '=> b',
-# 'a =>' or 'a=>b') and no Windows path can: then the tool was started through powershell -File
-# with several values after -ExpectChange, which bound the next ones to those three by position.
+# 'a =>' or 'a=>b') and no Windows path can, and $Unbound, the values no parameter took, is empty:
+# then the tool was started through powershell -File with several values after -ExpectChange,
+# which bound the next ones to those three by position and left the rest unbound.
 function Get-CompareArgumentProblem {
     [CmdletBinding()]
     [OutputType([string])]
     param(
         [AllowEmptyString()][string]$Target = '',
         [AllowEmptyString()][string]$OutputFolder = '',
-        [AllowEmptyString()][string]$RunFolder = ''
+        [AllowEmptyString()][string]$RunFolder = '',
+        [AllowEmptyCollection()][string[]]$Unbound = @()
     )
     $names = @(
         if ($Target.Contains('=>')) { '-Target' }
         if ($OutputFolder.Contains('=>')) { '-OutputFolder' }
         if ($RunFolder.Contains('=>')) { '-RunFolder' }
+        if ($Unbound.Count) { 'values that no parameter takes' }
     )
     if (-not $names.Count) { return '' }
     $what = if ($names.Count -eq 1) { "$($names[0]) looks like an expected change" }
     else { "$($names[0..($names.Count - 2)] -join ', ') and $($names[-1]) look like expected changes" }
-    ("$what. Through powershell -File, -ExpectChange gets only the first of several values, and the next ones go to -Target, -OutputFolder and -RunFolder. " +
+    ("$what. Through powershell -File, -ExpectChange gets only the first of several values, and the next ones go to -Target, -OutputFolder and -RunFolder, the rest to no parameter. " +
         "Pass several expected changes with powershell -Command `"& '<tool>' -ExpectChange 'a', 'b'`"; nothing was changed")
 }
 
@@ -1034,7 +1040,7 @@ function Get-CompareRunFolder {
 if ($MyInvocation.InvocationName -ne '.') {
     try {
         $repository = Split-Path $PSScriptRoot -Parent
-        $argumentProblem = Get-CompareArgumentProblem -Target $Target -OutputFolder $OutputFolder -RunFolder $RunFolder
+        $argumentProblem = Get-CompareArgumentProblem -Target $Target -OutputFolder $OutputFolder -RunFolder $RunFolder -Unbound $Unbound
         if ($argumentProblem) { throw (ConvertTo-CompareStop -Reason $argumentProblem) }
         if ($RunFolder) {
             # The window with administrator rights: the first window left the request here.

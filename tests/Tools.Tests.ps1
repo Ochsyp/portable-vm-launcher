@@ -2144,8 +2144,9 @@ Describe 'Compare-StickDryRun: parameters that look like expected changes' {
         @{ Target = 'line a =>'; OutputFolder = '=> note: c'; Names = '-Target and -OutputFolder' }
         @{ Target = 'a => b'; OutputFolder = 'c => d'; RunFolder = 'e =>'; Names = '-Target, -OutputFolder and -RunFolder' }
         @{ Target = 'stick found=>stick found'; OutputFolder = ''; Names = '-Target' }
+        @{ Target = 'a => b'; OutputFolder = 'c => d'; RunFolder = 'e =>'; Unbound = @('=> f'); Names = '-Target, -OutputFolder, -RunFolder and values that no parameter takes' }
     ) {
-        $problem = Get-CompareArgumentProblem -Target $Target -OutputFolder $OutputFolder -RunFolder "$RunFolder"
+        $problem = Get-CompareArgumentProblem -Target $Target -OutputFolder $OutputFolder -RunFolder "$RunFolder" -Unbound @($Unbound | Where-Object { $_ })
         $problem | Should -BeLike "$Names look* like* expected change*"
         $problem | Should -BeLike "*powershell -File, -ExpectChange gets only the first*"
         $problem | Should -BeLike "*-Command `"& '<tool>' -ExpectChange 'a', 'b'`"*"
@@ -2204,6 +2205,16 @@ Describe 'Compare-StickDryRun as a script' -Tag 'WindowsOnly' {
         finally { Pop-Location }
         $result.Exit | Should -Be 1
         $result.Lines[-1] | Should -BeLike "RESULT: FAILED - -Target, -OutputFolder and -RunFolder look like expected changes*-Command*nothing was changed"
+        @(Get-ChildItem -LiteralPath $TestDrive -Force -Name) | Should -BeExactly $before
+    }
+
+    It 'says plainly, too, when -File left a fifth expected change without a parameter' {
+        $before = @(Get-ChildItem -LiteralPath $TestDrive -Force -Name)
+        Push-Location -LiteralPath $TestDrive
+        try { $result = Invoke-TestCompareScript -Arguments @('-AlsoVirtualBox', '-ExpectChange', '=> note: a', 'line a => line b', '=> note: c', 'line d =>', '=> note: e') }
+        finally { Pop-Location }
+        $result.Exit | Should -Be 1
+        $result.Lines[-1] | Should -BeLike "RESULT: FAILED - -Target, -OutputFolder, -RunFolder and values that no parameter takes look like expected changes*nothing was changed"
         @(Get-ChildItem -LiteralPath $TestDrive -Force -Name) | Should -BeExactly $before
     }
 
