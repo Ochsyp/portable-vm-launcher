@@ -241,6 +241,11 @@ All notable changes to this project are listed here. The format follows
   pins and gets `-FailOnSkip`, two tests of one edition of PowerShell are tagged `DesktopOnly`
   and `CoreOnly` instead of skipping, and `tools\Find-PrivateData.ps1` reads every denylist the
   hooks read; it now runs by hand, no longer before each push.
+- The history scan accepts one made-up test value (d242): the USB disk name of a fictitious
+  `Test_Stick` under `/dev/disk/by-id`, kind `disk-by-id`, in the ten versions of
+  `tests/PortableVM.Tests.ps1` on main that hold it, through ten `PRIVACY_HISTORY_ACCEPT` records
+  in `.github/standard.conf`. Nothing else is accepted, and the test now uses the disk pack's
+  synthetic form.
 
 Compared with the launcher on a stick before the redesign:
 
