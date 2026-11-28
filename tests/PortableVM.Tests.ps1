@@ -4387,6 +4387,7 @@ Describe 'Arm, verify, watch' -Tag 'WindowsOnly' {
             [IO.File]::WriteAllText($script:stick.VMwareDisk, "createType=`"fullDevice`"`r`n`0")
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
             $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeLike '*Unexpected content in *stick.vmdk - it holds a NUL byte*'
             $result.Message | Should -Not -BeLike "*names the stick's disk now*"
             Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
         }
