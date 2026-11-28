@@ -286,70 +286,89 @@ Describe 'Deploy-PortableVM' -Tag 'WindowsOnly' {
             Should -Not -BeNullOrEmpty
     }
 
-    It 'names the cause but no path when the clone''s module <Case>, and shows the message with -Verbose' -ForEach @(
-        @{ Case = 'does not parse'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $false; Failure = $null
-            Bytes = { [Text.Encoding]::ASCII.GetBytes("function {`r`n") } }
-        # Windows PowerShell 5.1 reads a script without a byte order mark as ANSI: there a dash in
-        # UTF-8 ends a string early, and the curly quotes of Windows-1252 make one. PowerShell 7
-        # reads it as UTF-8, so the same bytes give the opposite results there.
-        @{ Case = 'does not parse as ANSI, although it parses as UTF-8'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $true; Failure = $null; Engine = 'Desktop'
-            Bytes = { (New-Object System.Text.UTF8Encoding $false).GetBytes("`$dash = `"a $([char]0x2014) b`"`r`n") } }
-        @{ Case = 'stops while it loads, although it does not parse as UTF-8'; Cause = ''; Held = $false; Ansi = $true; Failure = $null; Engine = 'Desktop'
-            Bytes = { [byte[]]([Text.Encoding]::ASCII.GetBytes('$m = ') + 0x93 + [Text.Encoding]::ASCII.GetBytes('a (b') + 0x94 + [Text.Encoding]::ASCII.GetBytes("`r`nthrow 'stopped while it loads'`r`n")) } }
-        @{ Case = 'stops while it loads, although it does not parse as ANSI'; Cause = ''; Held = $false; Ansi = $false; Failure = $null; Engine = 'Core'
-            Bytes = { (New-Object System.Text.UTF8Encoding $false).GetBytes("`$dash = `"a $([char]0x2014) b`"`r`nthrow 'stopped while it loads'`r`n") } }
-        @{ Case = 'does not parse as UTF-8, although it parses as ANSI'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $false; Failure = $null; Engine = 'Core'
-            Bytes = { [byte[]]([Text.Encoding]::ASCII.GetBytes('$m = ') + 0x93 + [Text.Encoding]::ASCII.GetBytes('a (b') + 0x94 + [Text.Encoding]::ASCII.GetBytes("`r`nthrow 'stopped while it loads'`r`n")) } }
-        # With a byte order mark, PowerShell reads UTF-8, where a curly quote ends a string.
-        @{ Case = 'does not parse as UTF-8 with a byte order mark'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $false; Failure = $null
-            Bytes = { (New-Object System.Text.UTF8Encoding $true).GetPreamble() + (New-Object System.Text.UTF8Encoding $false).GetBytes("`$x = `"a $([char]0x201D) b`"`r`n") } }
-        @{ Case = 'is open in another program'; Cause = '. Cause: it is open in another program'; Held = $true; Ansi = $false; Failure = $null; Bytes = $null }
-        # Errors in the shape PowerShell gives, so that no test changes an ACL of the clone or the
-        # execution policy, or sets off antivirus software.
-        @{ Case = 'may not be read'; Cause = '. Cause: access is denied'; Held = $false; Ansi = $false; Bytes = $null
-            Failure = { [Management.Automation.CommandNotFoundException]::new('X:\clone\src\PortableVM.psm1 may not be read.', [UnauthorizedAccessException]::new('Access is denied.')) } }
-        @{ Case = 'is refused by the execution policy'; Cause = '. Cause: PowerShell''s execution policy blocks it'; Held = $false; Ansi = $false; Bytes = $null
-            Failure = { [Management.Automation.PSSecurityException]::new('X:\clone\src\PortableVM.psm1 is not signed.', [UnauthorizedAccessException]::new('Access is denied.')) } }
-        @{ Case = 'is refused by the execution policy and does not parse either'; Cause = '. Cause: PowerShell''s execution policy blocks it'; Held = $false; Ansi = $false
-            Bytes = { [Text.Encoding]::ASCII.GetBytes("function {`r`n") }
-            Failure = { [Management.Automation.PSSecurityException]::new('X:\clone\src\PortableVM.psm1 is not signed.', [UnauthorizedAccessException]::new('Access is denied.')) } }
-        # A file that does not parse counts only when PowerShell reports a parse error.
-        @{ Case = 'fails with another error and does not parse either'; Cause = ''; Held = $false; Ansi = $false
-            Bytes = { [Text.Encoding]::ASCII.GetBytes("function {`r`n") }
-            Failure = { [Management.Automation.CommandNotFoundException]::new('X:\clone\src\PortableVM.psm1 was not found.', [IO.FileNotFoundException]::new('Not found.')) } }
-        @{ Case = 'fails with a parse error although it parses'; Cause = ''; Held = $false; Ansi = $false; Bytes = $null
-            Failure = {
-                $extent = [Management.Automation.Language.Parser]::ParseInput('x', [ref]$null, [ref]$null).Extent
-                [Management.Automation.ParseException]::new([Management.Automation.Language.ParseError[]]@([Management.Automation.Language.ParseError]::new($extent, 'ContentBlocked', 'X:\clone\src\PortableVM.psm1 is blocked.')))
-            } }
-    ) {
-        if ($_.Engine -and $_.Engine -ne $PSVersionTable.PSEdition) {
-            Set-ItResult -Skipped -Because "the case is one of the $($_.Engine) edition of PowerShell"
-            return
+    # Windows PowerShell 5.1 reads a script without a byte order mark as ANSI, PowerShell 7 as
+    # UTF-8, so some cases belong to one edition; DesktopOnly and CoreOnly let tests\run-checks.ps1
+    # leave out the other edition's cases instead of skipping them.
+    Context 'when the clone''s module cannot be loaded' {
+        BeforeAll {
+            # The deploy names the cause but no path, and -Verbose shows PowerShell's own message.
+            function Assert-ModuleLoadCase {
+                param([string]$Cause, [bool]$Held, [bool]$Ansi, [scriptblock]$Failure, [scriptblock]$Bytes)
+                if ($Ansi -and (Get-TestAnsiEncoding).CodePage -ne 1252) {
+                    Set-ItResult -Skipped -Because 'the case needs Windows-1252 as the ANSI code page'
+                    return
+                }
+                $module = Join-Path $script:clone 'src\PortableVM.psm1'
+                $script:failure = $null
+                $holder = $null
+                if ($Bytes) { [IO.File]::WriteAllBytes($module, [byte[]](& $Bytes)) }
+                if ($Held) { $holder = [IO.File]::Open($module, 'Open', 'Read', 'None') }
+                if ($Failure) {
+                    $script:loadFailure = & $Failure
+                    Mock Import-Module { throw $script:loadFailure }
+                }
+                try {
+                    # The message PowerShell gives for the same import, which -Verbose must show.
+                    $expected = try { Import-Module -Name $module -Force -Global -ErrorAction Stop } catch { $_.Exception.Message }
+                    $verbose = @(& { try { $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -Verbose } catch { $script:failure = $_ } } 4>&1)
+                } finally {
+                    if ($holder) { $holder.Dispose() }
+                }
+                $script:failure.Exception.Message | Should -BeExactly "The clone's src\PortableVM.psm1 cannot be loaded, so the settings cannot be checked$Cause (-Verbose shows the details)."
+                $expected | Should -Not -BeNullOrEmpty
+                @($verbose | Where-Object { $_ -is [Management.Automation.VerboseRecord] -and $_.Message -eq $expected }) | Should -Not -BeNullOrEmpty
+            }
         }
-        if ($Ansi -and (Get-TestAnsiEncoding).CodePage -ne 1252) {
-            Set-ItResult -Skipped -Because 'the case needs Windows-1252 as the ANSI code page'
-            return
+
+        It 'names the cause but no path when the clone''s module <Case>, and shows the message with -Verbose' -ForEach @(
+            @{ Case = 'does not parse'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $false; Failure = $null
+                Bytes = { [Text.Encoding]::ASCII.GetBytes("function {`r`n") } }
+            # With a byte order mark, PowerShell reads UTF-8, where a curly quote ends a string.
+            @{ Case = 'does not parse as UTF-8 with a byte order mark'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $false; Failure = $null
+                Bytes = { (New-Object System.Text.UTF8Encoding $true).GetPreamble() + (New-Object System.Text.UTF8Encoding $false).GetBytes("`$x = `"a $([char]0x201D) b`"`r`n") } }
+            @{ Case = 'is open in another program'; Cause = '. Cause: it is open in another program'; Held = $true; Ansi = $false; Failure = $null; Bytes = $null }
+            # Errors in the shape PowerShell gives, so that no test changes an ACL of the clone or the
+            # execution policy, or sets off antivirus software.
+            @{ Case = 'may not be read'; Cause = '. Cause: access is denied'; Held = $false; Ansi = $false; Bytes = $null
+                Failure = { [Management.Automation.CommandNotFoundException]::new('X:\clone\src\PortableVM.psm1 may not be read.', [UnauthorizedAccessException]::new('Access is denied.')) } }
+            @{ Case = 'is refused by the execution policy'; Cause = '. Cause: PowerShell''s execution policy blocks it'; Held = $false; Ansi = $false; Bytes = $null
+                Failure = { [Management.Automation.PSSecurityException]::new('X:\clone\src\PortableVM.psm1 is not signed.', [UnauthorizedAccessException]::new('Access is denied.')) } }
+            @{ Case = 'is refused by the execution policy and does not parse either'; Cause = '. Cause: PowerShell''s execution policy blocks it'; Held = $false; Ansi = $false
+                Bytes = { [Text.Encoding]::ASCII.GetBytes("function {`r`n") }
+                Failure = { [Management.Automation.PSSecurityException]::new('X:\clone\src\PortableVM.psm1 is not signed.', [UnauthorizedAccessException]::new('Access is denied.')) } }
+            # A file that does not parse counts only when PowerShell reports a parse error.
+            @{ Case = 'fails with another error and does not parse either'; Cause = ''; Held = $false; Ansi = $false
+                Bytes = { [Text.Encoding]::ASCII.GetBytes("function {`r`n") }
+                Failure = { [Management.Automation.CommandNotFoundException]::new('X:\clone\src\PortableVM.psm1 was not found.', [IO.FileNotFoundException]::new('Not found.')) } }
+            @{ Case = 'fails with a parse error although it parses'; Cause = ''; Held = $false; Ansi = $false; Bytes = $null
+                Failure = {
+                    $extent = [Management.Automation.Language.Parser]::ParseInput('x', [ref]$null, [ref]$null).Extent
+                    [Management.Automation.ParseException]::new([Management.Automation.Language.ParseError[]]@([Management.Automation.Language.ParseError]::new($extent, 'ContentBlocked', 'X:\clone\src\PortableVM.psm1 is blocked.')))
+                } }
+        ) {
+            Assert-ModuleLoadCase -Cause $Cause -Held $Held -Ansi $Ansi -Failure $Failure -Bytes $Bytes
         }
-        $module = Join-Path $script:clone 'src\PortableVM.psm1'
-        $script:failure = $null
-        $holder = $null
-        if ($Bytes) { [IO.File]::WriteAllBytes($module, [byte[]](& $Bytes)) }
-        if ($Held) { $holder = [IO.File]::Open($module, 'Open', 'Read', 'None') }
-        if ($Failure) {
-            $script:loadFailure = & $Failure
-            Mock Import-Module { throw $script:loadFailure }
+
+        It 'names the cause but no path when the clone''s module <Case>, and shows the message with -Verbose' -Tag 'DesktopOnly' -ForEach @(
+            # Windows PowerShell 5.1 reads a script without a byte order mark as ANSI: there a dash in
+            # UTF-8 ends a string early, and the curly quotes of Windows-1252 make one. PowerShell 7
+            # reads it as UTF-8, so the same bytes give the opposite results there.
+            @{ Case = 'does not parse as ANSI, although it parses as UTF-8'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $true; Failure = $null
+                Bytes = { (New-Object System.Text.UTF8Encoding $false).GetBytes("`$dash = `"a $([char]0x2014) b`"`r`n") } }
+            @{ Case = 'stops while it loads, although it does not parse as UTF-8'; Cause = ''; Held = $false; Ansi = $true; Failure = $null
+                Bytes = { [byte[]]([Text.Encoding]::ASCII.GetBytes('$m = ') + 0x93 + [Text.Encoding]::ASCII.GetBytes('a (b') + 0x94 + [Text.Encoding]::ASCII.GetBytes("`r`nthrow 'stopped while it loads'`r`n")) } }
+        ) {
+            Assert-ModuleLoadCase -Cause $Cause -Held $Held -Ansi $Ansi -Failure $Failure -Bytes $Bytes
         }
-        try {
-            # The message PowerShell gives for the same import, which -Verbose must show.
-            $expected = try { Import-Module -Name $module -Force -Global -ErrorAction Stop } catch { $_.Exception.Message }
-            $verbose = @(& { try { $null = Invoke-PvmDeploy -RepositoryPath $script:clone -Target $script:target -Verbose } catch { $script:failure = $_ } } 4>&1)
-        } finally {
-            if ($holder) { $holder.Dispose() }
+
+        It 'names the cause but no path when the clone''s module <Case>, and shows the message with -Verbose' -Tag 'CoreOnly' -ForEach @(
+            @{ Case = 'stops while it loads, although it does not parse as ANSI'; Cause = ''; Held = $false; Ansi = $false; Failure = $null
+                Bytes = { (New-Object System.Text.UTF8Encoding $false).GetBytes("`$dash = `"a $([char]0x2014) b`"`r`nthrow 'stopped while it loads'`r`n") } }
+            @{ Case = 'does not parse as UTF-8, although it parses as ANSI'; Cause = '. Cause: it does not parse'; Held = $false; Ansi = $false; Failure = $null
+                Bytes = { [byte[]]([Text.Encoding]::ASCII.GetBytes('$m = ') + 0x93 + [Text.Encoding]::ASCII.GetBytes('a (b') + 0x94 + [Text.Encoding]::ASCII.GetBytes("`r`nthrow 'stopped while it loads'`r`n")) } }
+        ) {
+            Assert-ModuleLoadCase -Cause $Cause -Held $Held -Ansi $Ansi -Failure $Failure -Bytes $Bytes
         }
-        $script:failure.Exception.Message | Should -BeExactly "The clone's src\PortableVM.psm1 cannot be loaded, so the settings cannot be checked$Cause (-Verbose shows the details)."
-        $expected | Should -Not -BeNullOrEmpty
-        @($verbose | Where-Object { $_ -is [Management.Automation.VerboseRecord] -and $_.Message -eq $expected }) | Should -Not -BeNullOrEmpty
     }
 
     It 'only runs the checks under -WhatIf' {

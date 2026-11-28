@@ -465,7 +465,7 @@ Describe 'Host-neutral rules' {
         }
 
         It 'take a /dev path of names without . or .. as a raw disk: <Target>' -ForEach @(
-            @{ Target = '/dev/sdb' }, @{ Target = '/dev/nvme0n1' }, @{ Target = '/dev/disk/by-id/usb-Test_Stick_0-0:0' }, @{ Target = '/dev/mapper/..stick' }
+            @{ Target = '/dev/sdb' }, @{ Target = '/dev/nvme0n1' }, @{ Target = '/dev/disk/by-id/usb-Synthetic_Stick-0:0' }, @{ Target = '/dev/mapper/..stick' }
         ) {
             Test-PvmRawDeviceTarget -Target $Target | Should -BeTrue
         }

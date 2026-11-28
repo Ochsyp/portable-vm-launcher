@@ -1,9 +1,10 @@
 # Repository rules that keep private data out and the files usable on Windows: what git tracks,
 # how it stores text, that the sources are ASCII and parse in Windows PowerShell 5.1, static
-# guards on what the launcher and the tools may do, and that the privacy guard rails refuse what
-# they should. The file checks read git's index, so a new file counts once it is staged. The
-# guard-rail checks build small sample repositories in TestDrive; their private-looking values
-# are put together at run time, so this file itself passes privacy-scan and gitleaks.
+# guards on what the launcher and the tools may do, and that tools\Find-PrivateData.ps1 finds
+# what it should. The file checks read git's index, so a new file counts once it is staged. The
+# repository standard's own suites test its hooks and its privacy scan. The Find-PrivateData
+# checks build small sample repositories in TestDrive; their private-looking values are put
+# together at run time, so this file itself passes the privacy scan.
 
 BeforeAll {
     $script:repoRoot = Split-Path $PSScriptRoot -Parent
@@ -17,18 +18,6 @@ BeforeAll {
     $script:utf8 = New-Object System.Text.UTF8Encoding $false
     # A name with a letter outside ASCII, as a denylisted name can have.
     $script:sampleName = 'K' + [char]0x00E9 + 'l' + [char]0x00F8 + 'n' + [char]0x00EF
-
-    # Git for Windows' sh, which runs the hooks: the one on the path, as in Git Bash, or the one
-    # in a folder above git.exe, which sits in cmd\ or mingw64\bin\ of the Git folder.
-    $script:sh = (Get-Command -Name sh.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
-    if (-not $script:sh) {
-        $folder = Split-Path (Get-Command -Name git -CommandType Application | Select-Object -First 1).Source -Parent
-        while ($folder -and -not $script:sh) {
-            $script:sh = @('bin\sh.exe', 'usr\bin\sh.exe') | ForEach-Object { Join-Path $folder $_ } |
-                Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-            $folder = Split-Path $folder -Parent
-        }
-    }
 
     # Return the syntax tree of the PowerShell file $Path.
     function Get-SourceAst {
@@ -130,22 +119,6 @@ BeforeAll {
         foreach ($name in $Files.Keys) {
             [IO.File]::WriteAllText((Join-Path $Path $name), $Files[$name], $script:utf8)
         }
-    }
-
-    # Run .githooks/privacy-scan --staged in the repository at $Path; return its exit code and
-    # its lines.
-    function Invoke-PrivacyScan {
-        param([string]$Path)
-        $scanner = (Join-Path $script:repoRoot '.githooks\privacy-scan') -replace '\\', '/'
-        Push-Location -LiteralPath $Path
-        $previous = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try { $lines = @(& $script:sh $scanner --staged 2>&1 | ForEach-Object { "$_" }) }
-        finally {
-            $ErrorActionPreference = $previous
-            Pop-Location
-        }
-        [pscustomobject]@{ ExitCode = $LASTEXITCODE; Lines = $lines }
     }
 
     # Run tools/Find-PrivateData.ps1 -History on the repository at $Path in a new Windows
@@ -646,108 +619,40 @@ Describe 'Example settings' {
     }
 }
 
-Describe 'privacy-scan' -Tag 'WindowsOnly' {
-    It 'runs in the sh of Git for Windows' {
-        $script:sh | Should -Not -BeNullOrEmpty
+Describe 'Find-PrivateData' -Tag 'WindowsOnly' {
+    BeforeAll {
+        # Find-PrivateData reads every denylist the standard's hooks read; these tests give it an
+        # empty global git configuration and per-user folder, so no list of this PC is read.
+        $script:previousEnv = @{ GIT_CONFIG_GLOBAL = $env:GIT_CONFIG_GLOBAL; XDG_CONFIG_HOME = $env:XDG_CONFIG_HOME; PRIVACY_DENYLIST = $env:PRIVACY_DENYLIST }
+        $script:emptyGlobal = Join-Path $TestDrive 'empty.gitconfig'
+        [IO.File]::WriteAllText($script:emptyGlobal, '')
+        $env:GIT_CONFIG_GLOBAL = $script:emptyGlobal
+        $env:XDG_CONFIG_HOME = Join-Path $TestDrive 'xdg'
+        $env:PRIVACY_DENYLIST = $null
     }
 
-    It 'refuses home paths, e-mail and MAC addresses, and denylisted names in contents and file names' {
-        $sample = Join-Path $TestDrive 'scan-refuses'
-        $mac = @('02', '00', '5e', '10', '20', '30') -join ':'
-        Initialize-SampleRepository -Path $sample -Files @{
-            'path.txt'               = 'log at C:/Us' + 'ers/someone/notes.txt'
-            'mail.txt'               = 'write to someone' + '@' + 'mail.invalid'
-            'mac.txt'                = "adapter $mac"
-            'name.txt'               = "made by $script:sampleName"
-            "$script:sampleName.txt" = 'nothing private inside'
-        }
-        [IO.File]::WriteAllText((Join-Path $sample '.git\info\privacy-denylist'), "# test`n  $script:sampleName  `n", $script:utf8)
+    AfterAll {
+        foreach ($name in $script:previousEnv.Keys) { Set-Item -Path "env:$name" -Value $script:previousEnv[$name] }
+    }
+
+    It 'reads the lists that git config names in privacy.denylist and the per-user list, as the standard''s hooks do' {
+        $sample = Join-Path $TestDrive 'find-config-list'
+        Initialize-SampleRepository -Path $sample -Files @{ 'configured.txt' = "made by $script:sampleName"; 'peruser.txt' = 'made by Peruser Name' }
         Invoke-SampleGit -Path $sample -Arguments @('add', '-A')
-        $result = Invoke-PrivacyScan -Path $sample
+        $list = Join-Path $TestDrive 'configured-denylist'
+        [IO.File]::WriteAllText($list, "# a comment`n$script:sampleName`n", $script:utf8)
+        Invoke-SampleGit -Path $sample -Arguments @('config', 'privacy.denylist', ($list -replace '\\', '/'))
+        $null = New-Item -ItemType Directory -Path (Join-Path $env:XDG_CONFIG_HOME 'git-privacy') -Force
+        [IO.File]::WriteAllText((Join-Path $env:XDG_CONFIG_HOME 'git-privacy\denylist'), "Peruser Name`n", $script:utf8)
+        $result = Invoke-FindPrivateData -Path $sample
         $result.ExitCode | Should -Be 1
         $text = $result.Lines -join "`n"
-        $text | Should -Match 'path\.txt:1: user home path'
-        $text | Should -Match 'mail\.txt:1: e-mail address'
-        $text | Should -Match 'mac\.txt:1: MAC address'
-        $text | Should -Match 'name\.txt:1: denylisted value'
-        $text | Should -Match 'file name \d+ of the scanned paths: denylisted value'
+        $text | Should -Match 'is in index: configured\.txt'
+        $text | Should -Match 'is in index: peruser\.txt'
         $text.Contains($script:sampleName) | Should -BeFalse
+        Remove-Item -LiteralPath (Join-Path $env:XDG_CONFIG_HOME 'git-privacy\denylist')
     }
 
-    It 'lets the synthetic UUID and GitHub no-reply e-mail addresses through' {
-        $sample = Join-Path $TestDrive 'scan-passes'
-        Initialize-SampleRepository -Path $sample -Files @{
-            'ok.txt' = "id 5ca1ab1e-0000-4000-8000-000000000001`nby someone" + '@users.noreply.github.com'
-        }
-        Invoke-SampleGit -Path $sample -Arguments @('add', '-A')
-        $result = Invoke-PrivacyScan -Path $sample
-        $result.Lines | Should -BeNullOrEmpty
-        $result.ExitCode | Should -Be 0
-    }
-}
-
-Describe 'pre-push' -Tag 'WindowsOnly' {
-    BeforeAll {
-        # Run .githooks/pre-push in the repository at $Path for a push of a feature branch, with only
-        # git and the folder $Tools on the path, and $Exit as the exit code of a pwsh stub there.
-        # Returns the hook's exit code and lines, and the arguments the stub got, if it ran.
-        function Invoke-PrePush {
-            param([string]$Path, [string]$Tools, [string]$Exit = '0')
-            $hook = (Join-Path $script:repoRoot '.githooks\pre-push') -replace '\\', '/'
-            $git = Split-Path (Get-Command -Name git -CommandType Application | Select-Object -First 1).Source
-            $calls = Join-Path $Path 'pwsh-calls.txt'
-            $previousPath = $env:PATH
-            $previousExit = $env:PVM_STUB_EXIT
-            $previous = $ErrorActionPreference
-            Push-Location -LiteralPath $Path
-            try {
-                $env:PATH = "$Tools;$git"
-                $env:PVM_STUB_EXIT = $Exit
-                $ErrorActionPreference = 'Continue'
-                $lines = @('refs/heads/feature 0 refs/heads/feature 0' | & $script:sh $hook 2>&1 | ForEach-Object { "$_" })
-                $code = $LASTEXITCODE
-            } finally {
-                $ErrorActionPreference = $previous
-                $env:PATH = $previousPath
-                $env:PVM_STUB_EXIT = $previousExit
-                Pop-Location
-            }
-            $called = if (Test-Path -LiteralPath $calls) { [IO.File]::ReadAllText($calls) } else { $null }
-            [pscustomobject]@{ ExitCode = $code; Lines = $lines; Called = $called }
-        }
-    }
-
-    BeforeEach {
-        $script:sample = Join-Path $TestDrive "push-$([guid]::NewGuid().ToString('N').Substring(0, 8))"
-        Initialize-SampleRepository -Path $script:sample -Files @{ 'a.txt' = 'text' }
-        $null = New-Item -ItemType Directory -Path (Join-Path $script:sample 'LauncherData')
-        [IO.File]::WriteAllText((Join-Path $script:sample 'LauncherData\settings.psd1'), '@{}', $script:utf8)
-        $script:tools = Join-Path $script:sample 'tools-on-path'
-        $null = New-Item -ItemType Directory -Path $script:tools
-    }
-
-    It 'runs the privacy check in pwsh where powershell.exe is missing, and lets the push through when it passes' {
-        [IO.File]::WriteAllText((Join-Path $script:tools 'pwsh'), "#!/bin/sh`necho `"`$*`" > pwsh-calls.txt`nexit `"`$PVM_STUB_EXIT`"`n", $script:utf8)
-        $result = Invoke-PrePush -Path $script:sample -Tools $script:tools
-        $result.ExitCode | Should -Be 0
-        $result.Called | Should -Match '-File \S*tools/Find-PrivateData\.ps1 -History'
-    }
-
-    It 'refuses the push when the privacy check in pwsh finds something' {
-        [IO.File]::WriteAllText((Join-Path $script:tools 'pwsh'), "#!/bin/sh`necho `"`$*`" > pwsh-calls.txt`nexit `"`$PVM_STUB_EXIT`"`n", $script:utf8)
-        $result = Invoke-PrePush -Path $script:sample -Tools $script:tools -Exit '1'
-        $result.ExitCode | Should -Be 1
-        $result.Called | Should -Not -BeNullOrEmpty
-    }
-
-    It 'refuses the push when neither powershell.exe nor pwsh can run the privacy check' {
-        $result = Invoke-PrePush -Path $script:sample -Tools $script:tools
-        $result.ExitCode | Should -Be 1
-        ($result.Lines -join "`n") | Should -Match 'neither powershell\.exe nor pwsh'
-    }
-}
-
-Describe 'Find-PrivateData' -Tag 'WindowsOnly' {
     It 'finds a denylisted name outside ASCII in contents, file names, messages and ref names, and never prints it' {
         $sample = Join-Path $TestDrive 'find-name'
         Initialize-SampleRepository -Path $sample -Files @{

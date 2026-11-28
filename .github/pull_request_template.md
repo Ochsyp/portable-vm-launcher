@@ -2,19 +2,27 @@
 
 ## Phase
 
-<!-- The phase of the redesign this pull request holds, or "none". -->
+<!-- The phase this pull request holds, or "none". -->
 
-## Checks on the test bed or the stick
+## Release impact
 
-<!-- What the tests cannot prove and a run on the VHDX test bed, a scratch VM or the stick must, or "none". -->
+<!-- patch, minor or major, and why (CONTRIBUTING.md, Releasing), or "none" when nothing that
+ships changes. -->
+
+## Checks on the target
+
+<!-- What the tests cannot prove and a run on the target must (CONTRIBUTING.md, Checks), or
+"none". -->
 
 ## Checklist
 
 - [ ] One phase or one change in this pull request
-- [ ] `CHANGELOG.md` has an entry under Unreleased
-- [ ] `tests\run-checks.ps1` passes (PSScriptAnalyzer and Pester)
-- [ ] `sh .githooks/privacy-scan --tracked` passes
-- [ ] `tools\Find-PrivateData.ps1 -History` exits 0 after checking at least one value (the settings file or the denylist exists)
-- [ ] No disk or VM identifiers, VM or guest names, personal paths, host names, addresses or secrets in the change; examples use the synthetic `5ca1ab1e` identifiers
+- [ ] `CHANGELOG.md` has an entry under Unreleased, unless this is a release pull request or
+      the fix of a draft release
+- [ ] The checks in CONTRIBUTING.md, Checks, pass, and no test was skipped (no-skips reads bats
+      output only, so check the log of any other test stage)
+- [ ] No private data in the change, the title, this text or the branch name: no personal names,
+      paths, host names, addresses, hardware or VM identifiers, real logs or secrets; examples
+      use the synthetic values in CONTRIBUTING.md, Test data
 
 CONTRIBUTING.md describes the workflow.

@@ -1,0 +1,31 @@
+#!/bin/bash
+# The CI stage system of the repository standard, which run-stage runs on Linux from the top of
+# the repository: the Pester tests in PowerShell 7, all but those tagged WindowsOnly, as a Linux
+# host runs the launcher. A failed or skipped test fails the stage (-FailOnSkip).
+# install-tools installs the PowerShell modules for Windows only, so this script fetches the
+# Pester package that install-tools pins, checks it against install-tools' SHA-256, and unpacks it
+# without its package metadata into a folder of its own, first on the module path.
+set -euo pipefail
+
+top=$(git rev-parse --show-toplevel)
+pins=$top/.github/standard/bin/install-tools
+version=$(sed -n 's/^readonly PESTER_VERSION=\([0-9][0-9.]*\)$/\1/p' "$pins")
+sha=$(sed -n 's/^readonly PESTER_SHA256=\([0-9a-f]\{64\}\)$/\1/p' "$pins")
+if [[ -z $version || -z $sha ]]; then
+    echo "ci/system: install-tools pins no Pester version and SHA-256" >&2
+    exit 1
+fi
+
+work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/system.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+curl --fail --silent --show-error --location --retry 3 --output "$work/pester.nupkg" \
+    "https://www.powershellgallery.com/api/v2/package/Pester/$version"
+echo "$sha  $work/pester.nupkg" | sha256sum --check --quiet -
+dir=$work/modules/Pester/$version
+mkdir -p "$dir"
+unzip -q "$work/pester.nupkg" -d "$dir"
+rm -rf -- "$dir/_rels" "$dir/package" "$dir/[Content_Types].xml" "$dir/Pester.nuspec"
+[[ -f $dir/Pester.psd1 ]] || { echo "ci/system: the Pester package holds no Pester.psd1" >&2; exit 1; }
+
+PSModulePath="$work/modules${PSModulePath:+:$PSModulePath}" \
+    pwsh -NoProfile -File "$top/tests/run-checks.ps1" -SkipAnalyzer -ExcludeTag WindowsOnly -FailOnSkip
