@@ -3726,16 +3726,18 @@ function Invoke-PvmVMware {
     if (-not $disk) {
         Write-PvmLog -Path $log -Message 'DRY RUN - no VMware disk file to point at the stick'
     } else {
+        # The file is read before the try, so that only a write that stopped after its swap, which
+        # leaves the file pointed at the stick, says so.
+        $change = $null
+        $exists = [IO.File]::Exists($disk)
+        if ($exists) {
+            $copies = @{ Root = $Context.Root; Backups = $Context.Backups; Path = $disk }
+            $change = Get-PvmDescriptorChange -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @copies -Suffix '.orig') -PreviousPath (Get-PvmBackupPath @copies -Suffix '.previous.orig') -LogPath $log
+        }
         try {
-            if ([IO.File]::Exists($disk)) {
-                $copies = @{ Root = $Context.Root; Backups = $Context.Backups; Path = $disk }
-                $change = Get-PvmDescriptorChange -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @copies -Suffix '.orig') -PreviousPath (Get-PvmBackupPath @copies -Suffix '.previous.orig') -LogPath $log
-                if ($null -ne $change) { Save-PvmFileChange -Change $change -LogPath $log -WhatIf:$Context.DryRun }
-            } else {
-                New-PvmVMwareDescriptor -Path $disk -Layout $layout -LogPath $log -AdapterType $Context.VmFiles.VMwareAdapter -WhatIf:$Context.DryRun
-            }
+            if (-not $exists) { New-PvmVMwareDescriptor -Path $disk -Layout $layout -LogPath $log -AdapterType $Context.VmFiles.VMwareAdapter -WhatIf:$Context.DryRun }
+            elseif ($null -ne $change) { Save-PvmFileChange -Change $change -LogPath $log -WhatIf:$Context.DryRun }
         } catch {
-            # A write that stopped after the swap leaves the file pointed at the stick.
             if (Test-PvmDescriptorArmed -Path $disk) { throw (Get-PvmStillArmedStop -Context $Context -Disk $disk -ErrorRecord $_) }
             throw
         }

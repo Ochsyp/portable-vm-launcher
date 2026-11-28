@@ -4382,6 +4382,15 @@ Describe 'Arm, verify, watch' -Tag 'WindowsOnly' {
             $result.Message | Should -BeExactly "The VM did not start in VMware within 60 s, so the launcher pointed its disk file away from the stick again. VMware's window may say why; then start the VM again.`n`nThe launcher could not check whether it runs: Call cancelled"
         }
 
+        It 'says nothing about the stick''s disk when the disk file cannot be read before any write' {
+            # A NUL byte makes the descriptor unreadable as text; nothing is written to it.
+            [IO.File]::WriteAllText($script:stick.VMwareDisk, "createType=`"fullDevice`"`r`n`0")
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -Not -BeLike "*names the stick's disk now*"
+            Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+        }
+
         It 'says that the disk file names the stick''s disk when pointing it at the stick did not finish' {
             Mock -ModuleName PortableVM Save-PvmFileChange {
                 [IO.File]::WriteAllText($script:stick.VMwareDisk, (Get-TestStickDescriptorText))
@@ -4523,6 +4532,22 @@ Describe 'Arm, verify, watch' -Tag 'WindowsOnly' {
                 [IO.File]::ReadAllText($script:stick.VirtualBoxDisk) | Should -BeLike '*FLAT "\\.\PortableVM-disarmed" 0*'
                 Should -Invoke -CommandName Wait-PvmProcessExit -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $Name -eq 'VBoxSVC' -and $TimeoutSeconds -eq 60 }
             } finally { Set-ItemProperty -LiteralPath $script:stick.VirtualBoxDisk -Name IsReadOnly -Value $false }
+        }
+
+        It 'says that the disk file names the stick''s disk when pointing it at the stick did not finish' {
+            Mock -ModuleName PortableVM Save-PvmFileChange {} -ParameterFilter { $Change.Path -ne $script:stick.VirtualBoxDisk }
+            Mock -ModuleName PortableVM Save-PvmFileChange {
+                [IO.File]::WriteAllText($script:stick.VirtualBoxDisk, (Get-TestStickDescriptorText -Newline "`n"))
+                throw (& (Get-Module PortableVM) { Get-PvmStopException -Message 'A write of stick.vmdk did not finish. Nothing was started.' })
+            } -ParameterFilter { $Change.Path -eq $script:stick.VirtualBoxDisk -and $Change.Action -ne 'Point the raw-disk descriptor away from the stick' }
+            Write-TestFile -Path $script:stick.VirtualBoxDisk -Text (Get-TestStickDescriptorText -Newline "`n").Replace('\\.\PhysicalDrive3', '\\.\PortableVM-disarmed')
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly "A write of stick.vmdk did not finish. Nothing was started.`n`nstick.vmdk names the stick's disk now. Start the VM only through the launcher, whose next start sets that right."
+            $log = @(Get-TestLog -Path $script:stick.Log)
+            $log | Should -Contain "STOPPED: A write of stick.vmdk did not finish. Nothing was started."
+            $log | Should -Contain "stick.vmdk names the stick's disk now. Start the VM only through the launcher, whose next start sets that right."
+            Should -Invoke -CommandName Invoke-PvmNative -ModuleName PortableVM -Times 0 -Exactly -ParameterFilter { $ArgumentList[0] -eq 'startvm' }
         }
 
         It 'logs a note when the background service still runs after the wait, and reads the file once more anyway' {
