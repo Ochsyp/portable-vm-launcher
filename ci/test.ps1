@@ -57,10 +57,21 @@ public static class PvmCiPrivilege {
     }
 }
 '@
-foreach ($privilege in 'SeBackupPrivilege', 'SeRestorePrivilege') { [PvmCiPrivilege]::Disable($privilege) }
-# The token's state, for the log: both lines must say Disabled, or show no such privilege. Windows'
-# own whoami, since Git Bash puts its own first on the Path.
-& (Join-Path $env:SystemRoot 'System32\whoami.exe') /priv | Select-String -Pattern 'SeBackupPrivilege|SeRestorePrivilege' | ForEach-Object { $_.Line }
+try {
+    foreach ($privilege in 'SeBackupPrivilege', 'SeRestorePrivilege') { [PvmCiPrivilege]::Disable($privilege) }
+} catch {
+    Write-Output "ci/test.ps1: the backup and restore privileges could not be turned off: $($_.Exception.Message)"
+    exit 1
+}
+# The token's state, for the log; a privilege still enabled stops the stage before any test runs.
+# Windows' own whoami, since Git Bash puts its own first on the Path.
+$states = @(& (Join-Path $env:SystemRoot 'System32\whoami.exe') /priv | Select-String -Pattern 'SeBackupPrivilege|SeRestorePrivilege' | ForEach-Object { $_.Line })
+$states | ForEach-Object { Write-Output $_ }
+$enabled = @($states | Where-Object { $_ -match '\bEnabled\s*$' })
+if ($enabled.Count -gt 0) {
+    Write-Output 'ci/test.ps1: a backup or restore privilege is still enabled, so a Deny rule would not stop a read; no test was run.'
+    exit 1
+}
 
 $checks = Join-Path $PSScriptRoot '..\tests\run-checks.ps1'
 powershell -NoProfile -ExecutionPolicy Bypass -File $checks -SkipAnalyzer -FailOnSkip

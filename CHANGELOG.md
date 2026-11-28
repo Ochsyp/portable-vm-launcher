@@ -230,16 +230,17 @@ All notable changes to this project are listed here. The format follows
 ### Changed
 
 - Repository standard 1.4.0: adopted, with the hooks, checks, workflows and blocks (d238). Its
-  hooks replace this repository's own, and its `ci` and `secret-scan` workflows the old ones:
-  CI runs the stages `lint` and `test` on Windows (the analyzer, and every test in Windows
-  PowerShell 5.1 and PowerShell 7) and `system` on Linux (the tests in PowerShell 7), and fails on
-  a skipped test. The privacy rules run with the `base`, `disk` and `vm` packs; `.gitleaks.toml`
-  and the tests of the old privacy scan are gone. Releases are zips of the standard's release
-  flow, from `VERSION` 0.1.0-dev on, with none before the release audit. `tests\run-checks.ps1`
-  reads the tool versions that `install-tools` pins and gets `-FailOnSkip`, two tests of one
-  edition of PowerShell are tagged `DesktopOnly` and `CoreOnly` instead of skipping, and
-  `tools\Find-PrivateData.ps1` reads every denylist the hooks read; it now runs by hand, no
-  longer before each push.
+  hooks replace this repository's own, and its `ci` and `secret-scan` workflows the old ones: CI
+  runs the stages `lint` and `test` on Windows (the analyzer, and every test in Windows
+  PowerShell 5.1 and PowerShell 7) and `system` on Linux (the tests in PowerShell 7), and fails
+  on a skipped test; the test stage turns off the backup and restore privileges that Git Bash
+  enables on the runner, so the tests' Deny rules hold. The privacy rules run with the `base`,
+  `disk` and `vm` packs; `.gitleaks.toml` and the tests of the old privacy scan are gone.
+  Releases are zips of the standard's release flow, from `VERSION` 0.1.0-dev on, with none
+  before the release audit. `tests\run-checks.ps1` reads the tool versions that `install-tools`
+  pins and gets `-FailOnSkip`, two tests of one edition of PowerShell are tagged `DesktopOnly`
+  and `CoreOnly` instead of skipping, and `tools\Find-PrivateData.ps1` reads every denylist the
+  hooks read; it now runs by hand, no longer before each push.
 
 Compared with the launcher on a stick before the redesign:
 
