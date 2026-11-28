@@ -159,6 +159,22 @@ All notable changes to this project are listed here. The format follows
 - Tests of whole VMware starts and dry runs with VMware's blank at the end of the extent line and
   a tab at the end of the `createType` line: the disk file and its copies stay byte for byte as
   they were, so a later start path that compares the file another way fails a test.
+- One disk layout for both programs (phase 8, d228 and d236). A VirtualBox start now gives the
+  guest the stick as a VMware start does: the Data partition reads as zeros and the guest's
+  writes there are dropped, so the guest never sees the partition that Windows uses at the same
+  time. Both disk files get the same two extents, the stick writable up to Data and Data as
+  zeros, and `createType="fullDevice"`. The stick's boot area stays the guest's to read and
+  write, as before. A read-only boot area was built first and dropped in the stick check: with
+  the stick named in a read-only extent in front of a writable one, VirtualBox opened it once,
+  read-only, and refused every write of the guest. `HideDataPartition` and `ProtectBootArea` are
+  no longer used; a file may keep them, and the log notes each. At the next start in each
+  program, the launcher rewrites that program's disk file with copies where it differs. The
+  read-only check compares each disk file with the one layout; the stick-check tool knows the new
+  notes. Both keys that are no longer used pass whatever their value, so neither stops a start.
+- `tools\Compare-StickDryRun.ps1` says plainly, before it changes anything, when `-Target`,
+  `-OutputFolder` or `-RunFolder` holds `=>`, as when it was started through
+  `powershell -File` with several values after `-ExpectChange`. Its header and
+  `docs\stick-tests.md` show the `-Command` form that passes several.
 - The VM's size at each start (request r9). The launcher reads the PC's cores, threads and memory
   and sizes the VM in the program it starts: all but one core or two threads, 2 to 8 CPUs, and
   half the PC's memory while leaving the PC at least 6 GB, 4 to 16 GB. It writes the `.vmx`

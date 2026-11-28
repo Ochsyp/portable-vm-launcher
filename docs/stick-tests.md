@@ -248,6 +248,14 @@ where it was not:
 -ExpectChange 'descriptor would be pointed at the stick => descriptor already points at the stick'
 ```
 
+Several expected changes need `-Command` instead of `-File`. Through `-File`, Windows PowerShell
+gives `-ExpectChange` only the first value and binds the next ones by position to `-Target`,
+`-OutputFolder` and `-RunFolder`; the tool then refuses with a plain reason and changes nothing:
+
+```text
+powershell -NoProfile -ExecutionPolicy RemoteSigned -Command "& '.\tools\Compare-StickDryRun.ps1' -ExpectChange '=> a', 'b => c'"
+```
+
 `'=> <kind>'` expects an added line and `'<kind> =>'` a removed one. Where several lines in a row
 differ, the removed and added ones pair up in order, and the output names each pair. Each
 expected change must

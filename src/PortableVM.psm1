@@ -809,6 +809,7 @@ function Get-PvmStickDevice {
 # Return settings schema 2, one entry per key, in the order the checks report them: its Name,
 # whether it is Required, the Default a missing key gets, the Kind of value it holds and the
 # Values that kind allows: the words of a Choice, or the extension of a Path, none for a folder.
+# A key of the Kind Unused is no longer used: any value passes, and a start notes the key.
 function Get-PvmSettingSchema {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -820,7 +821,8 @@ function Get-PvmSettingSchema {
     [pscustomobject]@{ Name = 'Hypervisor'; Required = $false; Default = 'Auto'; Kind = 'Choice'; Values = @('Auto', 'VMware', 'VirtualBox') }
     [pscustomobject]@{ Name = 'VMwareView'; Required = $false; Default = 'Window'; Kind = 'Choice'; Values = @('Window', 'FullScreen') }
     [pscustomobject]@{ Name = 'SavedStatePolicy'; Required = $false; Default = 'Ask'; Kind = 'Choice'; Values = @('Ask', 'Refuse') }
-    [pscustomobject]@{ Name = 'HideDataPartition'; Required = $false; Default = $false; Kind = 'Bool'; Values = @() }
+    [pscustomobject]@{ Name = 'HideDataPartition'; Required = $false; Default = $null; Kind = 'Unused'; Values = @() }
+    [pscustomobject]@{ Name = 'ProtectBootArea'; Required = $false; Default = $null; Kind = 'Unused'; Values = @() }
     [pscustomobject]@{ Name = 'StickMbrSignature'; Required = $true; Default = $null; Kind = 'Signature'; Values = @() }
     [pscustomobject]@{ Name = 'StickSectors'; Required = $true; Default = $null; Kind = 'Count'; Values = @() }
     [pscustomobject]@{ Name = 'VmSectors'; Required = $true; Default = $null; Kind = 'Count'; Values = @() }
@@ -920,6 +922,8 @@ function Get-PvmValueProblem {
     switch ($Entry.Kind) {
         'Schema' { if (-not ($Value -is [int] -and $Value -eq 2)) { return 'must be 2, the only schema this launcher reads' } }
         'Bool' { if ($Value -isnot [bool]) { return 'must be $true or $false' } }
+        # A key that is no longer used changes nothing, so no value of it stops a start.
+        'Unused' { }
         'Name' {
             if (-not ($text -and (Test-PvmNameText -Value $Value))) {
                 return 'must be 1 to 40 characters of text that shows, without control or formatting characters, and without a blank or a joiner at either end'
@@ -1484,28 +1488,45 @@ function Write-PvmFile {
 # --- Raw-disk descriptors --------------------------------------------------------------------
 
 # Return what the VM gets of the raw disk $Drive, as the CreateType and the Extents lines of a
-# descriptor: sectors 0 to VmSectors-1 of the stick, with the Data partition, from sector
-# DataPartitionStart on, blanked when $HideData is set.
+# descriptor, the same in VMware and VirtualBox: sectors 0 to VmSectors-1 of the stick, writable,
+# with the Data partition, from sector DataPartitionStart on, blanked: the guest reads zeros there,
+# and its writes there are dropped. The stick is named in one extent only, and no part of it is
+# read-only: VirtualBox opens a device that two extents name once, with the first extent's access,
+# so a read-only boot area in front made it refuse every write of the guest. The createType is
+# 'fullDevice', which VMware needs for this layout: in 'partitionedDevice' mode it insists on its
+# own partition-table copy and refuses the descriptor.
 function Get-PvmDiskLayout {
     [CmdletBinding()]
     [OutputType([hashtable])]
     param(
         [Parameter(Mandatory)][string]$Drive,
         [int64]$VmSectors,
-        [int64]$DataPartitionStart,
-        [bool]$HideData
+        [int64]$DataPartitionStart
     )
-    if ($HideData) {
-        @{
-            CreateType = 'partitionedDevice'
-            Extents    = @(('RW {0} FLAT "{1}" 0' -f $DataPartitionStart, $Drive), ('RW {0} ZERO' -f ($VmSectors - $DataPartitionStart)))
-        }
-    } else {
-        @{
-            CreateType = 'fullDevice'
-            Extents    = @(('RW {0} FLAT "{1}" 0' -f $VmSectors, $Drive))
-        }
+    @{
+        CreateType = 'fullDevice'
+        Extents    = @(('RW {0} FLAT "{1}" 0' -f $DataPartitionStart, $Drive), ('RW {0} ZERO' -f ($VmSectors - $DataPartitionStart)))
     }
+}
+
+# Return the raw-disk layout (Get-PvmDiskLayout) for a start in either program on the raw disk
+# $Drive, as $Context and its Settings describe. Each of the settings HideDataPartition and
+# ProtectBootArea, which are no longer used, gets a note in the log when the file names it.
+function Get-PvmStartLayout {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][string]$Drive
+    )
+    $settings = $Context.Settings
+    if ($null -ne $settings['HideDataPartition']) {
+        Write-PvmLog -Path $Context.LogPath -Message (Format-PvmMessage -Names $Context.Names -Template 'Note: HideDataPartition is no longer used: in VMware and in VirtualBox, {guest} sees the Data partition as zeros.')
+    }
+    if ($null -ne $settings['ProtectBootArea']) {
+        Write-PvmLog -Path $Context.LogPath -Message (Format-PvmMessage -Names $Context.Names -Template "Note: ProtectBootArea is no longer used: in VMware and in VirtualBox, {guest} can write the stick's boot area, as before phase 8.")
+    }
+    Get-PvmDiskLayout -Drive $Drive -VmSectors $settings['VmSectors'] -DataPartitionStart $settings['DataPartitionStart']
 }
 
 # Return the descriptor bytes $Bytes as text with one character per byte (ISO-8859-1), so that a
@@ -3661,11 +3682,11 @@ function Start-PvmVMwareVm {
 }
 
 # Start the VM in VMware Workstation from the folder $VMwareDir on the raw disk $Drive, as
-# $Context and its Settings describe. VMware always gets the stick with the Data partition blanked:
-# while the VM runs, it takes every Windows volume in the disk area it gives the VM away from
-# Windows, and it cannot do that for the Data partition, which holds the VM's own files. The disk
-# stays 'fullDevice', because in 'partitionedDevice' mode VMware insists on its own partition-table
-# copy and refuses this descriptor. Returns 'AlreadyRunning', 'DryRun' or 'Started'; throws a stop.
+# $Context and its Settings describe, with the layout a VirtualBox start gives too
+# (Get-PvmStartLayout): the Data partition blanked, since VMware takes every Windows volume in the
+# disk area it gives the VM away from Windows while the VM runs, and cannot do that for the Data
+# partition, which holds the VM's own files. Returns 'AlreadyRunning', 'DryRun' or 'Started';
+# throws a stop.
 function Invoke-PvmVMware {
     [CmdletBinding()]
     [OutputType([string])]
@@ -3679,8 +3700,6 @@ function Invoke-PvmVMware {
     Enter-PvmStep -Context $Context -Name 'checks'
     $settings = $Context.Settings
     $log = $Context.LogPath
-    $layout = Get-PvmDiskLayout -Drive $Drive -VmSectors $settings['VmSectors'] -DataPartitionStart $settings['DataPartitionStart'] -HideData $true
-    $layout.CreateType = 'fullDevice'
     $vmx = Join-PvmStickPath -Root $Context.Root -Path $settings['VMwareVmx']
     if ($Decision.AlreadyRunning) {
         Write-PvmLog -Path $log -Message 'Already running in VMware.'
@@ -3689,6 +3708,7 @@ function Invoke-PvmVMware {
     foreach ($kind in $Decision.Stops) { Invoke-PvmStopUnlessDryRun -Context $Context -Message (Get-PvmDecisionMessage -Kind $kind -Context $Context -Snapshot $Snapshot -Use 'VMware') }
     if ($Context.VmFiles.VMwareProblem) { Invoke-PvmStopUnlessDryRun -Context $Context -Message $Context.VmFiles.VMwareProblem }
     foreach ($problem in @(Get-PvmMountedStop -Context $Context -Disk $Context.StickDisk -Program 'VMware')) { Invoke-PvmStopUnlessDryRun -Context $Context -Message $problem }
+    $layout = Get-PvmStartLayout -Context $Context -Drive $Drive
     Assert-PvmVMwareReady -Context $Context -Vmx $vmx
 
     Enter-PvmStep -Context $Context -Name 'files'
@@ -3812,7 +3832,6 @@ function Invoke-PvmVirtualBox {
     Enter-PvmStep -Context $Context -Name 'checks'
     $settings = $Context.Settings
     $log = $Context.LogPath
-    $layout = Get-PvmDiskLayout -Drive $Drive -VmSectors $settings['VmSectors'] -DataPartitionStart $settings['DataPartitionStart'] -HideData $settings['HideDataPartition']
     $vboxManage = Join-Path $VirtualBoxDir 'VBoxManage.exe'
     $uuid = $Context.VmFiles.VirtualBoxVmUuid
     Invoke-PvmSetEnvironment -Name 'VBOX_USER_HOME' -Value (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxHome'])
@@ -3820,6 +3839,7 @@ function Invoke-PvmVirtualBox {
     foreach ($kind in $Decision.Stops) { Invoke-PvmStopUnlessDryRun -Context $Context -Message (Get-PvmDecisionMessage -Kind $kind -Context $Context -Snapshot $Snapshot -Use 'VirtualBox') }
     if ($Context.VmFiles.VirtualBoxProblem) { Invoke-PvmStopUnlessDryRun -Context $Context -Message $Context.VmFiles.VirtualBoxProblem }
     foreach ($problem in @(Get-PvmVirtualBoxStorageProblem -Context $Context -Disk $Context.StickDisk)) { Invoke-PvmStopUnlessDryRun -Context $Context -Message $problem }
+    $layout = Get-PvmStartLayout -Context $Context -Drive $Drive
     $open = @(Invoke-PvmGetProcess -Name 'VirtualBox', 'VirtualBoxVM', 'VBoxHeadless')
     if ($open.Count) {
         # VirtualBox hides its VM processes' command lines, so VirtualBox is asked whether this VM is

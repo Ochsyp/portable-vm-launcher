@@ -77,12 +77,21 @@ BeforeAll {
         [pscustomobject]$partition
     }
 
+    # Return the partitions of the synthetic stick, disk 3, as Windows lists them: partition 1,
+    # FAT32 from sector 2048 without a drive letter, and the Data partition with the letter
+    # $Letter.
+    function Get-TestStickPartition {
+        param([string]$Letter)
+        Get-TestPartition -Change @{ PartitionNumber = 1; Offset = [uint64]2048 * 512; Size = [uint64]997952 * 512; DriveLetter = [char]0; AccessPaths = @() }
+        Get-TestPartition -Change @{ PartitionNumber = 2; DriveLetter = [char]$Letter; AccessPaths = @("${Letter}:\") }
+    }
+
     # Return the schema 2 settings of the synthetic stick, with the values in $Change replaced; a
     # $null in $Change leaves that key out.
     function Get-TestSettingTable {
         param([hashtable]$Change = @{})
         $settings = @{
-            SchemaVersion = 2; Hypervisor = 'Auto'; VMwareView = 'Window'; HideDataPartition = $false
+            SchemaVersion = 2; Hypervisor = 'Auto'; VMwareView = 'Window'
             StickMbrSignature = '5CA1AB1E'; StickSectors = 4000000; VmSectors = 3900000; DataPartitionStart = 2500000
             VirtualBoxVmUuid = $script:uuid; VirtualBoxHome = 'VirtualBox'
             VirtualBoxVbox = 'VirtualBox\Test VM\Test VM.vbox'; VirtualBoxDisk = 'VirtualBox\Test VM\stick.vmdk'
@@ -115,13 +124,14 @@ BeforeAll {
             '# The Disk Data Base', '#DDB', '', 'ddb.adapterType = "lsilogic"', '') -join $Newline
     }
 
-    # Return the VMware descriptor text that already points at the synthetic stick (disk 3, Data
-    # blanked), with $ExtentEnd after its FLAT extent line and $CreateTypeEnd after its createType
-    # line, as VMware leaves a blank there when it writes the file.
+    # Return the descriptor text that already points at the synthetic stick (disk 3): writable up
+    # to the Data partition, and Data blanked. $ExtentEnd follows its first extent line and
+    # $CreateTypeEnd its createType line, as VMware leaves a blank there when it writes the file;
+    # $Newline ends each line.
     function Get-TestStickDescriptorText {
-        param([string]$ExtentEnd = '', [string]$CreateTypeEnd = '')
-        (Get-TestDescriptorText).Replace('createType="fullDevice"', "createType=`"fullDevice`"$CreateTypeEnd").
-        Replace('RW 3900000 FLAT "\\.\PhysicalDrive1" 0', "RW 2500000 FLAT `"\\.\PhysicalDrive3`" 0$ExtentEnd`r`nRW 1400000 ZERO")
+        param([string]$ExtentEnd = '', [string]$CreateTypeEnd = '', [string]$Newline = "`r`n")
+        (Get-TestDescriptorText -Newline $Newline).Replace('createType="fullDevice"', "createType=`"fullDevice`"$CreateTypeEnd").
+        Replace('RW 3900000 FLAT "\\.\PhysicalDrive1" 0', "RW 2500000 FLAT `"\\.\PhysicalDrive3`" 0$ExtentEnd${Newline}RW 1400000 ZERO")
     }
 
     # Return the text of the synthetic .vmx with CRLF line endings: complete, with uuid.action =
@@ -267,7 +277,7 @@ BeforeAll {
         Mock -ModuleName PortableVM Invoke-PvmGetHostSize { [pscustomobject]@{ Cores = 8; Threads = 16; MemoryMB = 32768; FreeMB = 24576 } }
         Mock -ModuleName PortableVM Invoke-PvmGetFreeSpace { [int64]64GB }
         Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { throw "No disk has the number $Number." }
-        Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { Get-TestPartition -Change @{ DriveLetter = [char]$script:testStick.Letter; AccessPaths = @("$($script:testStick.Letter):\") } } -ParameterFilter { $Number -eq 3 }
+        Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { Get-TestStickPartition -Letter $script:testStick.Letter } -ParameterFilter { $Number -eq 3 }
         Mock -ModuleName PortableVM Invoke-PvmGetDisk { throw "No disk has the number $Number." }
         Mock -ModuleName PortableVM Invoke-PvmGetDisk { Get-TestDisk } -ParameterFilter { $Number -eq 3 }
         Mock -ModuleName PortableVM Invoke-PvmGetDeviceGuard { $null }
@@ -741,16 +751,28 @@ Describe 'Safe writes' -Tag 'WindowsOnly' {
 }
 
 Describe 'Raw-disk descriptors' {
-    It 'map the whole VM range when the Data partition is shown' {
-        $layout = Get-PvmDiskLayout -Drive '\\.\PhysicalDrive3' -VmSectors 3900000 -DataPartitionStart 2500000 -HideData $false
+    It 'give the guest the stick writable up to the Data partition, and Data blanked, in one layout for both programs' {
+        $layout = Get-PvmDiskLayout -Drive '\\.\PhysicalDrive3' -VmSectors 3900000 -DataPartitionStart 2500000
         $layout.CreateType | Should -BeExactly 'fullDevice'
-        $layout.Extents | Should -BeExactly @('RW 3900000 FLAT "\\.\PhysicalDrive3" 0')
+        $layout.Extents | Should -BeExactly @('RW 2500000 FLAT "\\.\PhysicalDrive3" 0', 'RW 1400000 ZERO')
     }
 
-    It 'blank the Data partition when it is hidden' {
-        $layout = Get-PvmDiskLayout -Drive '\\.\PhysicalDrive3' -VmSectors 3900000 -DataPartitionStart 2500000 -HideData $true
-        $layout.CreateType | Should -BeExactly 'partitionedDevice'
-        $layout.Extents | Should -BeExactly @('RW 2500000 FLAT "\\.\PhysicalDrive3" 0', 'RW 1400000 ZERO')
+    # With a read-only extent first, VirtualBox opened the device once, read-only, for both FLAT
+    # extents, and refused every write of the guest (pull request 20's stick check).
+    It 'name the stick in one extent only, and mark no part of it read-only' {
+        $layout = Get-PvmDiskLayout -Drive '\\.\PhysicalDrive3' -VmSectors 3900000 -DataPartitionStart 2500000
+        @($layout.Extents | Where-Object { $_ -match '^(RDONLY|NOACCESS) ' }) | Should -BeNullOrEmpty
+        @($layout.Extents | Where-Object { $_ -like '*PhysicalDrive3*' }).Count | Should -Be 1
+        (Get-Command -Name Get-PvmDiskLayout).Parameters.Keys | Should -Not -Contain 'BootSectors'
+        Get-Command -Name Get-PvmBootArea -Module PortableVM -ErrorAction SilentlyContinue | Should -BeNullOrEmpty
+    }
+
+    It 'read back through the launcher''s own descriptor reader, so a start can rewrite them again' {
+        $layout = Get-PvmDiskLayout -Drive '\\.\PhysicalDrive3' -VmSectors 3900000 -DataPartitionStart 2500000
+        $extents = @(ConvertFrom-PvmDescriptorText -Text (ConvertTo-PvmDescriptorText -Text (Get-TestDescriptorText) -Layout $layout) | Where-Object { $_.Kind -eq 'Extent' })
+        @($extents | ForEach-Object { $_.Access }) | Should -BeExactly @('RW', 'RW')
+        @($extents | ForEach-Object { $_.Sectors }) | Should -BeExactly @('2500000', '1400000')
+        @($extents | ForEach-Object { $_.Offset }) | Should -BeExactly @('0', '')
     }
 
     It 'replace the extents and createType and keep every other line and CRLF' {
@@ -1862,6 +1884,37 @@ Describe 'A start' {
             Get-TestLog -Path $script:stick.Log | Should -Contain 'Creating stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'
         }
 
+        It 'gives the one layout whatever ProtectBootArea says, and notes that the setting is no longer used (<Value>)' -ForEach @(
+            @{ Value = $true }
+            @{ Value = $false }
+            # A key that is no longer used stops no start, whatever its type.
+            @{ Value = 'off' }
+            @{ Value = 0 }
+        ) {
+            $script:stick = Initialize-TestStick -Name 'vmware-stick' -Change @{ ProtectBootArea = $Value }
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 0 -Because $result.Message
+            $log = Get-TestLog -Path $script:stick.Log
+            @($log | Where-Object { $_ -like 'Note: ProtectBootArea*' }) |
+                Should -BeExactly @('Note: ProtectBootArea is no longer used: in VMware and in VirtualBox, the guest can write the stick''s boot area, as before phase 8.')
+            $log | Should -Contain 'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'
+            @($log | Where-Object { $_ -like 'Note: HideDataPartition*' }) | Should -BeNullOrEmpty
+        }
+
+        It 'notes nothing about the boot area when the settings do not name ProtectBootArea' {
+            $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            @(Get-TestLog -Path $script:stick.Log | Where-Object { $_ -like '*ProtectBootArea*' -or $_ -like '*boot area*' }) | Should -BeNullOrEmpty
+        }
+
+        It 'starts, a dry run too, whatever partitions Windows lists, since the layout no longer depends on where they start' {
+            Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { Get-TestPartition -Change @{ Offset = [uint64]0; Size = [uint64]1000 * 512 }; Get-TestPartition } -ParameterFilter { $Number -eq 3 }
+            foreach ($dryRun in $true, $false) {
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher -DryRun:$dryRun
+                $result.ExitCode | Should -Be 0 -Because $result.Message
+            }
+            [IO.File]::ReadAllText($script:stick.VMwareDisk) | Should -BeExactly (Get-TestStickDescriptorText)
+        }
+
         It 'starts in full screen when VMwareView is FullScreen' {
             $script:stick = Initialize-TestStick -Name 'vmware-stick' -Change @{ VMwareView = 'FullScreen' }
             $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher
@@ -2139,7 +2192,7 @@ Describe 'A start' {
             Join-Path $script:stick.Backups 'VirtualBox\Test VM\stick.vmdk.orig' | Should -Exist
             "$($script:stick.Vbox).launcher-backup" | Should -Not -Exist
             "$($script:stick.VirtualBoxXml).launcher-backup" | Should -Not -Exist
-            [IO.File]::ReadAllText($script:stick.VirtualBoxDisk) | Should -BeExactly ((Get-TestDescriptorText -Newline "`n").Replace('PhysicalDrive1', 'PhysicalDrive3'))
+            [IO.File]::ReadAllText($script:stick.VirtualBoxDisk) | Should -BeExactly (Get-TestStickDescriptorText -Newline "`n")
             Should -Invoke -CommandName Invoke-PvmGetProcess -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { ($Name -join ',') -ceq $script:vmwareNames }
             Should -Invoke -CommandName Invoke-PvmGetProcess -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { ($Name -join ',') -ceq $script:virtualBoxOpenNames }
             Should -Invoke -CommandName Invoke-PvmSetEnvironment -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter {
@@ -2154,18 +2207,36 @@ Describe 'A start' {
                 "Test VM.vbox: paths moved to drive $($script:stick.Letter):"
                 'VM size OK: 7 CPUs, 16384 MB'
                 "VirtualBox.xml: paths moved to drive $($script:stick.Letter):"
-                'stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0'
-                'stick.vmdk: rewritten because the disk device differs'
+                'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'
+                'stick.vmdk: rewritten because the disk device, a size and the number of extents differ'
                 'VirtualBox VM state: "poweroff"'
                 'Started with VirtualBox 7.1.4r165100'
                 '----- End: exit code 0 -----'
             )
         }
 
-        It 'blanks the Data partition when HideDataPartition is set' {
-            $script:stick = Initialize-TestStick -Name 'virtualbox-stick' -Change @{ HideDataPartition = $true }
-            $null = Invoke-PortableVM -LauncherPath $script:stick.Launcher
-            [IO.File]::ReadAllText($script:stick.VirtualBoxDisk) | Should -BeLike "*createType=`"partitionedDevice`"*RW 2500000 FLAT `"\\.\PhysicalDrive3`" 0`nRW 1400000 ZERO*"
+        It 'gives VirtualBox the layout VMware gets whatever HideDataPartition says, and notes that the setting is no longer used (<Value>)' -ForEach @(
+            @{ Value = $true }
+            @{ Value = $false }
+        ) {
+            $script:stick = Initialize-TestStick -Name 'virtualbox-stick' -Change @{ HideDataPartition = $Value }
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 0 -Because $result.Message
+            [IO.File]::ReadAllText($script:stick.VirtualBoxDisk) | Should -BeExactly (Get-TestStickDescriptorText -Newline "`n")
+            @(Get-TestLog -Path $script:stick.Log | Where-Object { $_ -like 'Note: HideDataPartition*' }) |
+                Should -BeExactly @('Note: HideDataPartition is no longer used: in VMware and in VirtualBox, the guest sees the Data partition as zeros.')
+        }
+
+        It 'gives VirtualBox the one layout whatever ProtectBootArea says, and notes that the setting is no longer used (<Value>)' -ForEach @(
+            @{ Value = $true }
+            @{ Value = $false }
+        ) {
+            $script:stick = Initialize-TestStick -Name 'virtualbox-stick' -Change @{ ProtectBootArea = $Value }
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 0 -Because $result.Message
+            [IO.File]::ReadAllText($script:stick.VirtualBoxDisk) | Should -BeExactly (Get-TestStickDescriptorText -Newline "`n")
+            @(Get-TestLog -Path $script:stick.Log | Where-Object { $_ -like 'Note: ProtectBootArea*' }) |
+                Should -BeExactly @('Note: ProtectBootArea is no longer used: in VMware and in VirtualBox, the guest can write the stick''s boot area, as before phase 8.')
         }
 
         It 'changes and starts nothing in a dry run, and asks VBoxManage nothing' {
@@ -2184,8 +2255,8 @@ Describe 'A start' {
                 "Test VM.vbox: paths moved to drive $($script:stick.Letter):"
                 'VM size OK: 7 CPUs, 16384 MB'
                 "VirtualBox.xml: paths moved to drive $($script:stick.Letter):"
-                'stick.vmdk -> RW 3900000 FLAT "\\.\PhysicalDrive3" 0'
-                'stick.vmdk: rewritten because the disk device differs'
+                'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'
+                'stick.vmdk: rewritten because the disk device, a size and the number of extents differ'
                 "DRY RUN - would start VM {$script:uuid} with VirtualBox ($($script:stick.VirtualBoxDir))"
                 '----- End (dry run): exit code 0 -----'
             )
@@ -4168,6 +4239,17 @@ Describe 'Dry-run parity' {
             }
         }
         @{ Case = 'VirtualBox with HideDataPartition'; Installed = @('VirtualBox'); Change = @{ HideDataPartition = $true }; Setup = {} }
+        @{ Case = 'VMware with ProtectBootArea named'; Installed = @('VMware'); Change = @{ ProtectBootArea = $true }; Setup = {} }
+        @{ Case = 'VirtualBox with ProtectBootArea named'; Installed = @('VirtualBox'); Change = @{ ProtectBootArea = $false }; Setup = {} }
+        # Where partition 1 starts no longer matters.
+        @{ Case = 'VMware with a partition at sector 0'; Installed = @('VMware'); Change = @{}; Setup = {
+                Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { Get-TestPartition -Change @{ Offset = [uint64]0; Size = [uint64]1000 * 512 }; Get-TestPartition } -ParameterFilter { $Number -eq 3 }
+            }
+        }
+        @{ Case = 'VirtualBox with a partition at sector 0'; Installed = @('VirtualBox'); Change = @{}; Setup = {
+                Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { Get-TestPartition -Change @{ Offset = [uint64]0; Size = [uint64]1000 * 512 }; Get-TestPartition } -ParameterFilter { $Number -eq 3 }
+            }
+        }
         @{ Case = 'VMware without its descriptor'; Installed = @('VMware'); Change = @{}; Setup = { Remove-Item -LiteralPath $script:stick.VMwareDisk } }
         @{ Case = 'VMware with the VM running in VMware'; Installed = @('VMware'); Change = @{}; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'vmware-vmx.exe'; CommandLine = "vmware-vmx.exe `"$($script:stick.Vmx)`"" }) } }
         @{ Case = 'VMware while a VirtualBox VM may be this one'; Installed = @('VMware'); Change = @{}; Setup = { $script:testProcesses = @([pscustomobject]@{ Name = 'VirtualBoxVM.exe'; CommandLine = $null }) } }

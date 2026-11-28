@@ -1639,6 +1639,10 @@ Describe 'Compare-StickDryRun: kinds of log lines' {
         @{ Message = 'VM size left as it is, because VmSizing in settings.psd1 is Off.'; Kind = 'VM size left as it is' }
         @{ Message = 'Note: this PC is small for the VM; with it running, the PC keeps less than 6 GB of memory or no core of its own.'; Kind = 'note: a PC small for the VM' }
         @{ Message = 'Note: this PC has less free memory than the VM''s size and 2 GB more; close other programs if the VM is slow.'; Kind = 'note: little free memory' }
+        @{ Message = 'Note: HideDataPartition is no longer used: in VMware and in VirtualBox, the guest sees the Data partition as zeros.'; Kind = 'note: HideDataPartition no longer used' }
+        @{ Message = 'Note: ProtectBootArea is no longer used: in VMware and in VirtualBox, the guest can write the stick''s boot area, as before phase 8.'; Kind = 'note: ProtectBootArea no longer used' }
+        @{ Message = 'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'; Kind = 'descriptor would be pointed at the stick' }
+        @{ Message = 'stick.vmdk: rewritten because the disk device, a size and the number of extents differ'; Kind = 'reason for the descriptor rewrite' }
         @{ Message = 'Started with VirtualBox 7.1.4r165100'; Kind = 'started with VirtualBox' }
     ) {
         Get-CompareKind -Message $Message -Version 'v2' | Should -BeExactly $Kind
@@ -2133,6 +2137,32 @@ Describe 'Compare-StickDryRun: adapters' {
     }
 }
 
+Describe 'Compare-StickDryRun: parameters that look like expected changes' {
+    It 'names <Names> when they look like expected changes' -ForEach @(
+        @{ Target = 'line a => line b'; OutputFolder = ''; Names = '-Target' }
+        @{ Target = ''; OutputFolder = '=> note: c'; Names = '-OutputFolder' }
+        @{ Target = 'line a =>'; OutputFolder = '=> note: c'; Names = '-Target and -OutputFolder' }
+        @{ Target = 'a => b'; OutputFolder = 'c => d'; RunFolder = 'e =>'; Names = '-Target, -OutputFolder and -RunFolder' }
+        @{ Target = 'stick found=>stick found'; OutputFolder = ''; Names = '-Target' }
+        @{ Target = 'a => b'; OutputFolder = 'c => d'; RunFolder = 'e =>'; Unbound = @('=> f'); Names = '-Target, -OutputFolder, -RunFolder and values that no parameter takes' }
+    ) {
+        $problem = Get-CompareArgumentProblem -Target $Target -OutputFolder $OutputFolder -RunFolder "$RunFolder" -Unbound @($Unbound | Where-Object { $_ })
+        $problem | Should -BeLike "$Names look* like* expected change*"
+        $problem | Should -BeLike "*powershell -File, -ExpectChange gets only the first*"
+        $problem | Should -BeLike "*-Command `"& '<tool>' -ExpectChange 'a', 'b'`"*"
+    }
+
+    It 'names a mistyped parameter as such, not as an expected change' {
+        Get-CompareArgumentProblem -Unbound @('-Taget', 'X:\') | Should -BeExactly 'the tool has no parameter -Taget; nothing was changed'
+    }
+
+    # A Windows path cannot hold '>', so any '=>' marks an expected change.
+    It 'leaves real folders alone, and empty ones' {
+        Get-CompareArgumentProblem -Target 'D:\' -OutputFolder 'C:\checks\a-b' -RunFolder 'C:\checks\run 2' | Should -BeExactly ''
+        Get-CompareArgumentProblem -Target '' -OutputFolder '' -RunFolder '' | Should -BeExactly ''
+    }
+}
+
 Describe 'Compare-StickDryRun as a script' -Tag 'WindowsOnly' {
     BeforeAll {
         # Run the tool as the owner does, in Windows PowerShell 5.1, with $Arguments, in a process
@@ -2158,6 +2188,58 @@ Describe 'Compare-StickDryRun as a script' -Tag 'WindowsOnly' {
         $runs = @(Get-ChildItem -LiteralPath $out -Directory)
         $runs.Count | Should -Be 1
         @(Get-ChildItem -LiteralPath $runs[0].FullName -Name | Sort-Object) | Should -BeExactly @('listing.txt', 'output.txt')
+    }
+
+    # Through -File, Windows PowerShell gives -ExpectChange only the first of several values and
+    # binds the next ones by position, to -Target and -OutputFolder.
+    It 'says plainly, before it creates anything, when -File put expected changes into -Target and -OutputFolder' {
+        $before = @(Get-ChildItem -LiteralPath $TestDrive -Force -Name)
+        Push-Location -LiteralPath $TestDrive
+        try { $result = Invoke-TestCompareScript -Arguments @('-AlsoVirtualBox', '-ExpectChange', '=> note: a', 'line a => line b', '=> note: c') }
+        finally { Pop-Location }
+        $result.Exit | Should -Be 1
+        $result.Lines[-1] | Should -BeLike "RESULT: FAILED - -Target and -OutputFolder look like expected changes*-Command*nothing was changed"
+        @(Get-ChildItem -LiteralPath $TestDrive -Force -Name) | Should -BeExactly $before
+    }
+
+    It 'says plainly, too, when -File put a fourth expected change into -RunFolder' {
+        $before = @(Get-ChildItem -LiteralPath $TestDrive -Force -Name)
+        Push-Location -LiteralPath $TestDrive
+        try { $result = Invoke-TestCompareScript -Arguments @('-AlsoVirtualBox', '-ExpectChange', '=> note: a', 'line a => line b', '=> note: c', 'line d =>') }
+        finally { Pop-Location }
+        $result.Exit | Should -Be 1
+        $result.Lines[-1] | Should -BeLike "RESULT: FAILED - -Target, -OutputFolder and -RunFolder look like expected changes*-Command*nothing was changed"
+        @(Get-ChildItem -LiteralPath $TestDrive -Force -Name) | Should -BeExactly $before
+    }
+
+    It 'says plainly, too, when -File left a fifth expected change without a parameter' {
+        $before = @(Get-ChildItem -LiteralPath $TestDrive -Force -Name)
+        Push-Location -LiteralPath $TestDrive
+        try { $result = Invoke-TestCompareScript -Arguments @('-AlsoVirtualBox', '-ExpectChange', '=> note: a', 'line a => line b', '=> note: c', 'line d =>', '=> note: e') }
+        finally { Pop-Location }
+        $result.Exit | Should -Be 1
+        $result.Lines[-1] | Should -BeLike "RESULT: FAILED - -Target, -OutputFolder, -RunFolder and values that no parameter takes look like expected changes*nothing was changed"
+        @(Get-ChildItem -LiteralPath $TestDrive -Force -Name) | Should -BeExactly $before
+    }
+
+    It 'names a mistyped parameter as such, before it creates anything' {
+        $out = Join-Path $TestDrive 'typo checks'
+        $result = Invoke-TestCompareScript -Arguments @('-Taget', $script:listStick, '-ListOnly', '-OutputFolder', $out)
+        $result.Exit | Should -Be 1
+        $result.Lines[-1] | Should -BeExactly 'RESULT: FAILED - the tool has no parameter -Taget; nothing was changed'
+        $out | Should -Not -Exist
+    }
+
+    It 'binds several expected changes when started with -Command, as its header shows' {
+        $out = Join-Path $TestDrive 'command checks'
+        $tool = Join-Path $script:repoRoot 'tools\Compare-StickDryRun.ps1'
+        $previous = $env:PVM_TEST
+        $env:PVM_TEST = ''
+        try {
+            $lines = @(& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "& '$tool' -Target '$($script:listStick)' -ListOnly -OutputFolder '$out' -ExpectChange '=> note: a', 'line a => line b'" 2>&1 | ForEach-Object { "$_" })
+        } finally { $env:PVM_TEST = $previous }
+        $LASTEXITCODE | Should -Be 0
+        $lines[-1] | Should -BeExactly 'RESULT: PASSED - listed the stick; nothing was run or changed'
     }
 
     It 'refuses an output folder in the repository before it creates anything' {
@@ -2239,7 +2321,11 @@ $module = Import-Module (Join-Path $Root 'Launcher\PortableVM.psm1') -PassThru -
     function script:Invoke-PvmEnterLock { param($Name) [pscustomobject]@{ State = 'Acquired'; Mutex = $null } }
     function script:Invoke-PvmExitLock { param($Lock) }
     function script:Invoke-PvmGetPartition { param($DriveLetter) [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512 } }
-    function script:Invoke-PvmGetDiskPartition { param($Number) [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512 } }
+    function script:Invoke-PvmGetDiskPartition {
+        param($Number)
+        [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2048 * 512; Size = [uint64]997952 * 512 }
+        [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512 }
+    }
     function script:Invoke-PvmGetHostSize { [pscustomobject]@{ Cores = 8; Threads = 16; MemoryMB = 32768; FreeMB = 24576 } }
     function script:Invoke-PvmGetFreeSpace { param($Path) [int64]64GB }
     function script:Invoke-PvmGetDisk { param($Number) [pscustomobject]@{ Number = 99; PartitionStyle = 'MBR'; Signature = [uint32]0x5CA1AB1E; LogicalSectorSize = 512; Size = [uint64]4000000 * 512; IsBoot = $false; IsSystem = $false } }
@@ -2356,7 +2442,7 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
             Write-TestFile -Path (Join-Path $Root 'VMware\Test VM.vmx') -Text ((@('.encoding = "windows-1252"', 'config.version = "8"', 'displayName = "Test VM"', 'uuid.action = "keep"', 'suspend.disabled = "TRUE"',
                         'scsi0:0.fileName = "stick.vmdk"', 'scsi0:0.present = "TRUE"', '') -join "`r`n"))
             Write-TestFile -Path (Join-Path $Root 'VMware\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 2500000 FLAT "\\.\PhysicalDrive99" 0', 'RW 1400000 ZERO')
-            Write-TestFile -Path (Join-Path $Root 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 3900000 FLAT "\\.\PhysicalDrive99" 0')
+            Write-TestFile -Path (Join-Path $Root 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 2500000 FLAT "\\.\PhysicalDrive99" 0', 'RW 1400000 ZERO')
             Write-TestFile -Path (Join-Path $Root 'VirtualBox\Test VM\Test VM.vbox') -Text ((@('<?xml version="1.0"?>', '<VirtualBox xmlns="http://www.virtualbox.org/" version="1.19-windows">',
                         '  <Machine uuid="{5ca1ab1e-0000-4000-8000-000000000001}" name="Test VM" OSType="Debian_64">',
                         '    <MediaRegistry><HardDisks><HardDisk uuid="{5ca1ab1e-0000-4000-8000-000000000002}" location="stick.vmdk" format="VMDK"/></HardDisks></MediaRegistry>',
@@ -2401,7 +2487,10 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
         # The stand-in PC: the stick folder's partition is on disk 99, which is the stick.
         Mock -ModuleName PortableVM Invoke-PvmGetPartition { [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512 } }
         Mock -ModuleName PortableVM Invoke-PvmGetDisk { [pscustomobject]@{ Number = 99; PartitionStyle = 'MBR'; Signature = [uint32]0x5CA1AB1E; LogicalSectorSize = 512; Size = [uint64]4000000 * 512; IsBoot = $false; IsSystem = $false } }
-        Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition { [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512; DriveLetter = [char]'Q'; AccessPaths = @('Q:\') } }
+        Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition {
+            [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2048 * 512; Size = [uint64]997952 * 512; DriveLetter = [char]0; AccessPaths = @() }
+            [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512; DriveLetter = [char]'Q'; AccessPaths = @('Q:\') }
+        }
     }
 
     It 'reports a stick as a start leaves it, and that nothing needs attention' {
@@ -2494,10 +2583,34 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
     }
 
     It 'says why the next start rewrites a disk file that does not point at the stick, which needs no attention' {
-        Write-TestFile -Path (Join-Path $script:stateStick 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 3900000 FLAT "\\.\PortableVM-disarmed" 0')
+        Write-TestFile -Path (Join-Path $script:stateStick 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 2500000 FLAT "\\.\PortableVM-disarmed" 0', 'RW 1400000 ZERO')
         $result = Invoke-StateCheck
         $result.Lines | Should -Contain '  VirtualBox disk file points at the stick: no; the next start rewrites it because the disk device differs'
         $result.ExitCode | Should -Be 0
+    }
+
+    It 'says that the next start rewrites a disk file in the layout from before phase 8, or with the read-only boot area of its first build' {
+        # VMware: the layout of pull request 20 at e6c2cdd; VirtualBox: the layout from before phase 8.
+        Write-TestFile -Path (Join-Path $script:stateStick 'VMware\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RDONLY 2048 FLAT "\\.\PhysicalDrive99" 0', 'RW 2497952 FLAT "\\.\PhysicalDrive99" 2048', 'RW 1400000 ZERO')
+        Write-TestFile -Path (Join-Path $script:stateStick 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 3900000 FLAT "\\.\PhysicalDrive99" 0')
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  VMware disk file points at the stick: no; the next start rewrites it because a size, the access mode, the extent type and the number of extents differ'
+        $result.Lines | Should -Contain '  VirtualBox disk file points at the stick: no; the next start rewrites it because a size and the number of extents differ'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: OK - nothing needs attention'
+    }
+
+    It 'says nothing about the boot area, and needs no attention, whatever ProtectBootArea says and wherever a partition starts' {
+        $settings = Join-Path $script:stateStick 'LauncherData\settings.psd1'
+        [IO.File]::WriteAllText($settings, [IO.File]::ReadAllText($settings).Replace('    SchemaVersion = 2', "    SchemaVersion = 2`r`n    ProtectBootArea = `$true"))
+        Mock -ModuleName PortableVM Invoke-PvmGetDiskPartition {
+            [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]0; Size = [uint64]1000 * 512; DriveLetter = [char]0; AccessPaths = @() }
+            [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512; DriveLetter = [char]'Q'; AccessPaths = @('Q:\') }
+        }
+        $result = Invoke-StateCheck
+        @($result.Lines | Where-Object { $_ -like '*boot area*' }) | Should -BeNullOrEmpty
+        $result.Lines | Should -Contain '  VMware disk file points at the stick: yes'
+        $result.Lines | Should -Contain '  VirtualBox disk file points at the stick: yes'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: OK - nothing needs attention'
     }
 
     It 'says when the next start stops at a disk file it cannot read' {
