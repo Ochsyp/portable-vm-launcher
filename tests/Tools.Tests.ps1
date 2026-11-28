@@ -2142,16 +2142,19 @@ Describe 'Compare-StickDryRun: parameters that look like expected changes' {
         @{ Target = 'line a => line b'; OutputFolder = ''; Names = '-Target' }
         @{ Target = ''; OutputFolder = '=> note: c'; Names = '-OutputFolder' }
         @{ Target = 'line a =>'; OutputFolder = '=> note: c'; Names = '-Target and -OutputFolder' }
+        @{ Target = 'a => b'; OutputFolder = 'c => d'; RunFolder = 'e =>'; Names = '-Target, -OutputFolder and -RunFolder' }
+        @{ Target = 'stick found=>stick found'; OutputFolder = ''; Names = '-Target' }
     ) {
-        $problem = Get-CompareArgumentProblem -Target $Target -OutputFolder $OutputFolder
+        $problem = Get-CompareArgumentProblem -Target $Target -OutputFolder $OutputFolder -RunFolder "$RunFolder"
         $problem | Should -BeLike "$Names look* like* expected change*"
-        $problem | Should -BeLike "*powershell -File*-ExpectChange*"
+        $problem | Should -BeLike "*powershell -File, -ExpectChange gets only the first*"
         $problem | Should -BeLike "*-Command `"& '<tool>' -ExpectChange 'a', 'b'`"*"
     }
 
-    It 'leaves real folders alone, even with an arrow in a word' {
-        Get-CompareArgumentProblem -Target 'D:\' -OutputFolder 'C:\checks\a=>b' | Should -BeExactly ''
-        Get-CompareArgumentProblem -Target '' -OutputFolder '' | Should -BeExactly ''
+    # A Windows path cannot hold '>', so any '=>' marks an expected change.
+    It 'leaves real folders alone, and empty ones' {
+        Get-CompareArgumentProblem -Target 'D:\' -OutputFolder 'C:\checks\a-b' -RunFolder 'C:\checks\run 2' | Should -BeExactly ''
+        Get-CompareArgumentProblem -Target '' -OutputFolder '' -RunFolder '' | Should -BeExactly ''
     }
 }
 
@@ -2191,6 +2194,16 @@ Describe 'Compare-StickDryRun as a script' -Tag 'WindowsOnly' {
         finally { Pop-Location }
         $result.Exit | Should -Be 1
         $result.Lines[-1] | Should -BeLike "RESULT: FAILED - -Target and -OutputFolder look like expected changes*-Command*nothing was changed"
+        @(Get-ChildItem -LiteralPath $TestDrive -Force -Name) | Should -BeExactly $before
+    }
+
+    It 'says plainly, too, when -File put a fourth expected change into -RunFolder' {
+        $before = @(Get-ChildItem -LiteralPath $TestDrive -Force -Name)
+        Push-Location -LiteralPath $TestDrive
+        try { $result = Invoke-TestCompareScript -Arguments @('-AlsoVirtualBox', '-ExpectChange', '=> note: a', 'line a => line b', '=> note: c', 'line d =>') }
+        finally { Pop-Location }
+        $result.Exit | Should -Be 1
+        $result.Lines[-1] | Should -BeLike "RESULT: FAILED - -Target, -OutputFolder and -RunFolder look like expected changes*-Command*nothing was changed"
         @(Get-ChildItem -LiteralPath $TestDrive -Force -Name) | Should -BeExactly $before
     }
 

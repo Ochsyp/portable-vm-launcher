@@ -170,11 +170,11 @@ All notable changes to this project are listed here. The format follows
   no longer used; a file may keep them, and the log notes each. At the next start in each
   program, the launcher rewrites that program's disk file with copies where it differs. The
   read-only check compares each disk file with the one layout; the stick-check tool knows the new
-  notes.
-- `tools\Compare-StickDryRun.ps1` says plainly, before it changes anything, when `-Target` or
-  `-OutputFolder` looks like an expected change, as when it was started through `powershell
-  -File` with several values after `-ExpectChange`. Its header and `docs\stick-tests.md` show the
-  `-Command` form that passes several.
+  notes. Both keys that are no longer used pass whatever their value, so neither stops a start.
+- `tools\Compare-StickDryRun.ps1` says plainly, before it changes anything, when `-Target`,
+  `-OutputFolder` or `-RunFolder` holds `=>`, as when it was started through
+  `powershell -File` with several values after `-ExpectChange`. Its header and
+  `docs\stick-tests.md` show the `-Command` form that passes several.
 - The VM's size at each start (request r9). The launcher reads the PC's cores, threads and memory
   and sizes the VM in the program it starts: all but one core or two threads, 2 to 8 CPUs, and
   half the PC's memory while leaving the PC at least 6 GB, 4 to 16 GB. It writes the `.vmx`

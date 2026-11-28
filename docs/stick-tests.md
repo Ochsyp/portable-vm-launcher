@@ -249,8 +249,8 @@ where it was not:
 ```
 
 Several expected changes need `-Command` instead of `-File`. Through `-File`, Windows PowerShell
-gives `-ExpectChange` only the first value and binds the next ones to `-Target` and
-`-OutputFolder`; the tool then refuses with a plain reason and changes nothing:
+gives `-ExpectChange` only the first value and binds the next ones by position to `-Target`,
+`-OutputFolder` and `-RunFolder`; the tool then refuses with a plain reason and changes nothing:
 
 ```text
 powershell -NoProfile -ExecutionPolicy RemoteSigned -Command "& '.\tools\Compare-StickDryRun.ps1' -ExpectChange '=> a', 'b => c'"

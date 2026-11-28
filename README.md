@@ -262,8 +262,8 @@ value of the wrong type or an unknown word is refused rather than guessed. The p
 relative to the folder that holds `Launcher` and `LauncherData`, without a drive, `.` or `..`.
 The VM's size settings, `VmSizing`, `VmCpus`, `VmMemoryGB`, `VmMaxCpus` and `VmMaxMemoryGB`, are
 optional; a launcher from before request r9 refuses them, so remove them before going back to one.
-`HideDataPartition` and `ProtectBootArea` are no longer used: a file may keep them, and the log
-notes each. A launcher from before phase 8 refuses `ProtectBootArea`, so remove it before going
+`HideDataPartition` and `ProtectBootArea` are no longer used: a file may keep them, whatever
+their value, and the log notes each. A launcher from before phase 8 refuses `ProtectBootArea`, so remove it before going
 back to one.
 `VMwareDisk`, `VirtualBoxDisk` and `VirtualBoxVmUuid` are optional: the launcher reads them from
 the `.vmx` and the `.vbox`. Set one only to have the launcher check it; a value that differs

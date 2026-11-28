@@ -809,6 +809,7 @@ function Get-PvmStickDevice {
 # Return settings schema 2, one entry per key, in the order the checks report them: its Name,
 # whether it is Required, the Default a missing key gets, the Kind of value it holds and the
 # Values that kind allows: the words of a Choice, or the extension of a Path, none for a folder.
+# A key of the Kind Unused is no longer used: any value passes, and a start notes the key.
 function Get-PvmSettingSchema {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -820,8 +821,8 @@ function Get-PvmSettingSchema {
     [pscustomobject]@{ Name = 'Hypervisor'; Required = $false; Default = 'Auto'; Kind = 'Choice'; Values = @('Auto', 'VMware', 'VirtualBox') }
     [pscustomobject]@{ Name = 'VMwareView'; Required = $false; Default = 'Window'; Kind = 'Choice'; Values = @('Window', 'FullScreen') }
     [pscustomobject]@{ Name = 'SavedStatePolicy'; Required = $false; Default = 'Ask'; Kind = 'Choice'; Values = @('Ask', 'Refuse') }
-    [pscustomobject]@{ Name = 'HideDataPartition'; Required = $false; Default = $null; Kind = 'Bool'; Values = @() }
-    [pscustomobject]@{ Name = 'ProtectBootArea'; Required = $false; Default = $null; Kind = 'Bool'; Values = @() }
+    [pscustomobject]@{ Name = 'HideDataPartition'; Required = $false; Default = $null; Kind = 'Unused'; Values = @() }
+    [pscustomobject]@{ Name = 'ProtectBootArea'; Required = $false; Default = $null; Kind = 'Unused'; Values = @() }
     [pscustomobject]@{ Name = 'StickMbrSignature'; Required = $true; Default = $null; Kind = 'Signature'; Values = @() }
     [pscustomobject]@{ Name = 'StickSectors'; Required = $true; Default = $null; Kind = 'Count'; Values = @() }
     [pscustomobject]@{ Name = 'VmSectors'; Required = $true; Default = $null; Kind = 'Count'; Values = @() }
@@ -921,6 +922,8 @@ function Get-PvmValueProblem {
     switch ($Entry.Kind) {
         'Schema' { if (-not ($Value -is [int] -and $Value -eq 2)) { return 'must be 2, the only schema this launcher reads' } }
         'Bool' { if ($Value -isnot [bool]) { return 'must be $true or $false' } }
+        # A key that is no longer used changes nothing, so no value of it stops a start.
+        'Unused' { }
         'Name' {
             if (-not ($text -and (Test-PvmNameText -Value $Value))) {
                 return 'must be 1 to 40 characters of text that shows, without control or formatting characters, and without a blank or a joiner at either end'
@@ -1507,8 +1510,8 @@ function Get-PvmDiskLayout {
 }
 
 # Return the raw-disk layout (Get-PvmDiskLayout) for a start in either program on the raw disk
-# $Drive, as $Context and its Settings describe. A HideDataPartition or ProtectBootArea setting,
-# which are no longer used, gets a note in the log.
+# $Drive, as $Context and its Settings describe. Each of the settings HideDataPartition and
+# ProtectBootArea, which are no longer used, gets a note in the log when the file names it.
 function Get-PvmStartLayout {
     [CmdletBinding()]
     [OutputType([hashtable])]

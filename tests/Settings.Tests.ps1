@@ -153,6 +153,11 @@ Describe 'Checking settings against schema 2' {
         @{ Key = 'VirtualBoxVmUuid'; Value = '5CA1AB1E-0000-4000-8000-000000000001' }
         @{ Key = 'VmDisplayName'; Value = 'Forty characters long, which is the most' }
         @{ Key = 'GuestName'; Value = 'x' }
+        # Keys that are no longer used pass whatever their value, so none of them stops a start.
+        @{ Key = 'HideDataPartition'; Value = 'false' }
+        @{ Key = 'HideDataPartition'; Value = 0 }
+        @{ Key = 'ProtectBootArea'; Value = 'off' }
+        @{ Key = 'ProtectBootArea'; Value = 0 }
     ) {
         @(Test-PvmSetting -Settings (Get-GoodSetting -Change @{ $Key = $Value })) | Should -BeNullOrEmpty
     }
@@ -169,10 +174,6 @@ Describe 'Checking settings against schema 2' {
         @{ Key = 'Hypervisor'; Case = 'a number'; Value = 1 }
         @{ Key = 'VMwareView'; Case = 'an unknown word'; Value = 'Full Screen' }
         @{ Key = 'SavedStatePolicy'; Case = 'an unknown word'; Value = 'Never' }
-        @{ Key = 'HideDataPartition'; Case = 'text'; Value = 'false' }
-        @{ Key = 'HideDataPartition'; Case = 'a number'; Value = 0 }
-        @{ Key = 'ProtectBootArea'; Case = 'text'; Value = 'false' }
-        @{ Key = 'ProtectBootArea'; Case = 'a number'; Value = 0 }
         @{ Key = 'StickMbrSignature'; Case = '7 digits'; Value = '5CA1AB1' }
         @{ Key = 'StickMbrSignature'; Case = '9 digits'; Value = '5CA1AB1EF' }
         @{ Key = 'StickMbrSignature'; Case = 'none'; Value = 'none' }

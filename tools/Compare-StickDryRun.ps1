@@ -19,7 +19,8 @@
 # happen, on one line per pair of dry runs at most. -AlsoVirtualBox adds a pair of dry runs with
 # Hypervisor set to VirtualBox. -ListOnly only lists the stick's top folders. Several expected
 # changes need -Command, since through -File Windows PowerShell gives -ExpectChange only the first
-# value and binds the next ones to -Target and -OutputFolder, which the tool then refuses:
+# value and binds the next ones by position to -Target, -OutputFolder and -RunFolder, which the
+# tool then refuses:
 #   powershell -NoProfile -ExecutionPolicy RemoteSigned -Command "& '.\tools\Compare-StickDryRun.ps1' -ExpectChange '=> a', 'b => c'"
 #
 # It refuses, changing nothing, while a VM runs, when a write on the stick was left unfinished,
@@ -430,23 +431,27 @@ function Test-CompareChange {
 
 # --- The stick ---------------------------------------------------------------------------------
 
-# Return why -Target $Target or -OutputFolder $OutputFolder cannot be meant as given, or '' when
-# both can: either looks like an expected change ('a => b', '=> b' or 'a =>'), as when the tool was
-# started through powershell -File with several values after -ExpectChange.
+# Return why -Target $Target, -OutputFolder $OutputFolder or -RunFolder $RunFolder cannot be
+# meant as given, or '' when none of them holds '=>', as an expected change does ('a => b', '=> b',
+# 'a =>' or 'a=>b') and no Windows path can: then the tool was started through powershell -File
+# with several values after -ExpectChange, which bound the next ones to those three by position.
 function Get-CompareArgumentProblem {
     [CmdletBinding()]
     [OutputType([string])]
     param(
         [AllowEmptyString()][string]$Target = '',
-        [AllowEmptyString()][string]$OutputFolder = ''
+        [AllowEmptyString()][string]$OutputFolder = '',
+        [AllowEmptyString()][string]$RunFolder = ''
     )
     $names = @(
-        if ($Target -match '(^|\s)=>(\s|$)') { '-Target' }
-        if ($OutputFolder -match '(^|\s)=>(\s|$)') { '-OutputFolder' }
+        if ($Target.Contains('=>')) { '-Target' }
+        if ($OutputFolder.Contains('=>')) { '-OutputFolder' }
+        if ($RunFolder.Contains('=>')) { '-RunFolder' }
     )
     if (-not $names.Count) { return '' }
-    $what = if ($names.Count -eq 2) { '-Target and -OutputFolder look like expected changes' } else { "$($names[0]) looks like an expected change" }
-    ("$what. Through powershell -File, only the first value after -ExpectChange reaches it, and the next ones land in -Target and -OutputFolder. " +
+    $what = if ($names.Count -eq 1) { "$($names[0]) looks like an expected change" }
+    else { "$($names[0..($names.Count - 2)] -join ', ') and $($names[-1]) look like expected changes" }
+    ("$what. Through powershell -File, -ExpectChange gets only the first of several values, and the next ones go to -Target, -OutputFolder and -RunFolder. " +
         "Pass several expected changes with powershell -Command `"& '<tool>' -ExpectChange 'a', 'b'`"; nothing was changed")
 }
 
@@ -1029,6 +1034,8 @@ function Get-CompareRunFolder {
 if ($MyInvocation.InvocationName -ne '.') {
     try {
         $repository = Split-Path $PSScriptRoot -Parent
+        $argumentProblem = Get-CompareArgumentProblem -Target $Target -OutputFolder $OutputFolder -RunFolder $RunFolder
+        if ($argumentProblem) { throw (ConvertTo-CompareStop -Reason $argumentProblem) }
         if ($RunFolder) {
             # The window with administrator rights: the first window left the request here.
             $request = [IO.File]::ReadAllText((Join-Path $RunFolder 'request.json')) | ConvertFrom-Json
@@ -1036,8 +1043,6 @@ if ($MyInvocation.InvocationName -ne '.') {
             exit $result.ExitCode
         }
         if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw (ConvertTo-CompareStop -Reason 'the check runs on Windows only') }
-        $argumentProblem = Get-CompareArgumentProblem -Target $Target -OutputFolder $OutputFolder
-        if ($argumentProblem) { throw (ConvertTo-CompareStop -Reason $argumentProblem) }
         # Relative paths are read from PowerShell's location here; the window with administrator
         # rights starts in another folder.
         if ($Target -and (Test-Path -LiteralPath $Target -PathType Container)) { $Target = Convert-Path -LiteralPath $Target }
