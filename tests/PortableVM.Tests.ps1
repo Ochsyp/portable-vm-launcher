@@ -2148,6 +2148,8 @@ Describe 'A start' {
         }
 
         It 'starts nothing when the old version of a rewritten file cannot be removed, and names the step that puts it back' {
+            # The disk file is disarmed, as at rest, so the stop has nothing to say about it.
+            Write-TestFile -Path $script:stick.VirtualBoxDisk -Text (Get-TestStickDescriptorText -Newline "`n").Replace('\\.\PhysicalDrive3', '\\.\PortableVM-disarmed')
             Mock -ModuleName PortableVM Remove-PvmWriteCopy { [IO.File]::Delete($Path) }
             Mock -ModuleName PortableVM Remove-PvmWriteCopy { throw [IO.IOException]::new('The process cannot access the file.', [int]0x80070020) } -ParameterFilter { (Split-Path $Path -Leaf) -eq 'Test VM.vbox.pvm-old' }
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
@@ -3338,7 +3340,12 @@ Describe 'Unexpected errors' -Tag 'WindowsOnly' {
                 Mock -ModuleName PortableVM Wait-PvmProcessExit { throw 'boom' }
             }
         }
-        @{ Text = 'pointing the VM files at the stick'; Releases = 1; Setup = { Mock -ModuleName PortableVM Save-PvmFirstCopy { throw 'boom' } } }
+        @{ Text = 'pointing the VM files at the stick'; Releases = 1; Setup = {
+                # The disk file is disarmed, as at rest, so the error has nothing to say about it.
+                Write-TestFile -Path $script:stick.VMwareDisk -Text (Get-TestStickDescriptorText).Replace('\\.\PhysicalDrive3', '\\.\PortableVM-disarmed')
+                Mock -ModuleName PortableVM Save-PvmFirstCopy { throw 'boom' }
+            }
+        }
         @{ Text = 'starting the VM'; Releases = 1; Setup = { Mock -ModuleName PortableVM Invoke-PvmStartProcess { throw 'boom' } } }
         @{ Text = 'starting the VM'; Releases = 1; Setup = {
                 $script:testInstalled = @('VirtualBox')
@@ -4279,9 +4286,9 @@ Describe 'Arm, verify, watch' -Tag 'WindowsOnly' {
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
             $result.ExitCode | Should -Be 1
             $result.Message | Should -BeExactly "For 60 s the launcher could not check whether the VM still runs, so it stopped watching it. stick.vmdk names the stick's disk until the next start through the launcher sets it right.`n`nCall cancelled"
-            # The check after the start, then 12 failed checks with a sleep of 5 s between them.
-            Should -Invoke -CommandName Test-PvmVmRunning -ModuleName PortableVM -Times 13 -Exactly
-            Should -Invoke -CommandName Invoke-PvmSleep -ModuleName PortableVM -Times 11 -Exactly -ParameterFilter { $Seconds -eq 5 }
+            # The check after the start, then 13 failed checks with 12 sleeps of 5 s between them.
+            Should -Invoke -CommandName Test-PvmVmRunning -ModuleName PortableVM -Times 14 -Exactly
+            Should -Invoke -CommandName Invoke-PvmSleep -ModuleName PortableVM -Times 12 -Exactly -ParameterFilter { $Seconds -eq 5 }
             @(Get-TestLog -Path $script:stick.Log | Where-Object { $_ -like 'Note: the launcher could not check whether the VM runs*' }).Count | Should -Be 1
         }
 
@@ -4322,8 +4329,67 @@ Describe 'Arm, verify, watch' -Tag 'WindowsOnly' {
             $before = [IO.File]::ReadAllText($script:stick.VMwareDisk)
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
             $result.ExitCode | Should -Be 1
-            $result.Message | Should -BeLike "The stick changed while the launcher checked it, so no disk file was pointed at it.*Nothing was started."
+            $result.Message | Should -BeLike "The stick changed while the launcher checked it, so no disk file was pointed at it. This is not the expected USB stick*`n`nNothing was started."
+            $result.Message | Should -Not -BeLike '*Nothing was started.*Nothing was started.*'
             [IO.File]::ReadAllText($script:stick.VMwareDisk) | Should -BeExactly $before
+            Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
+        }
+
+        It 'arms nothing and starts nothing when the stick''s drive is on another disk by then' {
+            $script:partitions = 0
+            Mock -ModuleName PortableVM Invoke-PvmGetPartition {
+                $script:partitions++
+                if ($script:partitions -eq 1) { Get-TestPartition } else { Get-TestPartition -Change @{ DiskNumber = 4 } }
+            } -ParameterFilter { $DriveLetter -ceq $script:stick.Letter }
+            Mock -ModuleName PortableVM Invoke-PvmGetDisk { Get-TestDisk -Change @{ Number = 4 } } -ParameterFilter { $Number -eq 4 }
+            $before = [IO.File]::ReadAllText($script:stick.VMwareDisk)
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly "The stick changed while the launcher checked it, so no disk file was pointed at it. The drive $($script:stick.Letter): is on disk 4 now, not on disk 3.`n`nNothing was started."
+            [IO.File]::ReadAllText($script:stick.VMwareDisk) | Should -BeExactly $before
+        }
+
+        It 'says that the disk file names the stick''s disk when the start fails and the file cannot be pointed away' {
+            Mock -ModuleName PortableVM Invoke-PvmStartProcess {
+                Set-ItemProperty -LiteralPath $script:stick.VMwareDisk -Name IsReadOnly -Value $true
+                throw [ComponentModel.Win32Exception]::new(2)
+            }
+            try {
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+                $result.ExitCode | Should -Be 1
+                $result.Message | Should -BeLike "Unexpected error while starting the VM: *`n`nstick.vmdk names the stick's disk now. Start the VM only through the launcher, whose next start sets that right."
+                [IO.File]::ReadAllText($script:stick.VMwareDisk) | Should -BeLike '*FLAT "\\.\PhysicalDrive3" 0*'
+                $log = @(Get-TestLog -Path $script:stick.Log)
+                @($log | Where-Object { $_ -like 'Note: stick.vmdk could not be pointed away from the stick: *' }).Count | Should -Be 1
+                $log | Should -Not -Contain 'stick.vmdk: pointed away from the stick'
+                @($log | Where-Object { $_ -like 'Error detail: *' }) | Should -Not -BeNullOrEmpty
+            } finally { Set-ItemProperty -LiteralPath $script:stick.VMwareDisk -Name IsReadOnly -Value $false }
+        }
+
+        It 'says that the disk file names the stick''s disk when the VM does not start and the file cannot be pointed away' {
+            Mock -ModuleName PortableVM Test-PvmVmRunning { Set-ItemProperty -LiteralPath $script:stick.VMwareDisk -Name IsReadOnly -Value $true; $false }
+            try {
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+                $result.ExitCode | Should -Be 1
+                $result.Message | Should -BeExactly "The VM did not start in VMware within 60 s. VMware's window may say why; then start the VM again.`n`nstick.vmdk names the stick's disk now. Start the VM only through the launcher, whose next start sets that right."
+            } finally { Set-ItemProperty -LiteralPath $script:stick.VMwareDisk -Name IsReadOnly -Value $false }
+        }
+
+        It 'says why it could not tell whether the VM started when every check fails' {
+            Mock -ModuleName PortableVM Test-PvmVmRunning { throw 'Call cancelled' }
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly "The VM did not start in VMware within 60 s, so the launcher pointed its disk file away from the stick again. VMware's window may say why; then start the VM again.`n`nThe launcher could not check whether it runs: Call cancelled"
+        }
+
+        It 'says that the disk file names the stick''s disk when pointing it at the stick did not finish' {
+            Mock -ModuleName PortableVM Save-PvmFileChange {
+                [IO.File]::WriteAllText($script:stick.VMwareDisk, (Get-TestStickDescriptorText))
+                throw (& (Get-Module PortableVM) { Get-PvmStopException -Message 'A write of stick.vmdk did not finish. Nothing was started.' })
+            } -ParameterFilter { $Change.Path -eq $script:stick.VMwareDisk -and $Change.Action -ne 'Point the raw-disk descriptor away from the stick' }
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 1
+            $result.Message | Should -BeExactly "A write of stick.vmdk did not finish. Nothing was started.`n`nstick.vmdk names the stick's disk now. Start the VM only through the launcher, whose next start sets that right."
             Should -Invoke -CommandName Invoke-PvmStartProcess -ModuleName PortableVM -Times 0 -Exactly
         }
 
@@ -4339,7 +4405,9 @@ Describe 'Arm, verify, watch' -Tag 'WindowsOnly' {
                 $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
                 $result.ExitCode | Should -Be 1
                 $result.Message | Should -BeLike 'The VM has ended, but the launcher could not point stick.vmdk away from the stick, so it still names the stick''s disk. The next start sets it right.*'
+                $result.Message | Should -Not -BeLike '*Nothing was started*'
                 [IO.File]::ReadAllText($script:stick.VMwareDisk) | Should -BeLike '*FLAT "\\.\PhysicalDrive3" 0*'
+                Get-TestLog -Path $script:stick.Log | Should -Not -Contain 'stick.vmdk: pointed away from the stick'
             } finally { Set-ItemProperty -LiteralPath $script:stick.VMwareDisk -Name IsReadOnly -Value $false }
         }
 
@@ -4442,6 +4510,32 @@ Describe 'Arm, verify, watch' -Tag 'WindowsOnly' {
             [IO.File]::ReadAllText($script:stick.VirtualBoxDisk) | Should -BeLike '*FLAT "\\.\PortableVM-disarmed" 0*'
         }
 
+        It 'tries once more after the background service ended when VirtualBox cannot start the VM and the file is held' {
+            Mock -ModuleName PortableVM Invoke-PvmNative {
+                Set-ItemProperty -LiteralPath $script:stick.VirtualBoxDisk -Name IsReadOnly -Value $true
+                [pscustomobject]@{ ExitCode = 1; Output = 'VBoxManage: error: no luck' }
+            } -ParameterFilter { $ArgumentList[0] -eq 'startvm' }
+            Mock -ModuleName PortableVM Wait-PvmProcessExit { Set-ItemProperty -LiteralPath $script:stick.VirtualBoxDisk -Name IsReadOnly -Value $false }
+            try {
+                $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+                $result.ExitCode | Should -Be 1
+                $result.Message | Should -BeExactly "VirtualBox could not start the VM:`n`nVBoxManage: error: no luck"
+                [IO.File]::ReadAllText($script:stick.VirtualBoxDisk) | Should -BeLike '*FLAT "\\.\PortableVM-disarmed" 0*'
+                Should -Invoke -CommandName Wait-PvmProcessExit -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $Name -eq 'VBoxSVC' -and $TimeoutSeconds -eq 60 }
+            } finally { Set-ItemProperty -LiteralPath $script:stick.VirtualBoxDisk -Name IsReadOnly -Value $false }
+        }
+
+        It 'logs a note when the background service still runs after the wait, and reads the file once more anyway' {
+            $script:ended = $false
+            $script:runs = 0
+            Mock -ModuleName PortableVM Test-PvmVmRunning { $script:runs++; if ($script:runs -ge 2) { $script:ended = $true; return $false }; $true }
+            Mock -ModuleName PortableVM Invoke-PvmTestProcess { $script:ended } -ParameterFilter { $Name -eq 'VBoxSVC' }
+            Mock -ModuleName PortableVM Wait-PvmProcessExit {}
+            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
+            $result.ExitCode | Should -Be 0 -Because $result.Message
+            Get-TestLog -Path $script:stick.Log | Should -Contain "Note: VirtualBox's background service still ran 60 s after the VM ended, so the launcher read stick.vmdk once more without waiting longer"
+        }
+
         It 'points the file away from the stick when VirtualBox cannot start the VM' {
             Mock -ModuleName PortableVM Invoke-PvmNative { [pscustomobject]@{ ExitCode = 1; Output = 'VBoxManage: error: no luck' } } -ParameterFilter { $ArgumentList[0] -eq 'startvm' }
             $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
@@ -4461,7 +4555,7 @@ Describe 'Disarming a disk file' {
     It 'names the disarmed device for every raw-disk extent and keeps every other byte' {
         $path = Join-Path $TestDrive 'armed.vmdk'
         Write-TestFile -Path $path -Text (Get-TestStickDescriptorText -ExtentEnd ' ')
-        $change = Get-PvmDisarmChange -Path $path -BackupPath (Join-Path $TestDrive 'a.orig') -PreviousPath (Join-Path $TestDrive 'a.previous.orig') -LogPath (Join-Path $TestDrive 'l.log')
+        $change = Get-PvmDisarmChange -Path $path -BackupPath (Join-Path $TestDrive 'a.orig') -PreviousPath (Join-Path $TestDrive 'a.previous.orig')
         [Text.Encoding]::GetEncoding(28591).GetString($change.New) | Should -BeExactly (Get-TestStickDescriptorText -ExtentEnd ' ').Replace('\\.\PhysicalDrive3', '\\.\PortableVM-disarmed')
         $change.Disarm | Should -BeTrue
     }
@@ -4469,7 +4563,7 @@ Describe 'Disarming a disk file' {
     It 'has nothing to change for a file that is disarmed already, or missing' {
         $path = Join-Path $TestDrive 'disarmed.vmdk'
         Write-TestFile -Path $path -Text (Get-TestStickDescriptorText).Replace('\\.\PhysicalDrive3', '\\.\PortableVM-disarmed')
-        $copies = @{ BackupPath = (Join-Path $TestDrive 'b.orig'); PreviousPath = (Join-Path $TestDrive 'b.previous.orig'); LogPath = (Join-Path $TestDrive 'l.log') }
+        $copies = @{ BackupPath = (Join-Path $TestDrive 'b.orig'); PreviousPath = (Join-Path $TestDrive 'b.previous.orig') }
         Get-PvmDisarmChange -Path $path @copies | Should -BeNullOrEmpty
         Get-PvmDisarmChange -Path (Join-Path $TestDrive 'missing.vmdk') @copies | Should -BeNullOrEmpty
     }

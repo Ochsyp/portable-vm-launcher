@@ -297,6 +297,7 @@ function Get-CompareKind {
         '^Note: .+ could not be pointed away from the stick: ' { return 'note: a disk file could not be pointed away from the stick' }
         '^Note: the launcher could not check whether the VM runs' { return 'note: a check whether the VM runs failed' }
         '^Note: .+ could not be read once more after ' { return 'note: a disk file could not be read once more' }
+        '^Note: VirtualBox''s background service still ran \d+ s after the VM ended' { return 'note: the background service still ran after the VM ended' }
         '^Creating .+ -> ' { return 'descriptor would be created' }
         '^[^:]+: rewritten because ' { return 'reason for the descriptor rewrite' }
         '\.vbox: drive letter OK$' { return 'the .vbox file: drive letter OK' }

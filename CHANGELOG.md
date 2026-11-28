@@ -251,9 +251,10 @@ All notable changes to this project are listed here. The format follows
   VirtualBox's background service to end and reads the file once more, pointing it away again, with
   a log line, should it point at the stick again; a first try to point it away that fails is tried
   once more after that wait, and a VM that VirtualBox says runs already once the file is armed is
-  watched too. A start that stops after the arm points the file away too. The read-only check says
-  when a disk file points at the stick while no VM runs, which needs attention, and the stick-check
-  tool knows the new log lines and notes (phase 9)
+  watched too. A start that stops after the arm points the file away too, and any stop that leaves
+  the file pointed at the stick says so. The read-only check says when a disk file points at the
+  stick while no VM runs, which needs attention, and the stick-check tool knows the new log lines
+  and notes (phase 9)
 - The history scan accepts one made-up test value (d242): the USB disk name of a fictitious
   `Test_Stick` under `/dev/disk/by-id`, kind `disk-by-id`, in the ten versions of
   `tests/PortableVM.Tests.ps1` on main that hold it, through ten `PRIVACY_HISTORY_ACCEPT` records

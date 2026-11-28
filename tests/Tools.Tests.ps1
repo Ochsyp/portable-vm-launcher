@@ -1671,6 +1671,7 @@ Describe 'Compare-StickDryRun: kinds of log lines' {
         @{ Message = 'Note: stick.vmdk could not be pointed away from the stick: Access to the path is denied.'; Kind = 'note: a disk file could not be pointed away from the stick' }
         @{ Message = 'Note: the launcher could not check whether the VM runs, so it checks again: Call cancelled'; Kind = 'note: a check whether the VM runs failed' }
         @{ Message = "Note: stick.vmdk could not be read once more after VirtualBox's background service ended: Could not find file."; Kind = 'note: a disk file could not be read once more' }
+        @{ Message = "Note: VirtualBox's background service still ran 60 s after the VM ended, so the launcher read stick.vmdk once more without waiting longer"; Kind = 'note: the background service still ran after the VM ended' }
     ) {
         Get-CompareKind -Message $Message -Version 'v2' | Should -BeExactly $Kind
     }

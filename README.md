@@ -380,7 +380,8 @@ the disk file once more: should the service have pointed it at the stick again, 
 points it away once more and the log says so. Should the first try to point the file away fail
 while the service still holds it, the launcher tries once more after that wait. Then it ends. A
 start that stops after the arm, such as a VirtualBox that cannot start the VM, also points the
-file away before it ends.
+file away before it ends. Any stop that leaves the file pointed at the stick says so in its
+message, and the log says why.
 
 If the launcher is cut off while the VM runs (the PC crashes, the stick is pulled, you sign out,
 or its Windows PowerShell process is ended in Task Manager), the disk file stays armed. The
