@@ -448,6 +448,9 @@ function Get-CompareArgumentProblem {
         [AllowEmptyString()][string]$RunFolder = '',
         [AllowEmptyCollection()][string[]]$Unbound = @()
     )
+    # A mistyped parameter name lands in $Unbound too, as do the values after it.
+    $unknown = @($Unbound | Where-Object { $_ -match '\A-[A-Za-z]' })
+    if ($unknown.Count) { return "the tool has no parameter $($unknown -join ', '); nothing was changed" }
     $names = @(
         if ($Target.Contains('=>')) { '-Target' }
         if ($OutputFolder.Contains('=>')) { '-OutputFolder' }
