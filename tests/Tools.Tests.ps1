@@ -1663,6 +1663,11 @@ Describe 'Compare-StickDryRun: kinds of log lines' {
         @{ Message = 'stick.vmdk -> RW 2500000 FLAT "\\.\PhysicalDrive3" 0 | RW 1400000 ZERO'; Kind = 'descriptor would be pointed at the stick' }
         @{ Message = 'stick.vmdk: rewritten because the disk device, a size and the number of extents differ'; Kind = 'reason for the descriptor rewrite' }
         @{ Message = 'Started with VirtualBox 7.1.4r165100'; Kind = 'started with VirtualBox' }
+        @{ Message = 'Running in VMware; the launcher watches the VM and points its disk file away from the stick when it ends'; Kind = 'watching the VM in VMware' }
+        @{ Message = 'Running in VirtualBox; the launcher watches the VM and points its disk file away from the stick when it ends'; Kind = 'watching the VM in VirtualBox' }
+        @{ Message = 'The VM has ended, after 42 min'; Kind = 'the VM ended' }
+        @{ Message = 'stick.vmdk: pointed away from the stick'; Kind = 'descriptor pointed away from the stick' }
+        @{ Message = 'stick.vmdk: pointed at the stick again after the VM ended, so the launcher pointed it away once more'; Kind = 'descriptor armed again after the VM ended' }
     ) {
         Get-CompareKind -Message $Message -Version 'v2' | Should -BeExactly $Kind
     }
@@ -2460,8 +2465,9 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
                         "    VMwareVmx = 'VMware\Test VM.vmx'", "    VMwareDisk = 'VMware\stick.vmdk'", "    VmDisplayName = 'Kelda Box'", '}', '') -join "`r`n"))
             Write-TestFile -Path (Join-Path $Root 'VMware\Test VM.vmx') -Text ((@('.encoding = "windows-1252"', 'config.version = "8"', 'displayName = "Test VM"', 'uuid.action = "keep"', 'suspend.disabled = "TRUE"',
                         'scsi0:0.fileName = "stick.vmdk"', 'scsi0:0.present = "TRUE"', '') -join "`r`n"))
-            Write-TestFile -Path (Join-Path $Root 'VMware\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 2500000 FLAT "\\.\PhysicalDrive99" 0', 'RW 1400000 ZERO')
-            Write-TestFile -Path (Join-Path $Root 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 2500000 FLAT "\\.\PhysicalDrive99" 0', 'RW 1400000 ZERO')
+            # Disarmed, as a start leaves them once the VM has ended.
+            Write-TestFile -Path (Join-Path $Root 'VMware\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 2500000 FLAT "\\.\PortableVM-disarmed" 0', 'RW 1400000 ZERO')
+            Write-TestFile -Path (Join-Path $Root 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 2500000 FLAT "\\.\PortableVM-disarmed" 0', 'RW 1400000 ZERO')
             Write-TestFile -Path (Join-Path $Root 'VirtualBox\Test VM\Test VM.vbox') -Text ((@('<?xml version="1.0"?>', '<VirtualBox xmlns="http://www.virtualbox.org/" version="1.19-windows">',
                         '  <Machine uuid="{5ca1ab1e-0000-4000-8000-000000000001}" name="Test VM" OSType="Debian_64">',
                         '    <MediaRegistry><HardDisks><HardDisk uuid="{5ca1ab1e-0000-4000-8000-000000000002}" location="stick.vmdk" format="VMDK"/></HardDisks></MediaRegistry>',
@@ -2503,6 +2509,7 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
         $script:stateStick = Join-Path $TestDrive 'state stick'
         Initialize-StateStick -Root $script:stateStick
         Mock Write-Host {}
+        Mock Get-CompareVmProcess { @() }
         # The stand-in PC: the stick folder's partition is on disk 99, which is the stick.
         Mock -ModuleName PortableVM Invoke-PvmGetPartition { [pscustomobject]@{ DiskNumber = 99; Offset = [uint64]2500000 * 512; Size = [uint64]1400000 * 512 } }
         Mock -ModuleName PortableVM Invoke-PvmGetDisk { [pscustomobject]@{ Number = 99; PartitionStyle = 'MBR'; Signature = [uint32]0x5CA1AB1E; LogicalSectorSize = 512; Size = [uint64]4000000 * 512; IsBoot = $false; IsSystem = $false } }
@@ -2528,10 +2535,10 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
                 '  VirtualBox bandwidth group on the stick disk: none'
                 '  partitions mounted in the VM''s part of the stick: 0'
                 '  VMware disk file: found'
-                '  VMware disk file points at the stick: yes'
+                '  VMware disk file points at the stick: no, it is disarmed: it names no disk until a start points it at the stick'
                 '  VMware disk file, first copy: no'
                 '  VMware disk file, copy of the version before the latest rewrite: no'
-                '  VirtualBox disk file points at the stick: yes'
+                '  VirtualBox disk file points at the stick: no, it is disarmed: it names no disk until a start points it at the stick'
                 '  VirtualBox .vbox file: found'
                 '  VirtualBox.xml: found'
                 '  VMware saved state: no'
@@ -2601,11 +2608,22 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
         $result.Lines[-1] | Should -BeExactly 'RESULT: ATTENTION - what a deploy left'
     }
 
-    It 'says why the next start rewrites a disk file that does not point at the stick, which needs no attention' {
-        Write-TestFile -Path (Join-Path $script:stateStick 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 2500000 FLAT "\\.\PortableVM-disarmed" 0', 'RW 1400000 ZERO')
+    It 'says why the next start rewrites a disk file that names another disk, which needs no attention' {
+        Write-TestFile -Path (Join-Path $script:stateStick 'VirtualBox\Test VM\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 2500000 FLAT "\\.\PhysicalDrive7" 0', 'RW 1400000 ZERO')
         $result = Invoke-StateCheck
         $result.Lines | Should -Contain '  VirtualBox disk file points at the stick: no; the next start rewrites it because the disk device differs'
         $result.ExitCode | Should -Be 0
+    }
+
+    It 'needs attention for a disk file that points at the stick while no VM runs, and none while one runs' {
+        Write-TestFile -Path (Join-Path $script:stateStick 'VMware\stick.vmdk') -Text (Get-StateDescriptorText -Extents 'RW 2500000 FLAT "\\.\PhysicalDrive99" 0', 'RW 1400000 ZERO')
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  VMware disk file points at the stick: yes, although no VM runs'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: ATTENTION - a disk file that points at the stick while no VM runs'
+        Mock Get-CompareVmProcess { 'vmware-vmx.exe' }
+        $result = Invoke-StateCheck
+        $result.Lines | Should -Contain '  VMware disk file points at the stick: yes, while a VM runs'
+        $result.Lines[-1] | Should -BeExactly 'RESULT: OK - nothing needs attention'
     }
 
     It 'says that the next start rewrites a disk file in the layout from before phase 8, or with the read-only boot area of its first build' {
@@ -2627,8 +2645,8 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
         }
         $result = Invoke-StateCheck
         @($result.Lines | Where-Object { $_ -like '*boot area*' }) | Should -BeNullOrEmpty
-        $result.Lines | Should -Contain '  VMware disk file points at the stick: yes'
-        $result.Lines | Should -Contain '  VirtualBox disk file points at the stick: yes'
+        $result.Lines | Should -Contain '  VMware disk file points at the stick: no, it is disarmed: it names no disk until a start points it at the stick'
+        $result.Lines | Should -Contain '  VirtualBox disk file points at the stick: no, it is disarmed: it names no disk until a start points it at the stick'
         $result.Lines[-1] | Should -BeExactly 'RESULT: OK - nothing needs attention'
     }
 
@@ -2644,7 +2662,7 @@ Describe 'Test-StickState' -Tag 'WindowsOnly' {
         try { $result = Invoke-StateCheck }
         finally { $held.Dispose() }
         $result.Lines | Should -Contain '  VMware disk file points at the stick: unknown, since it cannot be read now'
-        $result.Lines | Should -Contain '  VirtualBox disk file points at the stick: yes'
+        $result.Lines | Should -Contain '  VirtualBox disk file points at the stick: no, it is disarmed: it names no disk until a start points it at the stick'
         $result.Lines[-1] | Should -BeExactly 'RESULT: OK - nothing needs attention'
     }
 

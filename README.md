@@ -29,6 +29,8 @@ Before every start the launcher:
 - reads which raw-disk descriptor (`.vmdk`) the VM uses from its own `.vmx` or `.vbox`, and
   the VM's UUID from the `.vbox`; settings that name them too must agree, and a VM file that
   attaches no raw disk, more than one, or one outside the stick folder stops the start;
+- reads the stick's identity once more, right before it points the descriptor at the stick, and
+  stops if the drive or the disk changed meanwhile;
 - points that descriptor at the disk number, changing only its extent lines and `createType`,
   and stops at a descriptor it does not understand or whose extent names a file, also through
   a long path such as `\\?\C:\...`; a missing VMware descriptor is created where the `.vmx`
@@ -357,6 +359,29 @@ What a stick, a script or a user may rely on between versions:
   finish; the launcher asks whether to take the step that sets it right, and the deploy tool
   stops at them and names the step.
 - `LauncherData\backups\removed\<date-time>` holds what the launcher's guided fix moved aside.
+
+## Arm, verify, watch
+
+While no VM runs, both disk files point at no disk: their raw-disk extents name the device
+`\\.\PortableVM-disarmed`, which does not exist ("disarmed"). A VM started from VMware's or
+VirtualBox's own window, or with another disk in the stick's place, then finds no disk and
+writes nowhere. Only a start through the launcher points the disk file of the program it starts
+at the stick ("armed"), right after reading the stick's identity once more.
+
+After the start, the launcher checks that the VM runs: within 60 s, VMware must run a
+`vmware-vmx` process for the VM's `.vmx`, or VirtualBox a VM process for its UUID. If not, it
+points the disk file away from the stick again and says so. Then it stays in the background,
+hidden and with the administrator rights it was given, and checks every 5 s whether the VM still
+runs. When the VM has ended, it points the disk file away from the stick and logs how long the VM
+ran. After a VirtualBox start it then waits up to 60 s for VirtualBox's background service to end
+and reads the disk file once more: should the service have pointed it at the stick again, the
+launcher points it away once more and the log says so. Then it ends. A start that stops after
+the arm, such as a VirtualBox that cannot start the VM, also points the file away before it ends.
+
+If the launcher is cut off while the VM runs (the PC crashes, the stick is pulled), the disk file
+stays armed. The read-only check then says "points at the stick: yes, although no VM runs" and
+needs attention, and the next start through the launcher sets it right. A second `Start VM.cmd`
+while the launcher watches finds its lock and says so.
 
 ## Known limits
 

@@ -36,6 +36,9 @@ used on.
   start anything.
 - The guest can write the stick's boot area (the MBR and the gap before the first partition) in
   both programs, as the README's "Boot area" says.
+- While the VM runs, the launcher keeps running in the background with the administrator rights
+  it was given, so that it can point the disk file away from the stick when the VM ends. In that
+  time it only reads the process list and, at the end, writes that disk file and its copies.
 
 ## Network
 

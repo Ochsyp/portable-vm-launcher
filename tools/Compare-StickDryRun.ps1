@@ -290,6 +290,10 @@ function Get-CompareKind {
         '^Moved aside: ' { return 'a file the fix moved aside' }
         '^Renamed: ' { return 'a file the fix renamed' }
         '^Started with (VMware Workstation|VirtualBox)\b' { return "started with $($Matches[1])" }
+        '^Running in (VMware|VirtualBox); the launcher watches the VM' { return "watching the VM in $($Matches[1])" }
+        '^The VM has ended, after \d+ min$' { return 'the VM ended' }
+        '^[^:]+: pointed away from the stick$' { return 'descriptor pointed away from the stick' }
+        '^[^:]+: pointed at the stick again after the VM ended' { return 'descriptor armed again after the VM ended' }
         '^Creating .+ -> ' { return 'descriptor would be created' }
         '^[^:]+: rewritten because ' { return 'reason for the descriptor rewrite' }
         '\.vbox: drive letter OK$' { return 'the .vbox file: drive letter OK' }
