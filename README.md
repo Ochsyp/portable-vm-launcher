@@ -371,9 +371,8 @@ at the stick ("armed"), right after reading the stick's identity once more.
 After the start, the launcher checks that the VM runs: within 60 s, VMware must run a
 `vmware-vmx` process for the VM's `.vmx`, or VirtualBox a VM process for its UUID. If not, it
 points the disk file away from the stick again and says so. Then it stays in the background,
-with the administrator rights it was given, in a minimized PowerShell window on the taskbar
-titled "Portable VM: watching the VM - keep this window open", and checks every 5 s whether the
-VM still runs; a check that fails for a moment is logged once and tried again, and after 60 s of
+hidden and with the administrator rights it was given: no window stays open, and Task Manager
+lists it as Windows PowerShell. It checks every 5 s whether the VM still runs; a check that fails for a moment is logged once and tried again, and after 60 s of
 failed checks the launcher stops watching and says so, leaving the file armed. When the VM has
 ended, it points the disk file away from the stick and logs how long the VM ran. After a
 VirtualBox start it then waits up to 60 s for VirtualBox's background service to end and reads
@@ -383,9 +382,10 @@ while the service still holds it, the launcher tries once more after that wait. 
 start that stops after the arm, such as a VirtualBox that cannot start the VM, also points the
 file away before it ends.
 
-If the launcher is cut off while the VM runs (the PC crashes, the stick is pulled, its window is
-closed), the disk file stays armed. The read-only check then says "points at the stick: yes, although no VM runs" and
-needs attention, and the next start through the launcher sets it right. A second `Start VM.cmd`
+If the launcher is cut off while the VM runs (the PC crashes, the stick is pulled, you sign out,
+or its Windows PowerShell process is ended in Task Manager), the disk file stays armed. The
+read-only check then says "points at the stick: yes, although no VM runs" and needs attention,
+and the next start through the launcher sets it right. A second `Start VM.cmd`
 while the launcher watches finds its lock and says so.
 
 ## Known limits
@@ -407,9 +407,9 @@ The redesign removes these. Until then:
 - A start keeps the lock until the VM has ended, so every double-click meanwhile says that another
   run is in progress.
 - While a run waits for the answer to its resume question, or hangs, it keeps the lock too. Answer
-  the question, or, only while no VM runs, close that run's minimized PowerShell window; the run
-  then ends, and the next one takes the lock. While the VM runs, that window is the watch: leave
-  it open.
+  the question. A run that hangs while no VM runs shows no window: end its Windows PowerShell
+  process in Task Manager, or sign out; the next run then takes the lock. While the VM runs, that
+  process is the watch: leave it running.
 
 ## Development
 

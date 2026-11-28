@@ -295,7 +295,6 @@ BeforeAll {
         # so every start checks, watches once and points its disk file away again.
         $script:vmRunsNext = $true
         Mock -ModuleName PortableVM Test-PvmVmRunning { $answer = $script:vmRunsNext; $script:vmRunsNext = -not $answer; $answer }
-        Mock -ModuleName PortableVM Write-PvmWindowTitle {}
         Mock -ModuleName PortableVM Invoke-PvmGetRegistryValue {
             if ($Path -like '*\Oracle\VirtualBox' -and $script:testInstalled -contains 'VirtualBox') { return $script:testStick.VirtualBoxDir }
             if ($Path -like '*\VMware Workstation' -and $Path -notlike '*WOW6432Node*' -and $script:testInstalled -contains 'VMware') { return $script:testStick.VMwareDir }
@@ -4254,12 +4253,6 @@ Describe 'Arm, verify, watch' -Tag 'WindowsOnly' {
             $arm | Should -BeGreaterThan -1
             $start | Should -BeGreaterThan $arm
             $disarm | Should -BeGreaterThan $start
-        }
-
-        It 'names the watch in its window''s title, so that nobody closes it while the VM runs' {
-            $result = Invoke-PortableVM -LauncherPath $script:stick.Launcher
-            $result.ExitCode | Should -Be 0 -Because $result.Message
-            Should -Invoke -CommandName Write-PvmWindowTitle -ModuleName PortableVM -Times 1 -Exactly -ParameterFilter { $Title -eq 'Portable VM: watching the VM - keep this window open' }
         }
 
         It 'keeps checking when a check whether the VM runs fails, and says so once per row of failures' {

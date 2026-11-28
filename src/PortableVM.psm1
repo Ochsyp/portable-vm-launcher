@@ -4101,15 +4101,6 @@ function Test-PvmVmRunningOrAssume {
     }
 }
 
-# Show $Title in the title bar of this run's window, the minimized PowerShell window on the
-# taskbar; a host without one keeps its title.
-function Write-PvmWindowTitle {
-    [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Title)
-    try { $Host.UI.RawUI.WindowTitle = $Title }
-    catch { Write-Verbose "The window title could not be set: $($_.Exception.Message)" }
-}
-
 # After a start in $Program, check that the VM runs within $StartSeconds, then wait while it runs,
 # checking every $PollSeconds, and point its disk file $Disk away from the stick (Invoke-PvmDisarm,
 # with $Copies) as soon as it has ended. VirtualBox's background service may still hold the VM's
@@ -4148,7 +4139,6 @@ function Watch-PvmVm {
     }
     Write-PvmLog -Path $log -Message "Running in $Program; the launcher watches the VM and points its disk file away from the stick when it ends"
     Enter-PvmStep -Context $Context -Name 'watch'
-    Write-PvmWindowTitle -Title 'Portable VM: watching the VM - keep this window open'
     $started = Get-Date
     $row = @{ Failures = 0; Cause = '' }
     while (Test-PvmVmRunningOrAssume -Context $Context -Program $Program -Vmx $Vmx -Assume $true -Row $row) {

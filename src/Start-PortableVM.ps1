@@ -10,8 +10,9 @@
       this stick (MBR signature, size, partition layout) - otherwise nothing starts,
     - reads the stick's identity once more, then points the VM's raw-disk file at that disk
       number ("arms" it), and checks that the VM starts,
-    - stays in the background while the VM runs, and points the raw-disk file away from the
-      stick again when the VM has ended ("disarms" it), as the README's "Arm, verify, watch" says,
+    - stays in the background while the VM runs, hidden, and points the raw-disk file away from
+      the stick again when the VM has ended ("disarms" it), as the README's "Arm, verify, watch"
+      says,
     - fixes the stick's drive letter in the VirtualBox files,
     - refuses to start the VM in one program while it has a saved state in the other.
   One run at a time: a start or a dry run holds the lock Global\PortableVM-Launcher, a start
@@ -260,8 +261,8 @@ $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $isAdmin = (New-Object Security.Principal.WindowsPrincipal $identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin -and -not $DryRun) {
     try {
-        Start-Process powershell.exe -Verb RunAs -WindowStyle Minimized `
-            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+        Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden `
+            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$PSCommandPath`"")
     } catch {
         Show-Message 'The launcher needs administrator rights, because the VM boots this USB stick directly.' 'Warning'
     }
