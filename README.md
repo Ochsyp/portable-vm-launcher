@@ -29,6 +29,8 @@ Before every start the launcher:
 - reads which raw-disk descriptor (`.vmdk`) the VM uses from its own `.vmx` or `.vbox`, and
   the VM's UUID from the `.vbox`; settings that name them too must agree, and a VM file that
   attaches no raw disk, more than one, or one outside the stick folder stops the start;
+- reads the stick's identity once more, right before it points the descriptor at the stick, and
+  stops if the drive or the disk changed meanwhile;
 - points that descriptor at the disk number, changing only its extent lines and `createType`,
   and stops at a descriptor it does not understand or whose extent names a file, also through
   a long path such as `\\?\C:\...`; a missing VMware descriptor is created where the `.vmx`
@@ -358,6 +360,35 @@ What a stick, a script or a user may rely on between versions:
   stops at them and names the step.
 - `LauncherData\backups\removed\<date-time>` holds what the launcher's guided fix moved aside.
 
+## Arm, verify, watch
+
+While no VM runs, both disk files point at no disk: their raw-disk extents name the device
+`\\.\PortableVM-disarmed`, which does not exist ("disarmed"). A VM started from VMware's or
+VirtualBox's own window, or with another disk in the stick's place, then finds no disk and
+writes nowhere. Only a start through the launcher points the disk file of the program it starts
+at the stick ("armed"), right after reading the stick's identity once more.
+
+After the start, the launcher checks that the VM runs: within 60 s, VMware must run a
+`vmware-vmx` process for the VM's `.vmx`, or VirtualBox a VM process for its UUID. If not, it
+points the disk file away from the stick again and says so. Then it stays in the background,
+hidden and with the administrator rights it was given: no window stays open, and Task Manager
+lists it as Windows PowerShell. It checks every 5 s whether the VM still runs; a check that fails for a moment is logged once and tried again, and after 60 s of
+failed checks the launcher stops watching and says so, leaving the file armed. When the VM has
+ended, it points the disk file away from the stick and logs how long the VM ran. After a
+VirtualBox start it then waits up to 60 s for VirtualBox's background service to end and reads
+the disk file once more: should the service have pointed it at the stick again, the launcher
+points it away once more and the log says so. Should the first try to point the file away fail
+while the service still holds it, the launcher tries once more after that wait. Then it ends. A
+start that stops after the arm, such as a VirtualBox that cannot start the VM, also points the
+file away before it ends. Any stop that leaves the file pointed at the stick says so in its
+message, and the log says why.
+
+If the launcher is cut off while the VM runs (the PC crashes, the stick is pulled, you sign out,
+or its Windows PowerShell process is ended in Task Manager), the disk file stays armed. The
+read-only check then says "points at the stick: yes, although no VM runs" and needs attention,
+and the next start through the launcher sets it right. A second `Start VM.cmd`
+while the launcher watches finds its lock and says so.
+
 ## Known limits
 
 The redesign removes these. Until then:
@@ -366,21 +397,20 @@ The redesign removes these. Until then:
   write the VM's old view of the disk over what changed in between, which can corrupt the
   guest's file system. Resume the VM through the launcher and shut the guest down first.
 - **Start and resume the VM only through the launcher**, never from the VMware or VirtualBox
-  window or library. Between runs the descriptor still names the disk number of the last run,
-  which another disk may have by then.
+  window or library. Between runs the disk file names no disk ("Arm, verify, watch"), so such a
+  start finds no disk; only a launcher cut off while the VM ran leaves it armed.
 - **VirtualBox: keep "Use Host I/O Cache" on** for the controller that holds the raw disk. With
   it off, VirtualBox takes every volume of the stick offline, the Data partition included. A
   VirtualBox start stops when it is off.
 - A second double-click while Windows still asks for administrator rights for the first one, or
   in the second after that, asks again. That second run then stops, saying that another run is in
-  progress, or says that the VM is already running. Right after a start in VMware, before
-  VMware's process for the VM shows, it can also find no running VM and run VMware for the VM
-  again.
-- The lock covers the launcher's checks and its start command, not the time the VM runs; once the
-  VM's process runs, the process checks find it.
-- While a run waits for the answer to its resume question, or hangs, it keeps the lock, and every
-  double-click says that another run is in progress. Answer the question, or close that run's
-  minimized PowerShell window; the run then ends, and the next one takes the lock.
+  progress.
+- A start keeps the lock until the VM has ended, so every double-click meanwhile says that another
+  run is in progress.
+- While a run waits for the answer to its resume question, or hangs, it keeps the lock too. Answer
+  the question. A run that hangs while no VM runs shows no window: end its Windows PowerShell
+  process in Task Manager, or sign out; the next run then takes the lock. While the VM runs, that
+  process is the watch: leave it running.
 
 ## Development
 

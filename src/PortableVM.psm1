@@ -307,6 +307,9 @@ function Get-PvmStepText {
         'wait' { "waiting for VirtualBox's background service to end" }
         'files' { 'pointing the VM files at the stick' }
         'start' { 'starting the VM' }
+        'verify' { 'checking that the VM runs' }
+        'watch' { 'watching the VM' }
+        'disarm' { 'pointing the disk file away from the stick' }
         default { 'running the launcher' }
     }
 }
@@ -658,12 +661,13 @@ function Get-PvmOtherSystemMessage {
     'On this system the launcher cannot tell yet which disk is the USB stick; so far it starts the VM only on Windows. Nothing was started.'
 }
 
-# Return the message of a run that finds another run holding the lock.
+# Return the message of a run that finds another run holding the lock, which may be a start
+# that watches the VM while it runs (Watch-PvmVm).
 function Get-PvmBusyMessage {
     [CmdletBinding()]
     [OutputType([string])]
     param()
-    'Another run of the launcher is in progress on this PC: a start of the VM or a dry run. Wait until it has finished, then start the VM again if it is not running. Nothing was started.'
+    'Another run of the launcher is in progress on this PC: a start of the VM or a dry run, or the launcher watching the VM while it runs. If the VM runs, nothing needs doing; otherwise wait until that run has finished, then start the VM again. Nothing was started.'
 }
 
 # Take the named mutex $Name without waiting. Returns State 'Acquired', or 'Abandoned' when an
@@ -3712,6 +3716,7 @@ function Invoke-PvmVMware {
     Assert-PvmVMwareReady -Context $Context -Vmx $vmx
 
     Enter-PvmStep -Context $Context -Name 'files'
+    Assert-PvmStickUnchanged -Context $Context
     # The VM's size (request r9), in the .vmx.
     $size = Get-PvmVMwareSizeChange -Context $Context -Vmx $vmx
     if ($null -ne $size) { Save-PvmFileChange -Change $size -LogPath $log -WhatIf:$Context.DryRun }
@@ -3720,12 +3725,22 @@ function Invoke-PvmVMware {
     $disk = $Context.VmFiles.VMwareDisk
     if (-not $disk) {
         Write-PvmLog -Path $log -Message 'DRY RUN - no VMware disk file to point at the stick'
-    } elseif ([IO.File]::Exists($disk)) {
-        $copies = @{ Root = $Context.Root; Backups = $Context.Backups; Path = $disk }
-        $change = Get-PvmDescriptorChange -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @copies -Suffix '.orig') -PreviousPath (Get-PvmBackupPath @copies -Suffix '.previous.orig') -LogPath $log
-        if ($null -ne $change) { Save-PvmFileChange -Change $change -LogPath $log -WhatIf:$Context.DryRun }
     } else {
-        New-PvmVMwareDescriptor -Path $disk -Layout $layout -LogPath $log -AdapterType $Context.VmFiles.VMwareAdapter -WhatIf:$Context.DryRun
+        # The file is read before the try, so that only a write that stopped after its swap, which
+        # leaves the file pointed at the stick, says so.
+        $change = $null
+        $exists = [IO.File]::Exists($disk)
+        if ($exists) {
+            $copies = @{ Root = $Context.Root; Backups = $Context.Backups; Path = $disk }
+            $change = Get-PvmDescriptorChange -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @copies -Suffix '.orig') -PreviousPath (Get-PvmBackupPath @copies -Suffix '.previous.orig') -LogPath $log
+        }
+        try {
+            if (-not $exists) { New-PvmVMwareDescriptor -Path $disk -Layout $layout -LogPath $log -AdapterType $Context.VmFiles.VMwareAdapter -WhatIf:$Context.DryRun }
+            elseif ($null -ne $change) { Save-PvmFileChange -Change $change -LogPath $log -WhatIf:$Context.DryRun }
+        } catch {
+            if (Test-PvmDescriptorArmed -Path $disk) { throw (Get-PvmStillArmedStop -Context $Context -Disk $disk -ErrorRecord $_) }
+            throw
+        }
     }
     Enter-PvmStep -Context $Context -Name 'start'
     if ($Context.DryRun) {
@@ -3733,7 +3748,14 @@ function Invoke-PvmVMware {
         return 'DryRun'
     }
 
-    Start-PvmVMwareVm -VMwareDir $VMwareDir -Vmx $vmx -View $settings['VMwareView'] -LogPath $log
+    $copies = @{ Root = $Context.Root; Backups = $Context.Backups; Path = $disk }
+    try { Start-PvmVMwareVm -VMwareDir $VMwareDir -Vmx $vmx -View $settings['VMwareView'] -LogPath $log }
+    catch {
+        $failure = $_
+        if (-not (Invoke-PvmDisarmAfterStop -Context $Context -Program 'VMware' -Disk $disk -Copies $copies)) { throw (Get-PvmStillArmedStop -Context $Context -Disk $disk -ErrorRecord $failure) }
+        throw
+    }
+    Watch-PvmVm -Context $Context -Program 'VMware' -Vmx $vmx -Disk $disk -Copies $copies
     'Started'
 }
 
@@ -3881,6 +3903,7 @@ function Invoke-PvmVirtualBox {
     }
 
     Enter-PvmStep -Context $Context -Name 'files'
+    Assert-PvmStickUnchanged -Context $Context
     $vbox = Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxVbox']
     $registry = Join-Path (Join-PvmStickPath -Root $Context.Root -Path $settings['VirtualBoxHome']) 'VirtualBox.xml'
     # The disk file the .vbox attaches (Resolve-PvmVirtualBoxFile); a dry run that found none has
@@ -3901,13 +3924,49 @@ function Invoke-PvmVirtualBox {
             Get-PvmDriveLetterChange -Path $registry -BackupPath (Get-PvmBackupPath @backup -Path $registry -Suffix '.launcher-backup') -PreviousPath (Get-PvmBackupPath @backup -Path $registry -Suffix '.previous.launcher-backup') @letters
             if ($disk) { Get-PvmDescriptorChange -Path $disk -Layout $layout -BackupPath (Get-PvmBackupPath @backup -Path $disk -Suffix '.orig') -PreviousPath (Get-PvmBackupPath @backup -Path $disk -Suffix '.previous.orig') -LogPath $log }
         ) | Where-Object { $null -ne $_ })
-    foreach ($change in $changes) { Save-PvmFileChange -Change $change -LogPath $log -WhatIf:$Context.DryRun }
+    try { foreach ($change in $changes) { Save-PvmFileChange -Change $change -LogPath $log -WhatIf:$Context.DryRun } }
+    catch {
+        # A write that stopped after the swap of the disk file leaves it pointed at the stick.
+        if ($disk -and (Test-PvmDescriptorArmed -Path $disk)) { throw (Get-PvmStillArmedStop -Context $Context -Disk $disk -ErrorRecord $_) }
+        throw
+    }
     Enter-PvmStep -Context $Context -Name 'start'
     if ($Context.DryRun) {
         Write-PvmLog -Path $log -Message "DRY RUN - would start VM {$uuid} with VirtualBox ($VirtualBoxDir)"
         return 'DryRun'
     }
 
+    # From here a stop leaves no disk file pointed at the stick.
+    $copies = @{ Root = $Context.Root; Backups = $Context.Backups; Path = $disk }
+    try { $started = Invoke-PvmVirtualBoxStart -Context $Context -VBoxManage $vboxManage -VmUuid $uuid }
+    catch {
+        $failure = $_
+        if (-not (Invoke-PvmDisarmAfterStop -Context $Context -Program 'VirtualBox' -Disk $disk -Copies $copies)) { throw (Get-PvmStillArmedStop -Context $Context -Disk $disk -ErrorRecord $failure) }
+        throw
+    }
+    # A VM that VirtualBox says runs already, started in the seconds since the checks, runs from
+    # the armed file too, so it is watched as well.
+    if ($started -eq 'AlreadyRunning') { Write-PvmLog -Path $log -Message 'Already running in VirtualBox.' }
+    Watch-PvmVm -Context $Context -Program 'VirtualBox' -Disk $disk -Copies $copies
+    'Started'
+}
+
+# Ask VirtualBox at $VBoxManage once more whether it lists the VM $VmUuid and in which state, as
+# $Context describes, and start it (Start-PvmVirtualBoxVm). Returns 'Started', or 'AlreadyRunning'
+# when VirtualBox says the VM runs; throws a stop when VirtualBox cannot list or read it, or the
+# VM is in a state it cannot start from.
+function Invoke-PvmVirtualBoxStart {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][string]$VBoxManage,
+        [Parameter(Mandatory)][string]$VmUuid
+    )
+    $vboxManage = $VBoxManage
+    $uuid = $VmUuid
+    $names = $Context.Names
+    $log = $Context.LogPath
     $list = Invoke-PvmNative -FilePath $vboxManage -ArgumentList @('list', 'vms')
     if ($list.ExitCode -ne 0) {
         throw (Get-PvmStopException -Message (Format-PvmMessage -Names $names -Template "VirtualBox could not list its VMs:`n`n{Output}" -Values @{ Output = $list.Output }))
@@ -3930,6 +3989,287 @@ function Invoke-PvmVirtualBox {
     if ($activity -ne 'Off') { throw (Get-PvmStopException -Message (Get-PvmVirtualBoxStateMessage -State "$state" -Names $names)) }
     Start-PvmVirtualBoxVm -VBoxManage $vboxManage -VmUuid $uuid -Names $names -LogPath $log
     'Started'
+}
+
+# --- Arm, verify, watch -----------------------------------------------------------------------
+# At rest both disk files name the disarmed device (Get-PvmDisarmedDevice), so a VM started from a
+# program's own window, or with another disk in the stick's place, finds no disk. A start reads
+# the stick's identity once more (Assert-PvmStickUnchanged), arms the disk file of the program it
+# starts (Get-PvmDescriptorChange), checks that the VM runs, waits while it runs and disarms the
+# file again (Watch-PvmVm). A start that stops after the arm disarms the file before it ends.
+
+# Read the stick's identity once more, right before a disk file is pointed at it: the drive the
+# launcher runs from must still be on the disk $Context found, and that disk must still be the
+# configured stick (Get-PvmStickProblem). Throws a stop, before any write, when either changed.
+function Assert-PvmStickUnchanged {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][pscustomobject]$Context)
+    $stick = Get-PvmStickDevice -Location $Context.Location -Names $Context.Names
+    $problem = if ($stick.Disk.Number -ne $Context.StickDisk.Number) { "The drive $($Context.Location.Letter): is on disk $($stick.Disk.Number) now, not on disk $($Context.StickDisk.Number)." }
+    else { Get-PvmStickProblem -Disk $stick.Disk -Partition $stick.Partition -Settings $Context.Settings }
+    if ($problem) {
+        # Get-PvmStickProblem ends its texts with the sentence this message ends with.
+        $problem = $problem -replace '\s*Nothing was started\.$', ''
+        throw (Get-PvmStopException -Message (Format-PvmMessage -Names $Context.Names -Values @{ Problem = $problem } -Template (
+                    "The stick changed while the launcher checked it, so no disk file was pointed at it. {Problem}`n`nNothing was started.")))
+    }
+}
+
+# Prepare pointing the descriptor $Path away from the stick: every FLAT extent that names a raw
+# device names the disarmed device instead (ConvertTo-PvmDisarmedDescriptorText), and every other
+# byte stays. Returns the change for Save-PvmFileChange, with the copies $BackupPath and
+# $PreviousPath, or $null when the file is missing or names no raw device any more. It logs
+# nothing; Invoke-PvmDisarm logs the disarm once it is written.
+function Get-PvmDisarmChange {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$BackupPath,
+        [Parameter(Mandatory)][string]$PreviousPath
+    )
+    if (-not [IO.File]::Exists($Path)) { return $null }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $text = ConvertFrom-PvmDescriptorData -Bytes $bytes
+    $new = ConvertTo-PvmDisarmedDescriptorText -Text $text
+    if ($new -ceq $text) { return $null }
+    [pscustomobject]@{
+        Path           = $Path
+        Old            = $bytes
+        New            = [Text.Encoding]::GetEncoding(28591).GetBytes($new)
+        FirstBackup    = $BackupPath
+        PreviousBackup = $PreviousPath
+        Disarm         = $true
+        Action         = 'Point the raw-disk descriptor away from the stick'
+    }
+}
+
+# Point the disk file $Disk away from the stick (Get-PvmDisarmChange) through the safe write, with
+# its copies $Copies (Root, Backups, Path for Get-PvmBackupPath), as $Context describes. Returns
+# $true when the file names no raw device now. With -Quiet a failure only goes to the log, as a
+# note, and returns $false; otherwise it throws a stop that says the VM has ended and the file
+# still points at the stick.
+function Invoke-PvmDisarm {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][string]$Disk,
+        [Parameter(Mandatory)][hashtable]$Copies,
+        [switch]$Quiet
+    )
+    $log = $Context.LogPath
+    try {
+        $change = Get-PvmDisarmChange -Path $Disk -BackupPath (Get-PvmBackupPath @Copies -Suffix '.orig') -PreviousPath (Get-PvmBackupPath @Copies -Suffix '.previous.orig')
+        if ($null -ne $change) {
+            Save-PvmFileChange -Change $change -LogPath $log
+            Write-PvmLog -Path $log -Message "$([IO.Path]::GetFileName($Disk)): pointed away from the stick"
+        }
+        $true
+    } catch {
+        $cause = Get-PvmStopMessage -ErrorRecord $_
+        if (-not $cause) { $cause = Get-PvmErrorText -ErrorRecord $_ }
+        # A write's stop ends with this sentence, which is not true once a VM has run.
+        $cause = $cause -replace '\s*Nothing was started\.$', ''
+        $name = [IO.Path]::GetFileName($Disk)
+        if ($Quiet) {
+            Write-PvmLog -Path $log -Message "Note: $name could not be pointed away from the stick: $cause"
+            return $false
+        }
+        throw (Get-PvmStopException -Message (Format-PvmMessage -Names $Context.Names -Values @{ Name = $name; Cause = $cause } -Template (
+                    "{VM} has ended, but the launcher could not point {Name} away from the stick, so it still names the stick's disk. The next start sets it right.`n`n{Cause}")))
+    }
+}
+
+# Return whether the descriptor $Path names a raw device, that is points at a disk (armed): it
+# exists and ConvertTo-PvmDisarmedDescriptorText would change it. A file that cannot be read
+# counts as armed, since it may be.
+function Test-PvmDescriptorArmed {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        if (-not [IO.File]::Exists($Path)) { return $false }
+        $text = ConvertFrom-PvmDescriptorData -Bytes ([IO.File]::ReadAllBytes($Path))
+        (ConvertTo-PvmDisarmedDescriptorText -Text $text) -cne $text
+    } catch { $true }
+}
+
+# Return the sentences, for a stop's message, that the disk file $Disk names the stick's disk now
+# and what to do until the next start, as $Context names the VM.
+function Get-PvmStillArmedText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][string]$Disk
+    )
+    Format-PvmMessage -Names $Context.Names -Values @{ Name = [IO.Path]::GetFileName($Disk) } -Template "{Name} names the stick's disk now. Start {vm} only through the launcher, whose next start sets that right."
+}
+
+# Return the stop for the failure $ErrorRecord, in the step $Context.Step, that leaves the disk
+# file $Disk pointed at the stick: its message, or "Unexpected error while <step>: <error>" for
+# any other error, whose details go to the log first, then Get-PvmStillArmedText. A stop's
+# detail (Get-PvmStopDetail) stays with it.
+function Get-PvmStillArmedStop {
+    [CmdletBinding()]
+    [OutputType([System.Exception])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][string]$Disk,
+        [Parameter(Mandatory)][System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+    $message = Get-PvmStopMessage -ErrorRecord $ErrorRecord
+    if ($null -eq $message) {
+        foreach ($line in @(Format-PvmErrorDetail -ErrorRecord $ErrorRecord)) { Write-PvmLog -Path $Context.LogPath -Message $line }
+        $message = "Unexpected error while $(Get-PvmStepText -Step $Context.Step): $(Get-PvmErrorText -ErrorRecord $ErrorRecord)"
+    }
+    $stop = Get-PvmStopException -Message "$message`n`n$(Get-PvmStillArmedText -Context $Context -Disk $Disk)"
+    $detail = Get-PvmStopDetail -ErrorRecord $ErrorRecord
+    if ($detail) { $stop.Data['PvmDetail'] = $detail }
+    $stop
+}
+
+# After a start in $Program that stops once the disk file $Disk is armed, point the file away
+# from the stick quietly (Invoke-PvmDisarm -Quiet, with $Copies). VirtualBox's background service
+# may still hold the file, so for VirtualBox a first try that fails is tried once more after the
+# service has ended, waiting up to 60 s. Returns $true when the file names no raw device now.
+function Invoke-PvmDisarmAfterStop {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][ValidateSet('VMware', 'VirtualBox')][string]$Program,
+        [Parameter(Mandatory)][string]$Disk,
+        [Parameter(Mandatory)][hashtable]$Copies
+    )
+    if (Invoke-PvmDisarm -Context $Context -Disk $Disk -Copies $Copies -Quiet) { return $true }
+    if ($Program -ne 'VirtualBox') { return $false }
+    Wait-PvmProcessExit -Name 'VBoxSVC' -TimeoutSeconds 60
+    Invoke-PvmDisarm -Context $Context -Disk $Disk -Copies $Copies -Quiet
+}
+
+# Return whether the VM runs in $Program, as $Context describes: in VMware a vmware-vmx process for
+# its .vmx $Vmx (Test-PvmRunningInVMware), in VirtualBox a VM process for its UUID
+# (Test-PvmRunningInVirtualBox).
+function Test-PvmVmRunning {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][ValidateSet('VMware', 'VirtualBox')][string]$Program,
+        [string]$Vmx
+    )
+    if ($Program -eq 'VMware') { return (Test-PvmRunningInVMware -Vmx $Vmx) }
+    Test-PvmRunningInVirtualBox -VmUuid $Context.VmFiles.VirtualBoxVmUuid
+}
+
+# Return whether the VM runs in $Program (Test-PvmVmRunning, with $Context and $Vmx), or $Assume
+# when the check fails, as with a process list that Windows cannot give for a moment. The first
+# failure of a row goes to the log as a note; $Row.Failures counts the row, and $Row.Cause holds
+# its last cause.
+function Test-PvmVmRunningOrAssume {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][ValidateSet('VMware', 'VirtualBox')][string]$Program,
+        [string]$Vmx,
+        [Parameter(Mandatory)][bool]$Assume,
+        [Parameter(Mandatory)][hashtable]$Row
+    )
+    try {
+        $running = Test-PvmVmRunning -Context $Context -Program $Program -Vmx $Vmx
+        $Row.Failures = 0
+        $running
+    } catch {
+        $Row.Failures = [int]$Row.Failures + 1
+        $Row.Cause = Get-PvmErrorText -ErrorRecord $_
+        if ($Row.Failures -eq 1) {
+            Write-PvmLog -Path $Context.LogPath -Message "Note: the launcher could not check whether the VM runs, so it checks again: $($Row.Cause)"
+        }
+        $Assume
+    }
+}
+
+# After a start in $Program, check that the VM runs within $StartSeconds, then wait while it runs,
+# checking every $PollSeconds, and point its disk file $Disk away from the stick (Invoke-PvmDisarm,
+# with $Copies) as soon as it has ended. VirtualBox's background service may still hold the VM's
+# files, so for VirtualBox the launcher then waits up to 60 s for it to end and reads the disk
+# file once more: should it point at the stick again, it is pointed away once more, and the log
+# says so. Should the first try to point it away fail there, it tries once more after that wait.
+# A check whether the VM runs that fails counts as not yet started, or as still running; once the
+# checks have failed for $FailedChecks * $PollSeconds while it runs, the launcher stops watching
+# and says so. A VM that does not start stops the launcher, after the disarm; every stop that
+# leaves the file pointed at the stick says so (Get-PvmStillArmedText).
+function Watch-PvmVm {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][ValidateSet('VMware', 'VirtualBox')][string]$Program,
+        [string]$Vmx,
+        [Parameter(Mandatory)][string]$Disk,
+        [Parameter(Mandatory)][hashtable]$Copies,
+        [int]$StartSeconds = 60,
+        [int]$PollSeconds = 5,
+        [int]$FailedChecks = 12
+    )
+    $log = $Context.LogPath
+    Enter-PvmStep -Context $Context -Name 'verify'
+    $running = $false
+    $row = @{ Failures = 0; Cause = '' }
+    for ($waited = 0; ; $waited += 2) {
+        if (Test-PvmVmRunningOrAssume -Context $Context -Program $Program -Vmx $Vmx -Assume $false -Row $row) { $running = $true; break }
+        if ($waited -ge $StartSeconds) { break }
+        Invoke-PvmSleep -Seconds 2
+    }
+    if (-not $running) {
+        Enter-PvmStep -Context $Context -Name 'disarm'
+        $disarmed = Invoke-PvmDisarmAfterStop -Context $Context -Program $Program -Disk $Disk -Copies $Copies
+        $template = if ($disarmed) { "{VM} did not start in {Program} within {Seconds} s, so the launcher pointed its disk file away from the stick again. {Program}'s window may say why; then start {vm} again." }
+        else { "{VM} did not start in {Program} within {Seconds} s. {Program}'s window may say why; then start {vm} again." }
+        $message = Format-PvmMessage -Names $Context.Names -Values @{ Program = $Program; Seconds = $StartSeconds } -Template $template
+        if ($row.Failures) { $message += "`n`nThe launcher could not check whether it runs: $($row.Cause)" }
+        if (-not $disarmed) { $message += "`n`n$(Get-PvmStillArmedText -Context $Context -Disk $Disk)" }
+        throw (Get-PvmStopException -Message $message)
+    }
+    Write-PvmLog -Path $log -Message "Running in $Program; the launcher watches the VM and points its disk file away from the stick when it ends"
+    Enter-PvmStep -Context $Context -Name 'watch'
+    $started = Get-Date
+    $row = @{ Failures = 0; Cause = '' }
+    while (Test-PvmVmRunningOrAssume -Context $Context -Program $Program -Vmx $Vmx -Assume $true -Row $row) {
+        # A check that keeps failing would keep the launcher, and its lock, waiting for good; the
+        # first failure of the row and $FailedChecks sleeps make $FailedChecks * $PollSeconds.
+        if ($row.Failures -gt $FailedChecks) {
+            throw (Get-PvmStopException -Message (Format-PvmMessage -Names $Context.Names -Values @{ Seconds = $FailedChecks * $PollSeconds; Name = [IO.Path]::GetFileName($Disk); Cause = $row.Cause } -Template (
+                        "For {Seconds} s the launcher could not check whether {vm} still runs, so it stopped watching it. {Name} names the stick's disk until the next start through the launcher sets it right.`n`n{Cause}")))
+        }
+        Invoke-PvmSleep -Seconds $PollSeconds
+    }
+    Write-PvmLog -Path $log -Message "The VM has ended, after $([int][Math]::Round(((Get-Date) - $started).TotalMinutes)) min"
+    Enter-PvmStep -Context $Context -Name 'disarm'
+    $name = [IO.Path]::GetFileName($Disk)
+    # VirtualBox's background service may still hold the file, so a first try that fails there is
+    # tried once more after it has ended.
+    $disarmed = Invoke-PvmDisarm -Context $Context -Disk $Disk -Copies $Copies -Quiet:($Program -eq 'VirtualBox')
+    if ($Program -ne 'VirtualBox') { return }
+    Wait-PvmProcessExit -Name 'VBoxSVC' -TimeoutSeconds 60
+    if (Invoke-PvmTestProcess -Name 'VBoxSVC') {
+        Write-PvmLog -Path $log -Message "Note: VirtualBox's background service still ran 60 s after the VM ended, so the launcher read $name once more without waiting longer"
+    }
+    if (-not $disarmed) {
+        $null = Invoke-PvmDisarm -Context $Context -Disk $Disk -Copies $Copies
+        return
+    }
+    try { $text = ConvertFrom-PvmDescriptorData -Bytes ([IO.File]::ReadAllBytes($Disk)) }
+    catch {
+        Write-PvmLog -Path $log -Message "Note: $name could not be read once more after VirtualBox's background service ended: $(Get-PvmErrorText -ErrorRecord $_)"
+        return
+    }
+    if ((ConvertTo-PvmDisarmedDescriptorText -Text $text) -cne $text) {
+        Write-PvmLog -Path $log -Message "${name}: pointed at the stick again after the VM ended, so the launcher pointed it away once more"
+        $null = Invoke-PvmDisarm -Context $Context -Disk $Disk -Copies $Copies
+    }
 }
 
 # --- Launch ----------------------------------------------------------------------------------

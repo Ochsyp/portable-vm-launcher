@@ -187,9 +187,11 @@ Describe 'Launcher sources' {
         $text | Should -Match ([regex]::Escape('Invoke-PortableVM -LauncherPath $Here -DryRun:$DryRun -AskResume $ask -AskFix $ask'))
     }
 
-    It 'keep the administrator-rights block of the script exactly as it was before the redesign' {
-        # The 12 lines from '# --- Administrator rights', joined with LF, as of commit b19dbff.
-        $adminBlockSha256 = 'c0a699741785a202c42dec700de4091aab912c898ae66800d6708502c354efa7'
+    It 'keep the administrator-rights block of the script exactly as phase 9 left it' {
+        # The 12 lines from '# --- Administrator rights', joined with LF. They were as of commit
+        # b19dbff until phase 9 (d239) started the run with administrator rights hidden instead
+        # of minimized, since that run now watches the VM while it runs.
+        $adminBlockSha256 = '59675acfdd0516a114604bdea93e2ff18ead8c96791edbc82a9de25447364964'
         $lines = [IO.File]::ReadAllLines($script:launcher)
         $first = [Array]::IndexOf($lines, '# --- Administrator rights -------------------------------------------------------------')
         $first | Should -BeGreaterThan 0
@@ -198,6 +200,16 @@ Describe 'Launcher sources' {
         try { $actual = ($sha.ComputeHash($block) | ForEach-Object { $_.ToString('x2') }) -join '' }
         finally { $sha.Dispose() }
         $actual | Should -BeExactly $adminBlockSha256
+    }
+
+    It 'start the run with administrator rights hidden, since it watches the VM while it runs (d239)' {
+        $elevate = (Get-SourceAst -Path $script:launcher).Find({
+                $args[0] -is [System.Management.Automation.Language.CommandAst] -and $args[0].GetCommandName() -eq 'Start-Process' -and $args[0].Extent.Text -match 'RunAs'
+            }, $true)
+        $elevate | Should -Not -BeNullOrEmpty
+        $elevate.Extent.Text | Should -Match '-WindowStyle Hidden\b'
+        $elevate.Extent.Text | Should -Match ([regex]::Escape("'-WindowStyle', 'Hidden'"))
+        $elevate.Extent.Text | Should -Not -Match 'Minimized'
     }
 
     It 'keep the start line of Start VM.cmd as it was before the redesign' {

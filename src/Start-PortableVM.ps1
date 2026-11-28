@@ -8,11 +8,16 @@
     - checks the settings and names every setting that is wrong,
     - finds which disk number the stick has on this PC and checks that it really is
       this stick (MBR signature, size, partition layout) - otherwise nothing starts,
-    - points the VM's raw-disk file at that disk number,
+    - reads the stick's identity once more, then points the VM's raw-disk file at that disk
+      number ("arms" it), and checks that the VM starts,
+    - stays in the background while the VM runs, hidden, and points the raw-disk file away from
+      the stick again when the VM has ended ("disarms" it), as the README's "Arm, verify, watch"
+      says,
     - fixes the stick's drive letter in the VirtualBox files,
     - refuses to start the VM in one program while it has a saved state in the other.
-  One run at a time: a start or a dry run holds the lock Global\PortableVM-Launcher, and a
-  second double-click meanwhile says so before it asks for administrator rights.
+  One run at a time: a start or a dry run holds the lock Global\PortableVM-Launcher, a start
+  until the VM has ended, and a second double-click meanwhile says so before it asks for
+  administrator rights.
 
   The checks and start steps are in PortableVM.psm1 next to this script.
   Settings: ..\LauncherData\settings.psd1. Log: ..\LauncherData\logs\launcher.log, as the
@@ -224,7 +229,7 @@ function Test-LockHeld([string]$Name) {
 function Invoke-RightsRequest {
     if ($DryRun -or (Test-Administrator)) { return }
     if (Test-LockHeld -Name 'Global\PortableVM-Launcher') {
-        $message = 'Another run of the launcher is in progress on this PC: a start of the VM or a dry run. Wait until it has finished, then start the VM again if it is not running. Nothing was started.'
+        $message = 'Another run of the launcher is in progress on this PC: a start of the VM or a dry run, or the launcher watching the VM while it runs. If the VM runs, nothing needs doing; otherwise wait until that run has finished, then start the VM again. Nothing was started.'
         $message = Add-LogNote -Message $message -Problem (Add-StopLine -Message $message)
         return [pscustomobject]@{ ExitCode = 1; Message = $message; Icon = 'Error'; Caption = 'Portable VM' }
     }
@@ -256,8 +261,8 @@ $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $isAdmin = (New-Object Security.Principal.WindowsPrincipal $identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin -and -not $DryRun) {
     try {
-        Start-Process powershell.exe -Verb RunAs -WindowStyle Minimized `
-            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+        Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden `
+            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$PSCommandPath`"")
     } catch {
         Show-Message 'The launcher needs administrator rights, because the VM boots this USB stick directly.' 'Warning'
     }

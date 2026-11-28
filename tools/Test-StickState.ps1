@@ -264,8 +264,18 @@ function Invoke-StickState {
                                 # A start in either program writes the same layout (Get-PvmStartLayout).
                                 $layout = Get-PvmDiskLayout -Drive $device -VmSectors $settings['VmSectors'] -DataPartitionStart $settings['DataPartitionStart']
                                 $new = ConvertTo-PvmDescriptorText -Text $text -Layout $layout
-                                if (Test-PvmSameDescriptorText -Old $text -New $new) { 'yes' }
-                                else { "no; the next start rewrites it because $(Format-PvmDescriptorReason -Kinds @(Get-PvmDescriptorDifference -Old $text -New $new))" }
+                                # At rest a start leaves the file disarmed; armed, it needs a VM
+                                # that runs, or attention.
+                                if (Test-PvmSameDescriptorText -Old $text -New $new) {
+                                    if (@(Get-CompareVmProcess).Count) { 'yes, while a VM runs' }
+                                    else {
+                                        $armed = 'a disk file that points at the stick while no VM runs'
+                                        if (-not $attention.Contains($armed)) { $attention.Add($armed) }
+                                        'yes, although no VM runs'
+                                    }
+                                } elseif (Test-PvmSameDescriptorText -Old $text -New (ConvertTo-PvmDisarmedDescriptorText -Text $new)) {
+                                    'no, it is disarmed: it names no disk until a start points it at the stick'
+                                } else { "no; the next start rewrites it because $(Format-PvmDescriptorReason -Kinds @(Get-PvmDescriptorDifference -Old $text -New $new))" }
                             }
                         } catch [IO.IOException] {
                             'unknown, since it cannot be read now'
